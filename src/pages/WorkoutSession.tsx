@@ -1,31 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Check, GripVertical } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, addDoc, serverTimestamp, updateDoc, doc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  TouchSensor,
-  useSensor,
-  useSensors,
-  DragEndEvent,
-} from '@dnd-kit/core';
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-} from '@dnd-kit/sortable';
-import {
-  useSortable,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 
 interface Exercise {
   id: string;
@@ -130,10 +110,13 @@ export default function WorkoutSession() {
   const [isAddingExercise, setIsAddingExercise] = useState(false);
   const [newExerciseName, setNewExerciseName] = useState('');
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } })
-  );
+  const moveExercise = (index: number, direction: 'up' | 'down') => {
+    const newExercises = [...exercises];
+    const swapIndex = direction === 'up' ? index - 1 : index + 1;
+    if (swapIndex < 0 || swapIndex >= newExercises.length) return;
+    [newExercises[index], newExercises[swapIndex]] = [newExercises[swapIndex], newExercises[index]];
+    setExercises(newExercises);
+  };
 
   // Initialize workout from template
   useEffect(() => {
@@ -272,104 +255,7 @@ export default function WorkoutSession() {
     setIsAddingExercise(false);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-
-    if (active.id !== over?.id) {
-      setExercises((items) => {
-        const oldIndex = items.findIndex((item) => item.id === active.id);
-        const newIndex = items.findIndex((item) => item.id === over?.id);
-
-        return arrayMove(items, oldIndex, newIndex);
-      });
-    }
-  };
-
-  // SortableExercise component
-const SortableExercise = ({ exercise, onAddSet, onUpdateSet, onRemove }: {
-  exercise: Exercise;
-  onAddSet: (exerciseId: string) => void;
-  onUpdateSet: (exerciseId: string, setIndex: number, field: 'reps' | 'weight', value: string) => void;
-  onRemove: (exerciseId: string) => void;
-}) => {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-  } = useSortable({ id: exercise.id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-  };
-
-  return (
-    <div ref={setNodeRef} style={style} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center space-x-3">
-          <div
-            {...attributes}
-            {...listeners}
-            className="cursor-grab active:cursor-grabbing text-slate-400 hover:text-white p-1"
-          >
-            <GripVertical className="w-5 h-5" />
-          </div>
-          <div>
-            <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
-            {exercise.note && (
-              <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
-            )}
-          </div>
-        </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => onRemove(exercise.id)}
-          className="text-slate-400 hover:text-red-400"
-        >
-          <Trash2 className="w-4 h-4" />
-        </Button>
-      </div>
-
-      <div className="space-y-3">
-        {exercise.sets.map((set, setIndex) => (
-          <div key={setIndex} className="flex items-center space-x-3">
-            <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
-            <input
-              type="text"
-              placeholder="Reps"
-              value={set.reps}
-              onChange={(e) => onUpdateSet(exercise.id, setIndex, 'reps', e.target.value)}
-              className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-            />
-            {(exercise.hasWeight !== false) && (
-              <input
-                type="text"
-                placeholder="kg"
-                value={set.weight}
-                onChange={(e) => onUpdateSet(exercise.id, setIndex, 'weight', e.target.value)}
-                className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-              />
-            )}
-          </div>
-        ))}
-      </div>
-
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => onAddSet(exercise.id)}
-        className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
-      >
-        <Plus className="w-4 h-4 mr-2" />
-        Add Set
-      </Button>
-    </div>
-  );
-};
-
+  
   const finishWorkout = async () => {
     if (!user) return;
 
@@ -441,26 +327,74 @@ const SortableExercise = ({ exercise, onAddSet, onUpdateSet, onRemove }: {
             }}
           />
         </div>
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
-        >
-          <SortableContext
-            items={exercises.map(ex => ex.id)}
-            strategy={verticalListSortingStrategy}
-          >
-            {exercises.map((exercise) => (
-              <SortableExercise
-                key={exercise.id}
-                exercise={exercise}
-                onAddSet={addSet}
-                onUpdateSet={updateSet}
-                onRemove={removeExercise}
-              />
-            ))}
-          </SortableContext>
-        </DndContext>
+        {exercises.map((exercise, index) => (
+          <div key={exercise.id} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+                {exercise.note && (
+                  <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <button
+                    onClick={() => moveExercise(index, 'up')}
+                    disabled={index === 0}
+                    style={{ background: 'none', border: 'none', color: index === 0 ? '#374151' : '#6b7280', cursor: index === 0 ? 'default' : 'pointer', padding: '2px 4px', fontSize: '12px' }}
+                  >▲</button>
+                  <button
+                    onClick={() => moveExercise(index, 'down')}
+                    disabled={index === exercises.length - 1}
+                    style={{ background: 'none', border: 'none', color: index === exercises.length - 1 ? '#374151' : '#6b7280', cursor: index === exercises.length - 1 ? 'default' : 'pointer', padding: '2px 4px', fontSize: '12px' }}
+                  >▼</button>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => removeExercise(exercise.id)}
+                  className="text-slate-400 hover:text-red-400"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {exercise.sets.map((set, setIndex) => (
+                <div key={setIndex} className="flex items-center space-x-3">
+                  <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
+                  <input
+                    type="text"
+                    placeholder="Reps"
+                    value={set.reps}
+                    onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                  {(exercise.hasWeight !== false) && (
+                    <input
+                      type="text"
+                      placeholder="kg"
+                      value={set.weight}
+                      onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => addSet(exercise.id)}
+              className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Add Set
+            </Button>
+          </div>
+        ))}
 
         {/* Add Exercise Button */}
         {!isAddingExercise && (
