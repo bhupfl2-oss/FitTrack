@@ -1,11 +1,31 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Check, GripVertical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, addDoc, serverTimestamp, updateDoc, doc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import {
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 interface Exercise {
   id: string;
@@ -106,6 +126,13 @@ export default function WorkoutSession() {
   const [editingSession, setEditingSession] = useState<any>(null);
   const [sessionDate, setSessionDate] = useState<string>(
     new Date().toISOString().split('T')[0]  // defaults to today in YYYY-MM-DD format
+  );
+  const [isAddingExercise, setIsAddingExercise] = useState(false);
+  const [newExerciseName, setNewExerciseName] = useState('');
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } })
   );
 
   // Initialize workout from template
@@ -226,6 +253,123 @@ export default function WorkoutSession() {
     setExercises(exercises.filter(exercise => exercise.id !== exerciseId));
   };
 
+  const addExercise = () => {
+    if (newExerciseName.trim()) {
+      const newExercise: Exercise = {
+        id: `exercise-${Date.now()}`,
+        name: newExerciseName.trim(),
+        hasWeight: true,
+        sets: Array.from({ length: 3 }, () => ({ reps: '', weight: '' }))
+      };
+      setExercises([...exercises, newExercise]);
+      setNewExerciseName('');
+      setIsAddingExercise(false);
+    }
+  };
+
+  const cancelAddExercise = () => {
+    setNewExerciseName('');
+    setIsAddingExercise(false);
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (active.id !== over?.id) {
+      setExercises((items) => {
+        const oldIndex = items.findIndex((item) => item.id === active.id);
+        const newIndex = items.findIndex((item) => item.id === over?.id);
+
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
+  };
+
+  // SortableExercise component
+const SortableExercise = ({ exercise, onAddSet, onUpdateSet, onRemove }: {
+  exercise: Exercise;
+  onAddSet: (exerciseId: string) => void;
+  onUpdateSet: (exerciseId: string, setIndex: number, field: 'reps' | 'weight', value: string) => void;
+  onRemove: (exerciseId: string) => void;
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: exercise.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center space-x-3">
+          <div
+            {...attributes}
+            {...listeners}
+            className="cursor-grab active:cursor-grabbing text-slate-400 hover:text-white p-1"
+          >
+            <GripVertical className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+            {exercise.note && (
+              <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
+            )}
+          </div>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onRemove(exercise.id)}
+          className="text-slate-400 hover:text-red-400"
+        >
+          <Trash2 className="w-4 h-4" />
+        </Button>
+      </div>
+
+      <div className="space-y-3">
+        {exercise.sets.map((set, setIndex) => (
+          <div key={setIndex} className="flex items-center space-x-3">
+            <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
+            <input
+              type="text"
+              placeholder="Reps"
+              value={set.reps}
+              onChange={(e) => onUpdateSet(exercise.id, setIndex, 'reps', e.target.value)}
+              className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+            />
+            {(exercise.hasWeight !== false) && (
+              <input
+                type="text"
+                placeholder="kg"
+                value={set.weight}
+                onChange={(e) => onUpdateSet(exercise.id, setIndex, 'weight', e.target.value)}
+                className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              />
+            )}
+          </div>
+        ))}
+      </div>
+
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => onAddSet(exercise.id)}
+        className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
+      >
+        <Plus className="w-4 h-4 mr-2" />
+        Add Set
+      </Button>
+    </div>
+  );
+};
+
   const finishWorkout = async () => {
     if (!user) return;
 
@@ -297,60 +441,69 @@ export default function WorkoutSession() {
             }}
           />
         </div>
-        {exercises.map((exercise) => (
-          <div key={exercise.id} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
-                {exercise.note && (
-                  <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
-                )}
-              </div>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleDragEnd}
+        >
+          <SortableContext
+            items={exercises.map(ex => ex.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            {exercises.map((exercise) => (
+              <SortableExercise
+                key={exercise.id}
+                exercise={exercise}
+                onAddSet={addSet}
+                onUpdateSet={updateSet}
+                onRemove={removeExercise}
+              />
+            ))}
+          </SortableContext>
+        </DndContext>
+
+        {/* Add Exercise Button */}
+        {!isAddingExercise && (
+          <Button
+            variant="outline"
+            onClick={() => setIsAddingExercise(true)}
+            className="w-full border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Add Exercise
+          </Button>
+        )}
+
+        {/* Add Exercise Input Row */}
+        {isAddingExercise && (
+          <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
+            <div className="flex items-center space-x-3">
+              <input
+                type="text"
+                placeholder="Exercise name"
+                value={newExerciseName}
+                onChange={(e) => setNewExerciseName(e.target.value)}
+                className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                autoFocus
+              />
               <Button
+                onClick={addExercise}
+                size="sm"
+                className="bg-emerald-500 hover:bg-emerald-600 text-white"
+              >
+                <Check className="w-4 h-4" />
+              </Button>
+              <Button
+                onClick={cancelAddExercise}
                 variant="ghost"
                 size="sm"
-                onClick={() => removeExercise(exercise.id)}
-                className="text-slate-400 hover:text-red-400"
+                className="text-slate-400 hover:text-white"
               >
                 <Trash2 className="w-4 h-4" />
               </Button>
             </div>
-
-            <div className="space-y-3">
-              {exercise.sets.map((set, setIndex) => (
-                <div key={setIndex} className="flex items-center space-x-3">
-                  <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
-                  <input
-                    type="text"
-                    placeholder="Reps"
-                    value={set.reps}
-                    onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                  />
-                  {(exercise.hasWeight !== false) && (
-                    <input
-                      type="text"
-                      placeholder="kg"
-                      value={set.weight}
-                      onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
-                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                    />
-                  )}
-                </div>
-              ))}
-            </div>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => addSet(exercise.id)}
-              className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Set
-            </Button>
           </div>
-        ))}
+        )}
 
         <Button
           onClick={finishWorkout}

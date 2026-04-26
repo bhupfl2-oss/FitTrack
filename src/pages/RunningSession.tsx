@@ -19,6 +19,9 @@ export default function RunningSession() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [isSaving, setIsSaving] = useState(false);
+  const [sessionDate, setSessionDate] = useState<string>(
+    new Date().toISOString().split('T')[0]  // defaults to today in YYYY-MM-DD format
+  );
   const [session, setSession] = useState<RunningSession>({
     effortType: 'recovery',
     surface: 'road',
@@ -68,7 +71,7 @@ export default function RunningSession() {
       
       await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), cleanData({
         type: 'running',
-        date: new Date().toISOString().split('T')[0],
+        date: sessionDate,
         effortType: session.effortType,
         surface: session.surface,
         distanceKm: session.distanceKm,
@@ -100,6 +103,27 @@ export default function RunningSession() {
           </button>
           <h1 className="text-xl font-semibold">Running Session</h1>
           <div className="w-9" />
+        </div>
+
+        {/* Date Picker */}
+        <div className="mb-6">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '13px', color: '#6b7280' }}>Date</span>
+            <input
+              type="date"
+              value={sessionDate}
+              max={new Date().toISOString().split('T')[0]}
+              onChange={(e) => setSessionDate(e.target.value)}
+              style={{
+                background: '#1a2332',
+                border: '0.5px solid rgba(255,255,255,0.12)',
+                borderRadius: '8px',
+                color: '#e2e8f0',
+                padding: '6px 10px',
+                fontSize: '13px',
+              }}
+            />
+          </div>
         </div>
 
         {/* Effort Type Selector */}
