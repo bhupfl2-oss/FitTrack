@@ -53,6 +53,9 @@ const workoutTemplates = {
   'Push': { groups: ['Chest', 'Shoulders', 'Triceps'], duration: 45 },
   'Pull': { groups: ['Back', 'Biceps'], duration: 40 },
   'Legs': { groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves'], duration: 50 },
+  'Running': { groups: ['Cardio', 'Endurance'], duration: 30 },
+  'Upper': { groups: ['Chest', 'Back', 'Shoulders'], duration: 55 },
+  'Lower': { groups: ['Quads', 'Hamstrings', 'Glutes'], duration: 45 },
 };
 
 export default function Home() {
@@ -125,7 +128,8 @@ export default function Home() {
     const rotation: { [key: string]: string } = {
       'Push': 'Pull',
       'Pull': 'Legs',
-      'Legs': 'Push',
+      'Legs': 'Running',
+      'Running': 'Push',
     };
     
     return rotation[lastTemplate] || 'Push';
@@ -320,10 +324,10 @@ export default function Home() {
           </div>
           
           <button
-            onClick={() => navigate('/workout-session')}
+            onClick={() => suggestedWorkout === 'Running' ? navigate('/running-session') : navigate('/workout-session')}
             className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-3 rounded-lg font-medium transition-colors"
           >
-            {suggestedWorkout ? 'Start Workout →' : 'Choose Template →'}
+            {suggestedWorkout ? `Start ${suggestedWorkout} →` : 'Choose Template →'}
           </button>
         </div>
 

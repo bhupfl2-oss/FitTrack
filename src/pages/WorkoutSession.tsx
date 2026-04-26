@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, updateDoc, doc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
@@ -84,11 +84,42 @@ export default function WorkoutSession() {
   const [template, setTemplate] = useState<string>('');
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [isSaving, setIsSaving] = useState(false);
+  const [editingSession, setEditingSession] = useState<any>(null);
 
   // Initialize workout from template
   useEffect(() => {
     const templateType = location.state?.template;
-    if (templateType && workoutTemplates[templateType]) {
+    const editSession = location.state?.editSession;
+    
+    // Handle editing existing session
+    if (editSession) {
+      setEditingSession(editSession);
+      setTemplate(editSession.template);
+      setExercises(
+        editSession.exercises?.map((exercise: any, index: number) => ({
+          id: `exercise-${index}`,
+          name: exercise.name,
+          sets: exercise.sets || [{ reps: '', weight: '' }]
+        })) || []
+      );
+    }
+    // Handle custom workouts
+    else if (templateType === 'custom' && location.state?.customWorkout) {
+      const customWorkout = location.state.customWorkout;
+      setTemplate(customWorkout.name);
+      setExercises(
+        customWorkout.exercises.map((exercise: any, index: number) => ({
+          id: `exercise-${index}`,
+          name: exercise.name,
+          sets: Array.from({ length: exercise.defaultSets || 3 }, () => ({
+            reps: '',
+            weight: ''
+          }))
+        }))
+      );
+    }
+    // Handle default template workouts
+    else if (templateType && workoutTemplates[templateType]) {
       const workoutTemplate = workoutTemplates[templateType];
       setTemplate(workoutTemplate.name);
       setExercises(
@@ -187,10 +218,17 @@ export default function WorkoutSession() {
             weight: parseFloat(set.weight) || 0
           }))
         })),
-        createdAt: serverTimestamp(),
+        type: 'workout',
       });
 
-      await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), workoutData);
+      if (editingSession) {
+        // Update existing session
+        await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', editingSession.id), workoutData);
+      } else {
+        // Create new session
+        await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), { ...workoutData, createdAt: serverTimestamp() });
+      }
+      
       navigate('/workouts');
     } catch (error) {
       console.error('Error saving workout:', error);
