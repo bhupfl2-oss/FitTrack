@@ -1,4 +1,4 @@
-# Forge
+# FitTrack
 
 Personal fitness tracking web app for your data, your trends.
 

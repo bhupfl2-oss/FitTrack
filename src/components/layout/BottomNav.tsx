@@ -21,7 +21,7 @@ export default function BottomNav() {
               key={path}
               to={path}
               className={`flex flex-col items-center justify-center space-y-1 transition-colors ${
-                isActive ? "text-blue-400" : "text-slate-500"
+                isActive ? "text-emerald-400" : "text-slate-500"
               }`}
             >
               <Icon size={20} />
