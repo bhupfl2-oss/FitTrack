@@ -252,25 +252,7 @@ export default function Body() {
     return parseFloat(result.toFixed(1));
   };
 
-  // Derived fat/lean mass helpers
-  const calcFatMass = (entry: BodyStats | null): number | null => {
-    if (!entry) return null;
-    const w = entry.weightKg != null ? Number(entry.weightKg) : null;
-    const p = entry.pbf != null ? Number(entry.pbf) : null;
-    if (w == null || p == null || isNaN(w) || isNaN(p)) return null;
-    return parseFloat((w * (p / 100)).toFixed(1));
-  };
 
-  const fatMass = calcFatMass(latestEntry);
-  const fatMassStart = calcFatMass(rangeStartEntry);
-  const fatMassDelta = fatMass != null && fatMassStart != null && !isNaN(fatMass) && !isNaN(fatMassStart)
-    ? parseFloat((fatMass - fatMassStart).toFixed(1)) : null;
-  const leanMass = latestEntry?.weightKg != null && fatMass != null && !isNaN(Number(latestEntry.weightKg)) && !isNaN(fatMass)
-    ? parseFloat((Number(latestEntry.weightKg) - fatMass).toFixed(1)) : null;
-  const leanMassStart = rangeStartEntry?.weightKg != null && fatMassStart != null
-    ? parseFloat((Number(rangeStartEntry.weightKg) - fatMassStart).toFixed(1)) : null;
-  const leanMassDelta = leanMass != null && leanMassStart != null
-    ? parseFloat((leanMass - leanMassStart).toFixed(1)) : null;
 
   const insightText = (() => {
     if (!latestEntry || !rangeStartEntry) return '';
@@ -478,22 +460,22 @@ export default function Body() {
           const isWeightLoss = activeGoal.metric === 'weight';
           let progress = 0;
           let statusText = '';
-          let isGoalReached = false;
+
 
           if (isWeightLoss) {
             const startWeight = bodyStats[bodyStats.length - 1]?.weightKg != null ? Number(bodyStats[bodyStats.length - 1].weightKg) : currentValue;
             const totalToLose = startWeight - targetValue;
             const lostSoFar = startWeight - currentValue;
             if (totalToLose > 0) progress = Math.max(0, Math.min(100, (lostSoFar / totalToLose) * 100));
-            if (currentValue <= targetValue) { isGoalReached = true; statusText = 'Goal reached! 🎉'; }
+            if (currentValue <= targetValue) { statusText = 'Goal reached! 🎉'; }
             else statusText = `${fmt(currentValue - targetValue)}${getMetricUnit(activeGoal.metric)} to go`;
           } else if (activeGoal.metric === 'pbf') {
             if (targetValue > 0) progress = Math.max(0, Math.min(100, ((targetValue - currentValue) / targetValue) * 100));
-            if (currentValue <= targetValue) { isGoalReached = true; statusText = 'Goal reached! 🎉'; }
+            if (currentValue <= targetValue) { statusText = 'Goal reached! 🎉'; }
             else statusText = `${fmt(currentValue - targetValue)}% to go`;
           } else {
             if (targetValue > 0) progress = Math.max(0, Math.min(100, (currentValue / targetValue) * 100));
-            if (currentValue >= targetValue) { isGoalReached = true; statusText = 'Goal reached! 🎉'; }
+            if (currentValue >= targetValue) { statusText = 'Goal reached! 🎉'; }
             else statusText = `${fmt(targetValue - currentValue)}${getMetricUnit(activeGoal.metric)} to go`;
           }
 

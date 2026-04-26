@@ -10,6 +10,8 @@ import { cleanData } from '@/lib/cleanData';
 interface Exercise {
   id: string;
   name: string;
+  hasWeight?: boolean;
+  note?: string;
   sets: Set[];
 }
 
@@ -27,31 +29,48 @@ const workoutTemplates: Record<string, WorkoutTemplate> = {
   push: {
     name: 'Push Day',
     exercises: [
-      { name: 'Bench Press', sets: [{ reps: '', weight: '' }] },
-      { name: 'Overhead Press', sets: [{ reps: '', weight: '' }] },
-      { name: 'Incline Dumbbell Press', sets: [{ reps: '', weight: '' }] },
-      { name: 'Tricep Pushdown', sets: [{ reps: '', weight: '' }] },
-      { name: 'Lateral Raise', sets: [{ reps: '', weight: '' }] },
+      { name: 'Treadmill Warm Up', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
+      { name: 'Pushups', hasWeight: false, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Incline Bench Press Machine', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Flat Bench Press Machine', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Incline Dumbbell Press', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Flat Dumbbell Press', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Dumbbell Fly', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Lateral Dumbbell Raise', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Triceps Pushdown', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Cable Tricep Overhead Extension', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Standing Dumbbell Overhead Tricep Extension', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Stretches', hasWeight: false, sets: [{ reps: '', weight: '' }] },
+      { name: 'Cool Down Treadmill', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
     ],
   },
   pull: {
     name: 'Pull Day',
     exercises: [
-      { name: 'Deadlift', sets: [{ reps: '', weight: '' }] },
-      { name: 'Pull-ups', sets: [{ reps: '', weight: '' }] },
-      { name: 'Barbell Row', sets: [{ reps: '', weight: '' }] },
-      { name: 'Face Pull', sets: [{ reps: '', weight: '' }] },
-      { name: 'Bicep Curl', sets: [{ reps: '', weight: '' }] },
+      { name: 'Treadmill Warm Up', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
+      { name: 'Pull Ups', hasWeight: false, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Lat Pulldown', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Seated Cable Row', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Close Grip Lat Pulldown', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Deadlift', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Dumbbell Shrugs', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Lower Back Extension', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Dumbbell Bicep Curl', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Dumbbell Hammer Curl', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Cool Down Treadmill', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
     ],
   },
   legs: {
     name: 'Legs Day',
     exercises: [
-      { name: 'Squat', sets: [{ reps: '', weight: '' }] },
-      { name: 'Romanian Deadlift', sets: [{ reps: '', weight: '' }] },
-      { name: 'Leg Press', sets: [{ reps: '', weight: '' }] },
-      { name: 'Leg Curl', sets: [{ reps: '', weight: '' }] },
-      { name: 'Calf Raise', sets: [{ reps: '', weight: '' }] },
+      { name: 'Treadmill Warm Up', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
+      { name: 'Squats', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Walking Lunges', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Leg Extension', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Leg Curl', hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Calf Raises', hasWeight: false, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] },
+      { name: 'Stretches', hasWeight: false, sets: [{ reps: '', weight: '' }] },
+      { name: 'Cool Down Treadmill', hasWeight: false, note: '5 mins', sets: [{ reps: '', weight: '' }] },
     ],
   },
   upper: {
@@ -85,6 +104,9 @@ export default function WorkoutSession() {
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [editingSession, setEditingSession] = useState<any>(null);
+  const [sessionDate, setSessionDate] = useState<string>(
+    new Date().toISOString().split('T')[0]  // defaults to today in YYYY-MM-DD format
+  );
 
   // Initialize workout from template
   useEffect(() => {
@@ -95,6 +117,7 @@ export default function WorkoutSession() {
     if (editSession) {
       setEditingSession(editSession);
       setTemplate(editSession.template);
+      setSessionDate(editSession.date || new Date().toISOString().split('T')[0]);
       setExercises(
         editSession.exercises?.map((exercise: any, index: number) => ({
           id: `exercise-${index}`,
@@ -209,13 +232,13 @@ export default function WorkoutSession() {
     setIsSaving(true);
     try {
       const workoutData = cleanData({
-        date: new Date().toISOString().split('T')[0],
+        date: sessionDate,  // YYYY-MM-DD string — replace whatever is currently used for date
         template: template.toLowerCase().replace(' ', ''),
         exercises: exercises.map(({ id, ...exercise }) => ({
           ...exercise,
           sets: exercise.sets.map(set => ({
             reps: parseInt(set.reps) || 0,
-            weight: parseFloat(set.weight) || 0
+            weight: set.weight.trim() === '' ? null : (parseFloat(set.weight) || null)
           }))
         })),
         type: 'workout',
@@ -257,10 +280,32 @@ export default function WorkoutSession() {
       </div>
 
       <div className="p-6 space-y-6">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+          <span style={{ fontSize: '13px', color: '#6b7280' }}>Date</span>
+          <input
+            type="date"
+            value={sessionDate}
+            max={new Date().toISOString().split('T')[0]}
+            onChange={(e) => setSessionDate(e.target.value)}
+            style={{
+              background: '#1a2332',
+              border: '0.5px solid rgba(255,255,255,0.12)',
+              borderRadius: '8px',
+              color: '#e2e8f0',
+              padding: '6px 10px',
+              fontSize: '13px',
+            }}
+          />
+        </div>
         {exercises.map((exercise) => (
           <div key={exercise.id} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+              <div>
+                <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+                {exercise.note && (
+                  <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
+                )}
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
@@ -282,13 +327,15 @@ export default function WorkoutSession() {
                     onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
                     className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
                   />
-                  <input
-                    type="text"
-                    placeholder="Weight (kg)"
-                    value={set.weight}
-                    onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                  />
+                  {(exercise.hasWeight !== false) && (
+                    <input
+                      type="text"
+                      placeholder="kg"
+                      value={set.weight}
+                      onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                    />
+                  )}
                 </div>
               ))}
             </div>
