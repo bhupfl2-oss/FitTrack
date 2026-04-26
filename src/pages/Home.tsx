@@ -17,7 +17,7 @@ interface WorkoutSession {
 interface BodyStats {
   id: string;
   date: string;
-  weight: number;
+  weightKg: number;
   pbf: number;
   smm?: number;
   createdAt: any;
@@ -175,14 +175,21 @@ export default function Home() {
     const current = bodyStats[0];
     const previous = bodyStats[1];
     
-    const weightDelta = current.weight - previous.weight;
+    const currentWeight = current.weightKg != null ? Number(current.weightKg) : null;
+    const previousWeight = previous.weightKg != null ? Number(previous.weightKg) : null;
+    
+    if (currentWeight == null || previousWeight == null || isNaN(currentWeight) || isNaN(previousWeight)) {
+      return null;
+    }
+    
+    const weightDelta = currentWeight - previousWeight;
     const isImprovement = weightDelta < 0; // Weight loss is improvement
     
     return {
       value: weightDelta,
       isImprovement,
-      current: current.weight,
-      previous: previous.weight
+      current: currentWeight,
+      previous: previousWeight
     };
   };
 
@@ -192,8 +199,18 @@ export default function Home() {
     const current = bodyStats[0];
     const previous = bodyStats[1];
     
-    const currentFatMass = current.weight * (current.pbf / 100);
-    const previousFatMass = previous.weight * (previous.pbf / 100);
+    const currentWeight = current.weightKg != null ? Number(current.weightKg) : null;
+    const currentPBF = current.pbf != null ? Number(current.pbf) : null;
+    const previousWeight = previous.weightKg != null ? Number(previous.weightKg) : null;
+    const previousPBF = previous.pbf != null ? Number(previous.pbf) : null;
+    
+    if (currentWeight == null || currentPBF == null || previousWeight == null || previousPBF == null ||
+        isNaN(currentWeight) || isNaN(currentPBF) || isNaN(previousWeight) || isNaN(previousPBF)) {
+      return 'hold';
+    }
+    
+    const currentFatMass = currentWeight * (currentPBF / 100);
+    const previousFatMass = previousWeight * (previousPBF / 100);
     
     const change = currentFatMass - previousFatMass;
     
@@ -203,12 +220,16 @@ export default function Home() {
   };
 
   const getMuscleStatus = () => {
-    if (bodyStats.length < 2 || !bodyStats[0].smm || !bodyStats[1].smm) return 'steady';
+    if (bodyStats.length < 2) return 'steady';
     
-    const current = bodyStats[0].smm!;
-    const previous = bodyStats[1].smm!;
+    const currentSMM = bodyStats[0].smm != null ? Number(bodyStats[0].smm) : null;
+    const previousSMM = bodyStats[1].smm != null ? Number(bodyStats[1].smm) : null;
     
-    const change = current - previous;
+    if (currentSMM == null || previousSMM == null || isNaN(currentSMM) || isNaN(previousSMM)) {
+      return 'steady';
+    }
+    
+    const change = currentSMM - previousSMM;
     
     if (change > 0.5) return 'strong';
     if (change < -0.5) return 'improve';
@@ -379,9 +400,9 @@ export default function Home() {
             <div className="flex items-center justify-between mb-3">
               <div>
                 <div className="text-2xl font-bold text-white mb-1">
-                  {bodyStats[0].weight} kg
+                  {bodyDelta?.current != null ? `${bodyDelta.current} kg` : '--'}
                 </div>
-                {bodyDelta && (
+                {bodyDelta && bodyDelta.value != null && (
                   <div className={`flex items-center space-x-1 ${
                     bodyDelta.isImprovement ? 'text-emerald-500' : 'text-red-500'
                   }`}>
