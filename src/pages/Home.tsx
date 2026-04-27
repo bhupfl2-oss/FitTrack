@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TrendingUp, TrendingDown, Activity, Beaker, Target } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity, Beaker, Target, Download } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -308,12 +308,20 @@ export default function Home() {
               })}
             </p>
           </div>
-          <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center text-white font-bold">
-            {user?.photoURL ? (
-              <img src={user.photoURL} alt="Avatar" className="w-12 h-12 rounded-full object-cover" />
-            ) : (
-              getUserInitial()
-            )}
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => navigate('/export')}
+              className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+            >
+              <Download className="w-5 h-5 text-slate-400" />
+            </button>
+            <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center text-white font-bold">
+              {user?.photoURL ? (
+                <img src={user.photoURL} alt="Avatar" className="w-12 h-12 rounded-full object-cover" />
+              ) : (
+                getUserInitial()
+              )}
+            </div>
           </div>
         </div>
 

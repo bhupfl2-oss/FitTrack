@@ -8,6 +8,7 @@ import WorkoutSession from "@/pages/WorkoutSession";
 import RunningSession from "@/pages/RunningSession";
 import Body from "@/pages/Body";
 import Labs from "@/pages/Labs";
+import Export from "@/pages/Export";
 import Login from "@/pages/Login";
 
 function App() {
@@ -23,6 +24,7 @@ function App() {
             <Route path="running-session" element={<ProtectedRoute><RunningSession /></ProtectedRoute>} />
             <Route path="body" element={<ProtectedRoute><Body /></ProtectedRoute>} />
             <Route path="labs" element={<ProtectedRoute><Labs /></ProtectedRoute>} />
+            <Route path="export" element={<ProtectedRoute><Export /></ProtectedRoute>} />
           </Route>
         </Routes>
       </Router>
