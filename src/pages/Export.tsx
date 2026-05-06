@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Download, Copy, FileText } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, query, orderBy, getDocs, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+// @ts-ignore
 import jsPDF from 'jspdf';
 
 interface ExportData {
@@ -21,12 +22,7 @@ export default function Export() {
     bodyComp: true,
     goals: true
   });
-  const [exportData, setExportData] = useState<ExportData>({
-    workouts: [],
-    bodyComp: [],
-    goals: []
-  });
-  const [exportText, setExportText] = useState('');
+    const [exportText, setExportText] = useState('');
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -98,7 +94,6 @@ export default function Export() {
         data.goals = goalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       }
       
-      setExportData(data);
       generateTextExport(data);
     } catch (error) {
       console.error('Error generating export:', error);

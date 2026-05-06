@@ -237,27 +237,7 @@ export default function LabTestDetail() {
     }
   };
 
-  const handleReminderInterval = async (months: number) => {
-    if (!test || !user) return;
-
-    const latestReading = readings[0];
-    if (!latestReading) return;
-
-    const nextDueDate = new Date(latestReading.date);
-    nextDueDate.setMonth(nextDueDate.getMonth() + months);
-
-    await updateDoc(
-      doc(db, 'users', user.uid, 'tests', testId!),
-      cleanData({
-        reminderIntervalMonths: months,
-        nextDueDate: nextDueDate.toISOString(),
-      })
-    );
-
-    setTest(prev => prev ? { ...prev, reminderIntervalMonths: months, nextDueDate } : null);
-    setShowReminderSelector(false);
-  };
-
+  
   const handleAddReading = async () => {
     if (!user || !testId || !newReading.value) return;
 
@@ -525,6 +505,8 @@ export default function LabTestDetail() {
                     key={months}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (!user) return;
+                      
                       const selectedMonths = months === 12 ? 12 : months;
                       setReminderInterval(selectedMonths);
                       

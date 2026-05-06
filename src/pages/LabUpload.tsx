@@ -14,7 +14,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 interface ExtractedTest {
   testName: string;
@@ -144,7 +144,7 @@ Rules:
   };
 
   const handleSave = async () => {
-    if (!extractedData || !user) return;
+    if (!extractedData || !user || !selectedFile) return;
     
     setIsSaving(true);
     
@@ -152,7 +152,10 @@ Rules:
       // Uploads original file to Firebase Storage
       let fileDownloadUrl: string | null = null;
       try {
-        const ext = selectedFile?.name.split('.').pop() || 'pdf';
+        const { getStorage } = await import('firebase/storage');
+        const storage = getStorage();
+        const uid = user.uid;
+        const ext = selectedFile.name.split('.').pop() || 'pdf';
         const storageRef = ref(storage, `users/${uid}/reports/${Date.now()}.${ext}`);
         const uploadResult = await uploadBytes(storageRef, selectedFile);
         fileDownloadUrl = await getDownloadURL(uploadResult.ref);
