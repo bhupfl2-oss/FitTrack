@@ -4,8 +4,6 @@ import { ArrowLeft, Download, Copy, FileText } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, query, orderBy, getDocs, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-// @ts-ignore
-import jsPDF from 'jspdf';
 
 interface ExportData {
   workouts: any[];
@@ -194,23 +192,13 @@ export default function Export() {
     URL.revokeObjectURL(url);
   };
 
+  
   const downloadPDF = () => {
-    const pdf = new jsPDF();
-    const lines = exportText.split('\n');
-    let y = 20;
-    
-    pdf.setFontSize(12);
-    lines.forEach(line => {
-      if (y > 280) {
-        pdf.addPage();
-        y = 20;
-      }
-      pdf.text(line, 20, y);
-      y += 7;
-    });
-    
-    pdf.save(`fitness-export-${new Date().toISOString().split('T')[0]}.pdf`);
-  };
+  const { jsPDF } = require('jspdf');
+  const doc = new jsPDF();
+  doc.text(exportText, 10, 10);
+  doc.save('fittrack-export.pdf');
+};
 
   const previewLines = exportText.split('\n').slice(0, 20);
   const hasMoreLines = exportText.split('\n').length > 20;
