@@ -1,14 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Download, Copy, FileText } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { collection, query, orderBy, getDocs, where } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, where, doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { format } from 'date-fns';
+import jsPDF from 'jspdf';
 
 interface ExportData {
   workouts: any[];
   bodyComp: any[];
   goals: any[];
+}
+
+interface LabTestExport {
+  id: string;
+  name: string;
+  unit: string;
+  category: string;
+  referenceRangeLow: number | null;
+  referenceRangeHigh: number | null;
+  readings: { value: number; date: Date; }[];
 }
 
 export default function Export() {
@@ -20,9 +32,74 @@ export default function Export() {
     bodyComp: true,
     goals: true
   });
-    const [exportText, setExportText] = useState('');
+  const [exportText, setExportText] = useState('');
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [labTests, setLabTests] = useState<LabTestExport[]>([]);
+  const [selectedTestIds, setSelectedTestIds] = useState<Set<string>>(new Set());
+  const [includeLabResults, setIncludeLabResults] = useState(false);
+
+  // Fetch lab tests and readings
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchLabTests = async () => {
+      try {
+        const testsQuery = query(
+          collection(db, 'users', user.uid, 'tests'),
+          orderBy('createdAt', 'desc')
+        );
+        const testsSnapshot = await getDocs(testsQuery);
+        
+        const tests: LabTestExport[] = [];
+        
+        for (const testDoc of testsSnapshot.docs) {
+          const testData = testDoc.data();
+          
+          // Fetch all readings for this test
+          const readingsQuery = query(
+            collection(db, 'users', user.uid, 'tests', testDoc.id, 'readings'),
+            orderBy('date', 'desc')
+          );
+          const readingsSnapshot = await getDocs(readingsQuery);
+          
+          const readings = readingsSnapshot.docs.map(doc => ({
+            value: doc.data().value,
+            date: new Date(doc.data().date)
+          }));
+          
+          // Get category using same logic as Labs.tsx
+          const getTestCategory = (testName: string): string => {
+            const name = testName.toLowerCase();
+            if (name.includes('tsh') || name.includes('t3') || name.includes('t4')) return 'Thyroid';
+            if (name.includes('hba1c') || name.includes('glucose') || name.includes('blood sugar')) return 'Diabetes';
+            if (name.includes('vitamin') || name.includes('calcium')) return 'Nutrition';
+            if (name.includes('alt') || name.includes('ast') || name.includes('bilirubin')) return 'Liver';
+            if (name.includes('testosterone')) return 'Hormones';
+            return 'Blood Test';
+          };
+          
+          tests.push({
+            id: testDoc.id,
+            name: testData.name,
+            unit: testData.unit,
+            category: getTestCategory(testData.name),
+            referenceRangeLow: testData.referenceRangeLow || null,
+            referenceRangeHigh: testData.referenceRangeHigh || null,
+            readings
+          });
+        }
+        
+        setLabTests(tests);
+        // Select all tests by default
+        setSelectedTestIds(new Set(tests.map(t => t.id)));
+      } catch (error) {
+        console.error('Error fetching lab tests:', error);
+      }
+    };
+
+    fetchLabTests();
+  }, [user]);
 
   const getDateRange = (range: string) => {
     const now = new Date();
@@ -84,12 +161,10 @@ export default function Export() {
       
       // Fetch Goals
       if (selectedData.goals) {
-        const goalsQuery = query(
-          collection(db, 'users', user.uid, 'config', 'bodyCompConfig'),
-          orderBy('createdAt', 'desc')
-        );
-        const goalsSnapshot = await getDocs(goalsQuery);
-        data.goals = goalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const goalsDoc = await getDoc(doc(db, 'users', user.uid, 'config', 'bodyCompConfig'));
+        if (goalsDoc.exists()) {
+          data.goals = [{ id: goalsDoc.id, ...goalsDoc.data() }];
+        }
       }
       
       generateTextExport(data);
@@ -98,6 +173,39 @@ export default function Export() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const generateLabsTxt = () => {
+    const selected = labTests.filter(t => selectedTestIds.has(t.id));
+    let txt = '\nLAB RESULTS\n';
+    txt += '='.repeat(60) + '\n\n';
+
+    selected.forEach(test => {
+      txt += `${test.name} (${test.category})\n`;
+      txt += '-'.repeat(40) + '\n';
+      // Column headers
+      txt += 'Date'.padEnd(14) + '| Value'.padEnd(14) + '| Unit'.padEnd(12) + '| Status'.padEnd(12) + '| Range\n';
+      txt += '-'.repeat(60) + '\n';
+      // Each reading row
+      test.readings.forEach(r => {
+        const status = getStatus(r.value, test.referenceRangeLow, test.referenceRangeHigh);
+        const range = test.referenceRangeLow !== null
+          ? `${test.referenceRangeLow}-${test.referenceRangeHigh}` 
+          : '—';
+        const dateStr = format(r.date, 'MMM yyyy');
+        txt += dateStr.padEnd(14) + '| ' + String(r.value).padEnd(12) + '| ' + test.unit.padEnd(10) + '| ' + status.padEnd(10) + '| ' + range + '\n';
+      });
+      txt += '\n';
+    });
+    return txt;
+  };
+
+  const getStatus = (value: number, low: number | null, high: number | null): string => {
+    if (low === null || high === null) return '—';
+    if (value > high * 1.2 || value < low * 0.8) return 'Critical';
+    if (value > high) return 'High ↑';
+    if (value < low) return 'Low ↓';
+    return 'Normal ✓';
   };
 
   const generateTextExport = (data: ExportData) => {
@@ -157,12 +265,18 @@ export default function Export() {
       });
     }
     
+    // Lab Results Section
+    if (includeLabResults && selectedTestIds.size > 0) {
+      lines.push(generateLabsTxt());
+    }
+    
     // Summary
     lines.push('SUMMARY');
     lines.push('=======');
     lines.push(`Total Workouts: ${data.workouts.length}`);
     lines.push(`Body Measurements: ${data.bodyComp.length}`);
     lines.push(`Goal Entries: ${data.goals.length}`);
+    lines.push(`Lab Tests Exported: ${selectedTestIds.size}`);
     lines.push('');
     lines.push('Export completed successfully.');
     
@@ -190,6 +304,128 @@ export default function Export() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const generateLabsPdf = (doc: any, startY: number) => {
+    const selected = labTests.filter(t => selectedTestIds.has(t.id));
+
+    doc.setFontSize(14);
+    doc.setTextColor(16, 185, 129); // emerald green
+    doc.text('LAB RESULTS', 14, startY);
+    startY += 8;
+
+    selected.forEach(test => {
+      // Test name header
+      doc.setFontSize(11);
+      doc.setTextColor(255, 255, 255);
+      doc.text(`${test.name} (${test.unit})`, 14, startY);
+      startY += 6;
+
+      // Table headers
+      doc.setFontSize(9);
+      doc.setTextColor(150, 150, 150);
+      doc.text('Date', 14, startY);
+      doc.text('Value', 55, startY);
+      doc.text('Status', 95, startY);
+      doc.text('Range', 135, startY);
+      startY += 4;
+
+      // Divider line
+      doc.setDrawColor(50, 50, 50);
+      doc.line(14, startY, 196, startY);
+      startY += 4;
+
+      // Each reading row
+      test.readings.forEach(r => {
+        const status = getStatus(r.value, test.referenceRangeLow, test.referenceRangeHigh);
+        const range = test.referenceRangeLow !== null
+          ? `${test.referenceRangeLow}–${test.referenceRangeHigh}` 
+          : '—';
+
+        // Status colour
+        if (status.includes('Critical')) doc.setTextColor(239, 68, 68);
+        else if (status.includes('High')) doc.setTextColor(245, 158, 11);
+        else if (status.includes('Low')) doc.setTextColor(59, 130, 246);
+        else doc.setTextColor(16, 185, 129);
+
+        doc.setFontSize(9);
+        doc.setTextColor(200, 200, 200);
+        doc.text(format(r.date, 'MMM yyyy'), 14, startY);
+        doc.text(`${r.value} ${test.unit}`, 55, startY);
+
+        // Coloured status
+        if (status.includes('Critical')) doc.setTextColor(239, 68, 68);
+        else if (status.includes('High')) doc.setTextColor(245, 158, 11);
+        else if (status.includes('Low')) doc.setTextColor(59, 130, 246);
+        else doc.setTextColor(16, 185, 129);
+        doc.text(status, 95, startY);
+
+        doc.setTextColor(150, 150, 150);
+        doc.text(range, 135, startY);
+        startY += 5;
+
+        // Add new page if needed
+        if (startY > 270) {
+          doc.addPage();
+          startY = 20;
+        }
+      });
+      startY += 6; // space between tests
+    });
+    return startY;
+  };
+
+  const downloadPDF = () => {
+    const doc = new jsPDF();
+    
+    let currentY = 20;
+    
+    // Add existing content (workouts, body comp, goals)
+    const lines = exportText.split('\n');
+    let currentSection = '';
+    
+    for (const line of lines) {
+      if (line.includes('===') || line.includes('---')) {
+        currentSection = line.split(' ')[0].toLowerCase();
+      }
+      
+      if (currentSection === 'lab results') {
+        // Skip lab results in text generation, handle separately
+        continue;
+      }
+      
+      if (line.trim()) {
+        if (line.includes('FITNESS DATA EXPORT')) {
+          doc.setFontSize(16);
+          doc.setTextColor(16, 185, 129);
+          doc.text(line, 14, currentY);
+          currentY += 10;
+        } else if (line.includes('===') || line.includes('---')) {
+          doc.setFontSize(12);
+          doc.setTextColor(255, 255, 255);
+          doc.text(line, 14, currentY);
+          currentY += 8;
+        } else {
+          doc.setFontSize(10);
+          doc.setTextColor(200, 200, 200);
+          doc.text(line, 14, currentY);
+          currentY += 6;
+        }
+        
+        if (currentY > 270) {
+          doc.addPage();
+          currentY = 20;
+        }
+      }
+    }
+    
+    // Add lab results if selected
+    if (includeLabResults && selectedTestIds.size > 0) {
+      currentY = generateLabsPdf(doc, currentY);
+    }
+    
+    // Save the PDF
+    doc.save(`fitness-export-${new Date().toISOString().split('T')[0]}.pdf`);
   };
 
 
@@ -267,13 +503,102 @@ export default function Export() {
               />
               <span>Goals</span>
             </label>
+            <label className="flex items-center space-x-3">
+              <input
+                type="checkbox"
+                checked={includeLabResults}
+                onChange={(e) => setIncludeLabResults(e.target.checked)}
+                className="w-4 h-4 text-emerald-500 bg-slate-800 border-slate-600 rounded focus:ring-emerald-500"
+              />
+              <span>Lab Results</span>
+            </label>
           </div>
         </div>
+
+        {/* Lab Results Test Selector */}
+        {includeLabResults && (
+          <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+            <div className="flex items-center justify-between mb-3">
+              <label className="text-sm font-medium text-slate-300">Select tests</label>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => setSelectedTestIds(new Set(labTests.map(t => t.id)))}
+                  className="px-3 py-1 text-xs bg-emerald-500 text-white rounded hover:bg-emerald-600 transition-colors"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setSelectedTestIds(new Set())}
+                  className="px-3 py-1 text-xs bg-slate-700 text-slate-300 rounded hover:bg-slate-600 transition-colors"
+                >
+                  None
+                </button>
+              </div>
+            </div>
+            
+            <div className="space-y-2 max-h-40 overflow-y-auto">
+              {labTests.map((test) => {
+                const latestReading = test.readings[0];
+                const getStatus = (value: number, low: number | null, high: number | null): string => {
+                  if (low === null || high === null) return '—';
+                  if (value > high * 1.2 || value < low * 0.8) return 'Critical';
+                  if (value > high) return 'High ↑';
+                  if (value < low) return 'Low ↓';
+                  return 'Normal ✓';
+                };
+                
+                const status = latestReading ? getStatus(latestReading.value, test.referenceRangeLow, test.referenceRangeHigh) : '—';
+                
+                return (
+                  <label key={test.id} className="flex items-center space-x-3 p-2 hover:bg-slate-700 rounded transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={selectedTestIds.has(test.id)}
+                      onChange={(e) => {
+                        const newSet = new Set(selectedTestIds);
+                        if (e.target.checked) {
+                          newSet.add(test.id);
+                        } else {
+                          newSet.delete(test.id);
+                        }
+                        setSelectedTestIds(newSet);
+                      }}
+                      className="w-4 h-4 text-emerald-500 bg-slate-700 border-slate-600 rounded focus:ring-emerald-500"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm text-white">{test.name}</div>
+                      <div className="text-xs text-slate-400">{test.category}</div>
+                    </div>
+                    <div className="text-right">
+                      {latestReading && (
+                        <div className="text-sm font-mono text-slate-300">
+                          {latestReading.value} <span className="text-xs text-slate-500">{test.unit}</span>
+                        </div>
+                      )}
+                      <div className={`text-xs px-2 py-0.5 rounded-full inline-block ${
+                        status.includes('Critical') ? 'bg-red-500/20 text-red-400' :
+                        status.includes('High') ? 'bg-amber-500/20 text-amber-400' :
+                        status.includes('Low') ? 'bg-blue-500/20 text-blue-400' :
+                        'bg-green-500/20 text-green-400'
+                      }`}>
+                        {status}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            
+            <div className="mt-3 text-sm text-slate-400">
+              {selectedTestIds.size} test{selectedTestIds.size !== 1 ? 's' : ''} selected
+            </div>
+          </div>
+        )}
 
         {/* Generate Button */}
         <button
           onClick={generateExport}
-          disabled={loading || (!selectedData.workouts && !selectedData.bodyComp && !selectedData.goals)}
+          disabled={loading || (!selectedData.workouts && !selectedData.bodyComp && !selectedData.goals && (!includeLabResults || selectedTestIds.size === 0))}
           className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium py-3 rounded-lg transition-colors"
         >
           {loading ? 'Generating...' : 'Generate Export'}
