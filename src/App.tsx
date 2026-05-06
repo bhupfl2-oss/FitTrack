@@ -8,6 +8,8 @@ import WorkoutSession from "@/pages/WorkoutSession";
 import RunningSession from "@/pages/RunningSession";
 import Body from "@/pages/Body";
 import Labs from "@/pages/Labs";
+import LabTestDetail from "@/pages/LabTestDetail";
+import LabUpload from "@/pages/LabUpload";
 import Export from "@/pages/Export";
 import Login from "@/pages/Login";
 
@@ -24,6 +26,8 @@ function App() {
             <Route path="running-session" element={<ProtectedRoute><RunningSession /></ProtectedRoute>} />
             <Route path="body" element={<ProtectedRoute><Body /></ProtectedRoute>} />
             <Route path="labs" element={<ProtectedRoute><Labs /></ProtectedRoute>} />
+            <Route path="labs/:testId" element={<ProtectedRoute><LabTestDetail /></ProtectedRoute>} />
+            <Route path="labs/upload" element={<ProtectedRoute><LabUpload /></ProtectedRoute>} />
             <Route path="export" element={<ProtectedRoute><Export /></ProtectedRoute>} />
           </Route>
         </Routes>
