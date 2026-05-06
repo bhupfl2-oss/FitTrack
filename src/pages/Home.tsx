@@ -65,6 +65,7 @@ export default function Home() {
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
+  const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
 
   useEffect(() => {
     if (!user) return;
@@ -109,6 +110,32 @@ export default function Home() {
           ...doc.data()
         } as LabResults));
         setLabResults(labs);
+
+        // Fetch upcoming tests
+        const testsQuery = query(
+          collection(db, 'users', user.uid, 'tests'),
+          orderBy('nextDueDate', 'asc')
+        );
+        const testsSnapshot = await getDocs(testsQuery);
+        const tests = testsSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        } as any));
+
+        // Filter tests due within 30 days
+        const now = new Date();
+        const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        
+        const upcoming = tests.filter(test => {
+          if (!test.nextDueDate) return false;
+          const dueDate = new Date(test.nextDueDate);
+          return dueDate <= thirtyDaysFromNow;
+        });
+
+        // Sort by due date (soonest first)
+        upcoming.sort((a, b) => new Date(a.nextDueDate).getTime() - new Date(b.nextDueDate).getTime());
+        
+        setUpcomingTests(upcoming);
       } catch (error) {
         console.error('Error fetching data:', error);
       } finally {
@@ -324,6 +351,67 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* Upcoming Tests Alert */}
+        {upcomingTests.length > 0 && (
+          <div className="bg-slate-900 rounded-lg p-6 border-l-4 border-l-amber-500 mb-4">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <span className="text-amber-400">🔔</span>
+                <span className="text-amber-400 font-bold tracking-wider">TESTS DUE SOON</span>
+                <div className="bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full text-xs">
+                  {upcomingTests.length}
+                </div>
+              </div>
+            </div>
+            
+            <div className="space-y-2">
+              {upcomingTests.slice(0, 3).map((test) => {
+                const now = new Date();
+                const dueDate = new Date(test.nextDueDate);
+                const diffDays = Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                const isOverdue = diffDays < 0;
+                
+                // Get latest reading for this test
+                const latestReading = test.latestReading || null;
+                
+                return (
+                  <div
+                    key={test.id}
+                    onClick={() => navigate(`/labs/${test.id}`)}
+                    className="flex items-center justify-between p-2 bg-slate-800 rounded-lg cursor-pointer hover:bg-slate-700 transition-colors"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <div>
+                        <div className="text-sm font-medium text-white">{test.name}</div>
+                        <div className="text-xs text-slate-400">{test.unit}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {latestReading && (
+                        <div className="text-sm font-mono text-slate-300">
+                          {latestReading.value}
+                        </div>
+                      )}
+                      <div className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        isOverdue 
+                          ? 'bg-red-500/20 text-red-400' 
+                          : 'bg-amber-500/20 text-amber-400'
+                      }`}>
+                        {isOverdue ? 'Overdue' : `Due in ${diffDays} days`}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {upcomingTests.length > 3 && (
+                <div className="text-center text-xs text-slate-400 pt-1">
+                  and {upcomingTests.length - 3} more
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Today's Workout Card */}
         <div className="bg-slate-900 rounded-lg p-6 border border-slate-800 mb-4">

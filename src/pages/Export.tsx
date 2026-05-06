@@ -192,14 +192,8 @@ export default function Export() {
     URL.revokeObjectURL(url);
   };
 
-  
-  const downloadPDF = () => {
-  const { jsPDF } = require('jspdf');
-  const doc = new jsPDF();
-  doc.text(exportText, 10, 10);
-  doc.save('fittrack-export.pdf');
-};
 
+  
   const previewLines = exportText.split('\n').slice(0, 20);
   const hasMoreLines = exportText.split('\n').length > 20;
 

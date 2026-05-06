@@ -10,7 +10,8 @@ import {
   getDoc, 
   doc, 
   updateDoc, 
-  addDoc
+  addDoc,
+  deleteDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
@@ -52,6 +53,7 @@ interface LabTest {
   referenceRangeHigh: number | null;
   reminderIntervalMonths: number | null;
   nextDueDate: Date | null;
+  pinned?: boolean;
 }
 
 export default function LabTestDetail() {
@@ -72,6 +74,7 @@ export default function LabTestDetail() {
   const [showReminderSelector, setShowReminderSelector] = useState(false);
   const [showAddReading, setShowAddReading] = useState(false);
   const [newReading, setNewReading] = useState({ value: '', date: new Date().toISOString().split('T')[0] });
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   useEffect(() => {
     if (!user || !testId) return;
@@ -94,6 +97,7 @@ export default function LabTestDetail() {
           referenceRangeHigh: testData.referenceRangeHigh || null,
           reminderIntervalMonths: testData.reminderIntervalMonths || null,
           nextDueDate: testData.nextDueDate ? new Date(testData.nextDueDate) : null,
+          pinned: testData.pinned || false,
         });
 
         // Initialize reminder states
@@ -271,6 +275,32 @@ export default function LabTestDetail() {
     }
   };
 
+  const handleDeleteTest = async () => {
+    if (!user || !testId) return;
+
+    try {
+      // Delete all readings first
+      const readingsQuery = query(
+        collection(db, 'users', user.uid, 'tests', testId, 'readings')
+      );
+      const readingsSnapshot = await getDocs(readingsQuery);
+      
+      for (const readingDoc of readingsSnapshot.docs) {
+        await deleteDoc(doc(db, 'users', user.uid, 'tests', testId, 'readings', readingDoc.id));
+      }
+
+      // Delete the test document
+      await deleteDoc(doc(db, 'users', user.uid, 'tests', testId));
+
+      // Show toast and navigate back
+      alert('Test deleted');
+      navigate('/labs');
+    } catch (error) {
+      console.error('Error deleting test:', error);
+      alert('Error deleting test');
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
@@ -311,7 +341,33 @@ export default function LabTestDetail() {
           <span>Labs</span>
         </button>
         <h1 className="text-lg font-semibold">{test.name}</h1>
-        <div className="text-slate-400 text-sm">{test.unit}</div>
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={async () => {
+              if (!user || !testId) return;
+              try {
+                await updateDoc(
+                  doc(db, 'users', user.uid, 'tests', testId),
+                  cleanData({ pinned: !test.pinned })
+                );
+                setTest(prev => prev ? { ...prev, pinned: !prev.pinned } : null);
+                alert(test.pinned ? 'Unpinned' : 'Pinned to top');
+              } catch (error) {
+                console.error('Error updating pin status:', error);
+              }
+            }}
+            className={`transition-colors ${test.pinned ? 'text-amber-500' : 'text-slate-400 hover:text-amber-500'}`}
+            title={test.pinned ? 'Unpin' : 'Pin to top'}
+          >
+            📌
+          </button>
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="text-red-500 hover:text-red-400 transition-colors"
+          >
+            🗑️
+          </button>
+        </div>
       </div>
 
       <div className="p-4 space-y-4">
@@ -641,6 +697,32 @@ export default function LabTestDetail() {
           </div>
         )}
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 rounded-lg p-6 border border-slate-800 max-w-sm w-full">
+            <h3 className="text-lg font-semibold text-white mb-2">Delete {test.name}?</h3>
+            <p className="text-slate-400 text-sm mb-6">
+              This will permanently remove all readings and history.
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-2 rounded-lg font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteTest}
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white py-2 rounded-lg font-medium transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

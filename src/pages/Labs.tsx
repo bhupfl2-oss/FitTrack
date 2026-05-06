@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Plus, TrendingUp, TrendingDown, AlertCircle, ChevronRight } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import LabsModal from '@/components/LabsModal';
-import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc, updateDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
@@ -33,6 +33,7 @@ interface LabTestCard {
   reminderIntervalMonths: number | null;
   nextDueDate: Date | null;
   latestReading: { value: number; date: Date; } | null;
+  pinned?: boolean;
 }
 
 const labRanges: LabRanges = {
@@ -71,6 +72,7 @@ export default function Labs() {
   const [labResults, setLabResults] = useState<LabResults[]>([]);
   const [tests, setTests] = useState<LabTestCard[]>([]);
   const [loading, setLoading] = useState(true);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -150,7 +152,8 @@ export default function Labs() {
             referenceRangeHigh: testData.referenceRangeHigh || null,
             reminderIntervalMonths: testData.reminderIntervalMonths || null,
             nextDueDate: testData.nextDueDate ? new Date(testData.nextDueDate) : null,
-            latestReading
+            latestReading,
+            pinned: testData.pinned || false
           });
         }
         
@@ -162,6 +165,13 @@ export default function Labs() {
 
     fetchTests();
   }, [user]);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = () => setOpenMenuId(null);
+    if (openMenuId) document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [openMenuId]);
 
   // Migration function for old lab data to new tests collection
   useEffect(() => {
@@ -525,6 +535,10 @@ export default function Labs() {
 
   const sortTests = (tests: LabTestCard[]): LabTestCard[] => {
     return tests.sort((a, b) => {
+      // Pinned tests always first
+      if (a.pinned && !b.pinned) return -1;
+      if (b.pinned && !a.pinned) return 1;
+
       const aStatus = getTestStatus(a);
       const bStatus = getTestStatus(b);
 
@@ -558,6 +572,58 @@ export default function Labs() {
     // Simple toast implementation - could be enhanced with a proper toast library
     console.log(message);
     alert(message);
+  };
+
+  const handlePinToggle = async (testId: string, currentPinned: boolean) => {
+    if (!user) return;
+    
+    try {
+      await updateDoc(
+        doc(db, 'users', user.uid, 'tests', testId),
+        cleanData({ pinned: !currentPinned })
+      );
+      
+      // Update local state
+      setTests(prev => prev.map(test => 
+        test.id === testId ? { ...test, pinned: !currentPinned } : test
+      ));
+      
+      showToast(currentPinned ? 'Unpinned' : 'Pinned');
+      setOpenMenuId(null);
+    } catch (error) {
+      console.error('Error updating pin status:', error);
+    }
+  };
+
+  const handleDeleteTest = async (testId: string, testName: string) => {
+    if (!user) return;
+    
+    const confirmed = window.confirm(`Delete ${testName}? This removes all readings permanently.`);
+    if (!confirmed) return;
+    
+    try {
+      // Delete all readings first
+      const readingsQuery = query(
+        collection(db, 'users', user.uid, 'tests', testId, 'readings')
+      );
+      const readingsSnapshot = await getDocs(readingsQuery);
+      
+      for (const readingDoc of readingsSnapshot.docs) {
+        await deleteDoc(doc(db, 'users', user.uid, 'tests', testId, 'readings', readingDoc.id));
+      }
+
+      // Delete the test document
+      await deleteDoc(doc(db, 'users', user.uid, 'tests', testId));
+
+      // Update local state
+      setTests(prev => prev.filter(test => test.id !== testId));
+      
+      showToast('Test deleted');
+      setOpenMenuId(null);
+    } catch (error) {
+      console.error('Error deleting test:', error);
+      showToast('Error deleting test');
+    }
   };
 
   if (loading) {
@@ -614,63 +680,227 @@ export default function Labs() {
               </div>
             </div>
             
-            <div className="space-y-3">
-              {sortTests(tests).map((test) => {
-                const status = getTestStatus(test);
-                const dueChip = getDueDateChip(test.nextDueDate);
-                const icon = getTestIcon(test.name);
-                const category = getTestCategory(test.name);
+            <div className="space-y-4">
+              {(() => {
+                const sortedTests = sortTests(tests);
+                const pinnedTests = sortedTests.filter(test => test.pinned);
+                const unpinnedTests = sortedTests.filter(test => !test.pinned);
                 
                 return (
-                  <div
-                    key={test.id}
-                    onClick={() => navigate(`/labs/${test.id}`)}
-                    className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-800 transition-colors"
-                    style={{ borderLeft: `3px solid ${status.accentColor}` }}
-                  >
-                    {/* Test Icon */}
-                    <div 
-                      className="w-9 h-9 rounded-lg flex items-center justify-center"
-                      style={{ backgroundColor: `${status.accentColor}15` }}
-                    >
-                      <span className="text-lg">{icon}</span>
-                    </div>
-                    
-                    {/* Test Info */}
-                    <div className="flex-1">
-                      <div className="text-sm font-medium text-white">{test.name}</div>
-                      <div className="text-xs text-slate-400 mb-1">
-                        {category} · {test.latestReading ? 
-                          `${test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 
-                          'No readings'
-                        }
-                      </div>
-                      {dueChip.text && (
-                        <div className={`inline-block px-2 py-0.5 rounded-full text-xs text-white ${dueChip.color}`}>
-                          {dueChip.text}
+                  <>
+                    {/* Pinned Tests Section */}
+                    {pinnedTests.length > 0 && (
+                      <div>
+                        <div className="flex items-center space-x-2 mb-3">
+                          <span className="text-amber-400">📌</span>
+                          <h3 className="text-sm font-semibold text-amber-400">Pinned</h3>
+                          <div className="bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full text-xs">
+                            {pinnedTests.length}
+                          </div>
                         </div>
-                      )}
-                    </div>
+                        <div className="space-y-3">
+                          {pinnedTests.map((test) => {
+                            const status = getTestStatus(test);
+                            const dueChip = getDueDateChip(test.nextDueDate);
+                            const icon = getTestIcon(test.name);
+                            const category = getTestCategory(test.name);
+                            
+                            return (
+                              <div
+                                key={test.id}
+                                className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-800 transition-colors relative"
+                                style={{ borderLeft: `3px solid #f59e0b` }}
+                                onClick={() => navigate(`/labs/${test.id}`)}
+                              >
+                                {/* Test Icon */}
+                                <div 
+                                  className="w-9 h-9 rounded-lg flex items-center justify-center"
+                                  style={{ backgroundColor: '#f59e0b15' }}
+                                >
+                                  <span className="text-lg">{icon}</span>
+                                </div>
+                                
+                                {/* Test Info */}
+                                <div className="flex-1">
+                                  <div className="text-sm font-medium text-white">{test.name}</div>
+                                  <div className="text-xs text-slate-400 mb-1">
+                                    {category} · {test.latestReading ? 
+                                      `${test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 
+                                      'No readings'
+                                    }
+                                  </div>
+                                  {dueChip.text && (
+                                    <div className={`inline-block px-2 py-0.5 rounded-full text-xs text-white ${dueChip.color}`}>
+                                      {dueChip.text}
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* Value & Status */}
+                                <div className="text-right">
+                                  {test.latestReading ? (
+                                    <>
+                                      <div className="text-sm font-mono text-white">
+                                        {test.latestReading.value}
+                                        <span className="text-xs text-slate-400 ml-1">{test.unit}</span>
+                                      </div>
+                                      <div className={`text-xs ${status.color} mt-1`}>
+                                        {status.status}
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div className="text-sm text-slate-400">No readings yet</div>
+                                  )}
+                                </div>
+
+                                {/* Options Menu */}
+                                <button
+                                  onClick={(e) => { 
+                                    e.stopPropagation(); 
+                                    setOpenMenuId(openMenuId === test.id ? null : test.id); 
+                                  }}
+                                  className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                                >
+                                  <span className="text-lg">⋮</span>
+                                </button>
+
+                                {/* Dropdown Menu */}
+                                {openMenuId === test.id && (
+                                  <div className="absolute top-full right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50 min-w-[160px]">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handlePinToggle(test.id, test.pinned || false);
+                                      }}
+                                      className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
+                                    >
+                                      <span>📌</span>
+                                      <span className="text-sm text-white">
+                                        {test.pinned ? 'Unpin' : 'Pin to top'}
+                                      </span>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDeleteTest(test.id, test.name);
+                                      }}
+                                      className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
+                                    >
+                                      <span>🗑️</span>
+                                      <span className="text-sm text-red-400">Delete test</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     
-                    {/* Value & Status */}
-                    <div className="text-right">
-                      {test.latestReading ? (
-                        <>
-                          <div className="text-sm font-mono text-white">
-                            {test.latestReading.value}
-                            <span className="text-xs text-slate-400 ml-1">{test.unit}</span>
-                          </div>
-                          <div className={`text-xs ${status.color} mt-1`}>
-                            {status.status}
-                          </div>
-                        </>
-                      ) : (
-                        <div className="text-sm text-slate-400">No readings yet</div>
-                      )}
-                    </div>
-                  </div>
+                    {/* Unpinned Tests Section */}
+                    {unpinnedTests.length > 0 && (
+                      <div className="space-y-3">
+                        {unpinnedTests.map((test) => {
+                          const status = getTestStatus(test);
+                          const dueChip = getDueDateChip(test.nextDueDate);
+                          const icon = getTestIcon(test.name);
+                          const category = getTestCategory(test.name);
+                          
+                          return (
+                            <div
+                              key={test.id}
+                              className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-800 transition-colors relative"
+                              style={{ borderLeft: `3px solid ${status.accentColor}` }}
+                              onClick={() => navigate(`/labs/${test.id}`)}
+                            >
+                              {/* Test Icon */}
+                              <div 
+                                className="w-9 h-9 rounded-lg flex items-center justify-center"
+                                style={{ backgroundColor: `${status.accentColor}15` }}
+                              >
+                                <span className="text-lg">{icon}</span>
+                              </div>
+                              
+                              {/* Test Info */}
+                              <div className="flex-1">
+                                <div className="text-sm font-medium text-white">{test.name}</div>
+                                <div className="text-xs text-slate-400 mb-1">
+                                  {category} · {test.latestReading ? 
+                                    `${test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 
+                                    'No readings'
+                                  }
+                                </div>
+                                {dueChip.text && (
+                                  <div className={`inline-block px-2 py-0.5 rounded-full text-xs text-white ${dueChip.color}`}>
+                                    {dueChip.text}
+                                  </div>
+                                )}
+                              </div>
+                              
+                              {/* Value & Status */}
+                              <div className="text-right">
+                                {test.latestReading ? (
+                                  <>
+                                    <div className="text-sm font-mono text-white">
+                                      {test.latestReading.value}
+                                      <span className="text-xs text-slate-400 ml-1">{test.unit}</span>
+                                    </div>
+                                    <div className={`text-xs ${status.color} mt-1`}>
+                                      {status.status}
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div className="text-sm text-slate-400">No readings yet</div>
+                                )}
+                              </div>
+
+                              {/* Options Menu */}
+                              <button
+                                onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  setOpenMenuId(openMenuId === test.id ? null : test.id); 
+                                }}
+                                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+                              >
+                                <span className="text-lg">⋮</span>
+                              </button>
+
+                              {/* Dropdown Menu */}
+                              {openMenuId === test.id && (
+                                <div className="absolute top-full right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50 min-w-[160px]">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handlePinToggle(test.id, test.pinned || false);
+                                    }}
+                                    className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
+                                  >
+                                    <span>📌</span>
+                                    <span className="text-sm text-white">
+                                      {test.pinned ? 'Unpin' : 'Pin to top'}
+                                    </span>
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteTest(test.id, test.name);
+                                    }}
+                                    className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
+                                  >
+                                    <span>🗑️</span>
+                                    <span className="text-sm text-red-400">Delete test</span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
                 );
-              })}
+              })()}
             </div>
           </div>
         ) : (
