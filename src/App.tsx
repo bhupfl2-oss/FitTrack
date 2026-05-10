@@ -11,6 +11,8 @@ import Labs from "@/pages/Labs";
 import LabTestDetail from "@/pages/LabTestDetail";
 import LabUpload from "@/pages/LabUpload";
 import Export from "@/pages/Export";
+import Wellness from "@/pages/Wellness";
+import HabitDetail from "@/pages/HabitDetail";
 import Login from "@/pages/Login";
 
 function App() {
@@ -29,6 +31,8 @@ function App() {
             <Route path="labs/:testId" element={<ProtectedRoute><LabTestDetail /></ProtectedRoute>} />
             <Route path="labs/upload" element={<ProtectedRoute><LabUpload /></ProtectedRoute>} />
             <Route path="export" element={<ProtectedRoute><Export /></ProtectedRoute>} />
+            <Route path="wellness" element={<ProtectedRoute><Wellness /></ProtectedRoute>} />
+            <Route path="wellness/:habitId" element={<ProtectedRoute><HabitDetail /></ProtectedRoute>} />
           </Route>
         </Routes>
       </Router>

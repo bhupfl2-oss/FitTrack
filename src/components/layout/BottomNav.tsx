@@ -1,4 +1,4 @@
-import { Home, Dumbbell, LineChart, FlaskConical } from "lucide-react";
+import { Home, Dumbbell, LineChart, FlaskConical, Leaf } from "lucide-react";
 import { useLocation, Link } from "react-router-dom";
 
 export default function BottomNav() {
@@ -9,6 +9,7 @@ export default function BottomNav() {
     { path: "/workouts", icon: Dumbbell, label: "Workouts" },
     { path: "/body", icon: LineChart, label: "Body" },
     { path: "/labs", icon: FlaskConical, label: "Labs" },
+    { path: "/wellness", icon: Leaf, label: "Wellness" },
   ];
 
   return (
