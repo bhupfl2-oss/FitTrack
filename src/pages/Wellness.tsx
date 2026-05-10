@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, ChevronLeft, Flame, Check, AlertCircle } from 'lucide-react';
+import { Plus, Flame, Check, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { getHabits, getLogsForDate, getWeekStatus, calculateStreak, logHabitEntry, Habit, Log, WeekStatus } from '@/lib/habits';
 import AddHabitModal from '@/components/AddHabitModal';
@@ -40,7 +40,7 @@ export default function Wellness() {
         // Calculate week status
         if (habitsData.length > 0) {
           const allWeekLogs: Log[] = [];
-          for (const habit of habitsData) {
+          for (const _habit of habitsData) {
             const habitLogs = await getLogsForDate(user.uid, todayStr);
             allWeekLogs.push(...habitLogs);
           }
