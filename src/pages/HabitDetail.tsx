@@ -148,7 +148,7 @@ export default function HabitDetail() {
     
     const date = new Date(currentYear, currentMonth, day);
     const dateStr = date.toISOString().split('T')[0];
-    const _isToday = dateStr === todayStr;
+    
     const isFuture = date > today;
     
     if (isFuture) return 'future';
