@@ -2,14 +2,21 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Flame, Check, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { getHabits, getLogsForDate, getWeekStatus, calculateStreak, logHabitEntry, Habit, Log, WeekStatus } from '@/lib/habits';
+import {
+  collection,
+  query,
+  where,
+  getDocs,
+} from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { getHabits, getWeekStatus, calculateStreak, logHabitEntry, removeHabitLog, Habit, Log, WeekStatus } from '@/lib/habits';
 import AddHabitModal from '@/components/AddHabitModal';
 
 export default function Wellness() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [habits, setHabits] = useState<Habit[]>([]);
-  const [todayLogs, setTodayLogs] = useState<Log[]>([]);
+  const [habitLogsToday, setHabitLogsToday] = useState<Record<string, Log[]>>({});
   const [weekStatus, setWeekStatus] = useState<WeekStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -24,27 +31,35 @@ export default function Wellness() {
   const todayMonthName = monthNames[today.getMonth()];
   const todayDate = today.getDate();
 
+  const fetchTodayLogs = async (habitsData: Habit[]) => {
+    if (!user) return;
+    const logsMap: Record<string, Log[]> = {};
+    for (const habit of habitsData) {
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, 'users', user.uid, 'habits', habit.id, 'logs'),
+            where('date', '==', todayStr)
+          )
+        );
+        logsMap[habit.id] = snap.docs.map(d => ({ id: d.id, ...d.data() } as Log));
+      } catch (_) {
+        logsMap[habit.id] = [];
+      }
+    }
+    setHabitLogsToday(logsMap);
+    return logsMap;
+  };
+
   useEffect(() => {
     if (!user) return;
-    
     const loadData = async () => {
       try {
-        const [habitsData, logsData] = await Promise.all([
-          getHabits(user.uid),
-          getLogsForDate(user.uid, todayStr)
-        ]);
-        
+        const habitsData = await getHabits(user.uid);
         setHabits(habitsData);
-        setTodayLogs(logsData);
-        
-        // Calculate week status
+        await fetchTodayLogs(habitsData);
         if (habitsData.length > 0) {
-          const allWeekLogs: Log[] = [];
-          for (const _habit of habitsData) {
-            const habitLogs = await getLogsForDate(user.uid, todayStr);
-            allWeekLogs.push(...habitLogs);
-          }
-          const status = getWeekStatus(allWeekLogs, habitsData[0].goalType, habitsData[0].targetValue);
+          const status = getWeekStatus([], habitsData[0].goalType, habitsData[0].targetValue);
           setWeekStatus(status);
         }
       } catch (error) {
@@ -53,84 +68,62 @@ export default function Wellness() {
         setLoading(false);
       }
     };
-
     loadData();
   }, [user, todayStr]);
 
-  const handleLogHabit = async (habitId: string, value: number) => {
+  // Toggle: if already done today → remove log (undo). If not done → log it.
+  const toggleHabitLog = async (habitId: string, value = 1) => {
     if (!user) return;
-    
+    const alreadyDone = isHabitDoneToday(habitId);
     try {
-      await logHabitEntry(user.uid, habitId, todayStr, value);
-      
-      // Refresh today's logs
-      const logsData = await getLogsForDate(user.uid, todayStr);
-      setTodayLogs(logsData);
-      
-      // Close value modal if open
-      if (valueModal) {
-        setValueModal(null);
-        setTempValue('');
+      if (alreadyDone) {
+        // Undo — delete the log doc (doc ID = date string)
+        await removeHabitLog(user.uid, habitId, todayStr);
+        setHabitLogsToday(prev => ({ ...prev, [habitId]: [] }));
+      } else {
+        await logHabitEntry(user.uid, habitId, todayStr, value);
+        const newLog: Log = { id: todayStr, date: todayStr, value, createdAt: null };
+        setHabitLogsToday(prev => ({ ...prev, [habitId]: [newLog] }));
       }
+      if (valueModal) { setValueModal(null); setTempValue(''); }
     } catch (error) {
-      console.error('Error logging habit:', error);
+      console.error('Error toggling habit:', error);
     }
   };
 
-  const getHabitLog = (habitId: string) => {
-    return todayLogs.find(log => log.id === habitId);
+  const isHabitDoneToday = (habitId: string): boolean => {
+    const logs = habitLogsToday[habitId] || [];
+    if (logs.length === 0) return false;
+    const habit = habits.find(h => h.id === habitId);
+    if (!habit) return false;
+    const totalValue = logs.reduce((sum, l) => sum + (l.value || 0), 0);
+    return habit.goalType === 'daily' || habit.goalType === 'times_per_week'
+      ? totalValue >= 1
+      : totalValue > 0;
   };
 
   const getHabitStreak = (habitId: string) => {
     const habit = habits.find(h => h.id === habitId);
     if (!habit) return 0;
-    
-    const habitLogs = todayLogs.filter(log => log.id === habitId);
-    return calculateStreak(habitLogs, habit.goalType, habit.targetValue);
-  };
-
-  const isHabitDoneToday = (habitId: string) => {
-    const log = getHabitLog(habitId);
-    if (!log) return false;
-    
-    const habit = habits.find(h => h.id === habitId);
-    if (!habit) return false;
-    
-    if (habit.goalType === 'daily') {
-      return log.value >= 1;
-    } else if (habit.goalType === 'times_per_week') {
-      return log.value >= 1;
-    } else {
-      return log.value > 0;
-    }
+    return calculateStreak(habitLogsToday[habitId] || [], habit.goalType, habit.targetValue);
   };
 
   const getWeeklyProgress = (habitId: string) => {
     const habit = habits.find(h => h.id === habitId);
     if (!habit || habit.goalType !== 'times_per_week') return { current: 0, target: habit?.targetValue || 0 };
-    
-    // This is simplified - in real implementation would fetch this week's logs
-    const current = todayLogs.filter(log => log.id === habitId).length;
-    return { current, target: habit.targetValue };
+    return { current: (habitLogsToday[habitId] || []).length, target: habit.targetValue };
   };
 
   const getMonthlyProgress = (habitId: string) => {
     const habit = habits.find(h => h.id === habitId);
     if (!habit || !['distance_month', 'count_month'].includes(habit.goalType)) return { current: 0, target: habit?.targetValue || 0 };
-    
-    const log = getHabitLog(habitId);
-    const current = log?.value || 0;
+    const current = (habitLogsToday[habitId] || []).reduce((sum, l) => sum + (l.value || 0), 0);
     return { current, target: habit.targetValue };
   };
 
-  // Separate habits into remaining and done today
   const remainingHabits = habits.filter(h => !isHabitDoneToday(h.id));
   const doneHabits = habits.filter(h => isHabitDoneToday(h.id));
-
-  // Calculate max streak and today's progress
-  const maxStreak = Math.max(...habits.map(h => getHabitStreak(h.id)));
-  const doneTodayCount = doneHabits.length;
-  const totalHabitsCount = habits.length;
+  const maxStreak = habits.length > 0 ? Math.max(...habits.map(h => getHabitStreak(h.id))) : 0;
 
   if (loading) {
     return (
@@ -143,6 +136,84 @@ export default function Wellness() {
     );
   }
 
+  const HabitCard = ({ habit, done }: { habit: Habit; done: boolean }) => {
+    const weeklyProgress = getWeeklyProgress(habit.id);
+    const monthlyProgress = getMonthlyProgress(habit.id);
+    const streak = getHabitStreak(habit.id);
+
+    return (
+      <div
+        className={`bg-slate-800 rounded-lg p-4 border ${done ? 'border-emerald-900 opacity-70' : 'border-slate-700'}`}
+        onClick={() => navigate(`/wellness/${habit.id}`)}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center space-x-3">
+            <div
+              className="w-10 h-10 rounded-lg flex items-center justify-center"
+              style={{ backgroundColor: `${habit.color}20` }}
+            >
+              <div style={{ color: habit.color }}>{habit.icon}</div>
+            </div>
+            <div>
+              <div className="font-medium">{habit.name}</div>
+              <div className="text-xs text-slate-400">
+                {habit.goalType === 'daily' ? 'Daily' :
+                 habit.goalType === 'times_per_week' ? `${weeklyProgress.current}/${weeklyProgress.target} this week` :
+                 `${monthlyProgress.current}/${monthlyProgress.target} this month`}
+              </div>
+            </div>
+          </div>
+
+          {/* Toggle button — green filled if done, outline if not */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (['distance_month', 'count_month'].includes(habit.goalType) && !done) {
+                setValueModal({ habitId: habit.id, habitName: habit.name });
+              } else {
+                toggleHabitLog(habit.id, 1);
+              }
+            }}
+            className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
+              done
+                ? 'bg-emerald-500 hover:bg-red-500/80'
+                : 'border-2 border-emerald-500 hover:bg-emerald-500'
+            }`}
+            title={done ? 'Tap to undo' : 'Mark done'}
+          >
+            {done
+              ? <Check size={16} className="text-white" />
+              : <Plus size={16} className="text-emerald-500" />
+            }
+          </button>
+        </div>
+
+        {['distance_month', 'count_month'].includes(habit.goalType) && (
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-slate-400 mb-1">
+              <span>{monthlyProgress.current} done</span>
+              <span>{monthlyProgress.target - monthlyProgress.current} left</span>
+            </div>
+            <div className="w-full bg-slate-700 rounded-full h-2">
+              <div
+                className="h-2 rounded-full transition-all"
+                style={{
+                  width: `${Math.min((monthlyProgress.current / monthlyProgress.target) * 100, 100)}%`,
+                  backgroundColor: habit.color,
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center space-x-1 mt-2">
+          <Flame size={12} className="text-orange-500" />
+          <span className="text-xs text-slate-400">{streak} day streak</span>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-20">
       {/* Header */}
@@ -150,9 +221,7 @@ export default function Wellness() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">Habits</h1>
-            <p className="text-slate-400 text-sm">
-              {todayDayName}, {todayMonthName} {todayDate}
-            </p>
+            <p className="text-slate-400 text-sm">{todayDayName}, {todayMonthName} {todayDate}</p>
           </div>
           <button
             onClick={() => setIsAddModalOpen(true)}
@@ -170,12 +239,9 @@ export default function Wellness() {
             const date = new Date(today);
             date.setDate(today.getDate() - (6 - index));
             const dayNum = date.getDate();
-            
             return (
               <div key={index} className="flex flex-col items-center">
-                <div className="text-xs text-slate-400 mb-1">
-                  {dayNames[date.getDay()]}
-                </div>
+                <div className="text-xs text-slate-400 mb-1">{dayNames[date.getDay()]}</div>
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium
                   ${status === 'done' ? 'bg-emerald-500 text-white' :
                     status === 'partial' ? 'bg-emerald-900 text-emerald-300' :
@@ -200,167 +266,30 @@ export default function Wellness() {
               <div className="text-xs text-slate-400">Best: {maxStreak} days</div>
             </div>
           </div>
-          <div className="text-right">
-            <div className="text-sm font-medium">{doneTodayCount} / {totalHabitsCount} done today</div>
-          </div>
+          <div className="text-sm font-medium">{doneHabits.length} / {habits.length} done today</div>
         </div>
       </div>
 
       {/* Habit List */}
       <div className="px-4 py-4 space-y-6">
-        {/* Remaining Habits */}
         {remainingHabits.length > 0 && (
           <div>
             <h2 className="text-lg font-semibold mb-3">Remaining</h2>
             <div className="space-y-3">
-              {remainingHabits.map((habit) => {
-                const weeklyProgress = getWeeklyProgress(habit.id);
-                const monthlyProgress = getMonthlyProgress(habit.id);
-                const streak = getHabitStreak(habit.id);
-                
-                return (
-                  <div
-                    key={habit.id}
-                    className="bg-slate-800 rounded-lg p-4 border border-slate-700"
-                    onClick={() => navigate(`/wellness/${habit.id}`)}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center space-x-3">
-                        <div 
-                          className="w-10 h-10 rounded-lg flex items-center justify-center"
-                          style={{ backgroundColor: `${habit.color}20` }}
-                        >
-                          <div style={{ color: habit.color }}>
-                            {habit.icon}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="font-medium">{habit.name}</div>
-                          <div className="text-xs text-slate-400">
-                            {habit.goalType === 'daily' ? 'Daily' :
-                             habit.goalType === 'times_per_week' ? `${weeklyProgress.current}/${weeklyProgress.target} this week` :
-                             `${monthlyProgress.current}/${monthlyProgress.target} this month`}
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (['distance_month', 'count_month'].includes(habit.goalType)) {
-                            setValueModal({ habitId: habit.id, habitName: habit.name });
-                          } else {
-                            handleLogHabit(habit.id, 1);
-                          }
-                        }}
-                        className="w-10 h-10 rounded-full border-2 border-emerald-500 flex items-center justify-center hover:bg-emerald-500 transition-colors"
-                      >
-                        <Plus size={16} className="text-emerald-500" />
-                      </button>
-                    </div>
-                    
-                    {/* Progress bar for monthly goals */}
-                    {['distance_month', 'count_month'].includes(habit.goalType) && (
-                      <div className="mt-3">
-                        <div className="flex justify-between text-xs text-slate-400 mb-1">
-                          <span>{monthlyProgress.current} done</span>
-                          <span>{monthlyProgress.target - monthlyProgress.current} left</span>
-                        </div>
-                        <div className="w-full bg-slate-700 rounded-full h-2">
-                          <div 
-                            className="h-2 rounded-full transition-all"
-                            style={{ 
-                              width: `${Math.min((monthlyProgress.current / monthlyProgress.target) * 100, 100)}%`,
-                              backgroundColor: habit.color 
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Streak */}
-                    <div className="flex items-center space-x-1 mt-2">
-                      <Flame size={12} className="text-orange-500" />
-                      <span className="text-xs text-slate-400">{streak} day streak</span>
-                    </div>
-                  </div>
-                );
-              })}
+              {remainingHabits.map(habit => <HabitCard key={habit.id} habit={habit} done={false} />)}
             </div>
           </div>
         )}
 
-        {/* Done Today */}
         {doneHabits.length > 0 && (
           <div>
             <h2 className="text-lg font-semibold mb-3">Done today</h2>
             <div className="space-y-3">
-              {doneHabits.map((habit) => {
-                const weeklyProgress = getWeeklyProgress(habit.id);
-                const monthlyProgress = getMonthlyProgress(habit.id);
-                const streak = getHabitStreak(habit.id);
-                
-                return (
-                  <div
-                    key={habit.id}
-                    className="bg-slate-800 rounded-lg p-4 border border-emerald-900 opacity-60"
-                    onClick={() => navigate(`/wellness/${habit.id}`)}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center space-x-3">
-                        <div 
-                          className="w-10 h-10 rounded-lg flex items-center justify-center"
-                          style={{ backgroundColor: `${habit.color}20` }}
-                        >
-                          <div style={{ color: habit.color }}>
-                            {habit.icon}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="font-medium">{habit.name}</div>
-                          <div className="text-xs text-slate-400">
-                            {habit.goalType === 'daily' ? 'Daily' :
-                             habit.goalType === 'times_per_week' ? `${weeklyProgress.current}/${weeklyProgress.target} this week` :
-                             `${monthlyProgress.current}/${monthlyProgress.target} this month`}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center">
-                        <Check size={16} />
-                      </div>
-                    </div>
-                    
-                    {/* Progress bar for monthly goals */}
-                    {['distance_month', 'count_month'].includes(habit.goalType) && (
-                      <div className="mt-3">
-                        <div className="flex justify-between text-xs text-slate-400 mb-1">
-                          <span>{monthlyProgress.current} done</span>
-                          <span>{monthlyProgress.target - monthlyProgress.current} left</span>
-                        </div>
-                        <div className="w-full bg-slate-700 rounded-full h-2">
-                          <div 
-                            className="h-2 rounded-full transition-all"
-                            style={{ 
-                              width: `${Math.min((monthlyProgress.current / monthlyProgress.target) * 100, 100)}%`,
-                              backgroundColor: habit.color 
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Streak */}
-                    <div className="flex items-center space-x-1 mt-2">
-                      <Flame size={12} className="text-orange-500" />
-                      <span className="text-xs text-slate-400">{streak} day streak</span>
-                    </div>
-                  </div>
-                );
-              })}
+              {doneHabits.map(habit => <HabitCard key={habit.id} habit={habit} done={true} />)}
             </div>
           </div>
         )}
 
-        {/* Empty State */}
         {habits.length === 0 && (
           <div className="text-center py-12">
             <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -378,21 +307,21 @@ export default function Wellness() {
         )}
       </div>
 
-      {/* Add Habit Modal */}
       {isAddModalOpen && (
         <AddHabitModal
           onClose={() => setIsAddModalOpen(false)}
           onHabitAdded={() => {
             setIsAddModalOpen(false);
-            // Refresh habits
             if (user) {
-              getHabits(user.uid).then(setHabits);
+              getHabits(user.uid).then(habitsData => {
+                setHabits(habitsData);
+                fetchTodayLogs(habitsData);
+              });
             }
           }}
         />
       )}
 
-      {/* Value Input Modal */}
       {valueModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end z-50">
           <div className="bg-slate-800 w-full rounded-t-2xl p-6">
@@ -407,20 +336,13 @@ export default function Wellness() {
             />
             <div className="flex space-x-3">
               <button
-                onClick={() => {
-                  setValueModal(null);
-                  setTempValue('');
-                }}
+                onClick={() => { setValueModal(null); setTempValue(''); }}
                 className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
-                onClick={() => {
-                  if (tempValue) {
-                    handleLogHabit(valueModal.habitId, parseFloat(tempValue));
-                  }
-                }}
+                onClick={() => { if (tempValue) toggleHabitLog(valueModal.habitId, parseFloat(tempValue)); }}
                 className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white py-3 rounded-lg transition-colors"
               >
                 Log
