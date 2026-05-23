@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TrendingUp, TrendingDown, Activity, Beaker, Target, Download, Check } from 'lucide-react';
+import { TrendingUp, Activity, Beaker, Target, Download, Check } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import {
   collection,
@@ -416,7 +416,6 @@ export default function Home() {
 
   const suggestedWorkout = getSuggestedWorkout();
   const streakData = calculateStreak();
-  const bodyDelta = getBodyCompDelta();
   const bodyCompStats = getBodyCompStats();
   const fatLossStatus = getFatLossStatus();
   const muscleStatus = getMuscleStatus();
