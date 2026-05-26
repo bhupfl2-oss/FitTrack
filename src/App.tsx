@@ -14,6 +14,7 @@ import Export from "@/pages/Export";
 import Wellness from "@/pages/Wellness";
 import HabitDetail from "@/pages/HabitDetail";
 import Profile from "@/pages/Profile";
+import AICoach from "@/pages/AICoach";
 import Login from "@/pages/Login";
 
 function App() {
@@ -22,6 +23,7 @@ function App() {
       <Router>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/ai-coach" element={<ProtectedRoute><AICoach /></ProtectedRoute>} />
           <Route path="/" element={<AppShell />}>
             <Route index element={<ProtectedRoute><Home /></ProtectedRoute>} />
             <Route path="workouts" element={<ProtectedRoute><Workouts /></ProtectedRoute>} />
