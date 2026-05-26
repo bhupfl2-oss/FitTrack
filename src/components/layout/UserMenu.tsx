@@ -6,10 +6,12 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
-import { LogOut } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { LogOut, User } from 'lucide-react';
 
 export default function UserMenu() {
   const { user, signOut } = useAuth();
+  const navigate = useNavigate();
   
   if (!user) return null;
 
@@ -36,6 +38,10 @@ export default function UserMenu() {
           {user.displayName || user.email}
         </div>
         <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => navigate('/profile')} className="cursor-pointer">
+          <User className="mr-2 h-4 w-4" />
+          <span>View Profile</span>
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={signOut} className="cursor-pointer">
           <LogOut className="mr-2 h-4 w-4" />
           <span>Sign out</span>
