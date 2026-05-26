@@ -335,21 +335,12 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         setHabits(habitsData);
 
         const doneMap: Record<string, boolean> = {};
-        const weekCountMap: Record<string, number> = {};
-        const weekStart = new Date();
-        weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
-        weekStart.setHours(0, 0, 0, 0);
-        const weekStartStr = weekStart.toISOString().split('T')[0];
 
         for (const habit of habitsData) {
           const todaySnap = await getDocs(
             query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'), where('date', '==', todayStr))
           );
           doneMap[habit.id] = !todaySnap.empty;
-          const weekSnap = await getDocs(
-            query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'),
-              where('date', '>=', weekStartStr), where('date', '<=', todayStr))
-          );
         }
         setHabitsDoneToday(doneMap);
       } catch (error) {
