@@ -222,8 +222,6 @@ export default function Profile() {
     }
   };
 
-  const canSave = !!profile.name && !!profile.dob && !!profile.gender;
-
   return (
     <div className="fixed inset-0 bg-slate-950 text-white z-50 flex flex-col" style={{ height: '100dvh' }}>
       {/* Header */}
@@ -236,8 +234,7 @@ export default function Profile() {
         </div>
         <button
           onClick={handleSave}
-          disabled={saving || !canSave}
-          className="bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors"
+          className="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors"
         >
           {saving ? 'Saving...' : 'Save'}
         </button>
@@ -252,7 +249,7 @@ export default function Profile() {
             {getInitials(profile.name) || '?'}
           </div>
           <div className="text-base font-medium">{profile.name || 'Your Name'}</div>
-          <div className="text-xs text-slate-500">Tap to edit profile</div>
+          <div className="text-xs text-slate-500 text-center">All fields are optional · only you can see this</div>
         </div>
 
         {/* Core */}
