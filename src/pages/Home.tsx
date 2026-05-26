@@ -9,6 +9,10 @@ import {
   limit,
   getDocs,
   where,
+  getDoc,
+  doc,
+  setDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
@@ -75,6 +79,18 @@ const workoutTemplates = {
   'Lower': { groups: ['Quads', 'Hamstrings', 'Glutes'], duration: 45 },
 };
 
+const muscleGroupMap: Record<string, string[]> = {
+  push: ['Push', 'Chest', 'Shoulders', 'Triceps'],
+  pushday: ['Push', 'Chest', 'Shoulders', 'Triceps'],
+  pull: ['Pull', 'Back', 'Biceps'],
+  pullday: ['Pull', 'Back', 'Biceps'],
+  legs: ['Legs', 'Quads', 'Hamstrings', 'Glutes'],
+  legsday: ['Legs', 'Quads', 'Hamstrings', 'Glutes'],
+  upper: ['Push', 'Pull', 'Chest', 'Back'],
+  lower: ['Legs', 'Quads', 'Hamstrings'],
+  running: ['Cardio'],
+};
+
 const formatTemplate = (t: string): string => {
   if (!t) return '';
   const map: Record<string, string> = {
@@ -104,6 +120,11 @@ export default function Home() {
   const [habitsDoneToday, setHabitsDoneToday] = useState<Record<string, boolean>>({});
   const [weeklyHabitCounts, setWeeklyHabitCounts] = useState<Record<string, number>>({});
   const todayStr = new Date().toISOString().split('T')[0];
+
+  const [muscleAlert, setMuscleAlert] = useState<{ group: string; daysSince: number } | null>(null);
+  const [aiInsights, setAiInsights] = useState<{ workout: string; food: string; labs: string } | null>(null);
+  const [isLoadingInsights, setIsLoadingInsights] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
 
   const toggleHabit = useCallback(async (habitId: string) => {
     if (!user) return;
@@ -140,6 +161,7 @@ export default function Home() {
           const prev = sessions.slice(1).find(s => s.template === lastType);
           setPrevSession(prev || null);
         }
+        setMuscleAlert(getMuscleGroupAlert(sessions));
 
         const bodyQuery = query(
           collection(db, 'users', user.uid, 'bodyComp'),
@@ -206,6 +228,7 @@ export default function Home() {
         console.error('Error fetching data:', error);
       } finally {
         setLoading(false);
+        fetchAIInsights();
       }
     };
     fetchAllData();
@@ -337,6 +360,195 @@ export default function Home() {
     return user.displayName.charAt(0).toUpperCase();
   };
 
+  const getMuscleGroupAlert = (sessions: WorkoutSession[]) => {
+    const now = new Date();
+    const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+    const recentSessions = sessions.filter(s => new Date(s.date) >= fourteenDaysAgo);
+
+    const groupLastDates: Record<string, Date | null> = { Push: null, Pull: null, Legs: null };
+    for (const session of recentSessions) {
+      const template = session.template?.toLowerCase().replace(/\s+/g, '') || '';
+      const mapped = muscleGroupMap[template] || [];
+      for (const group of ['Push', 'Pull', 'Legs'] as const) {
+        if (mapped.includes(group)) {
+          const sessionDate = new Date(session.date);
+          if (!groupLastDates[group] || sessionDate > groupLastDates[group]!) {
+            groupLastDates[group] = sessionDate;
+          }
+        }
+      }
+    }
+
+    const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+    let mostNeglected: { group: string; daysSince: number } | null = null;
+
+    for (const group of ['Push', 'Pull', 'Legs'] as const) {
+      const lastDate = groupLastDates[group];
+      if (!lastDate || lastDate < tenDaysAgo) {
+        const daysSince = lastDate
+          ? Math.floor((now.getTime() - lastDate.getTime()) / (24 * 60 * 60 * 1000))
+          : 999;
+        if (!mostNeglected || daysSince > mostNeglected.daysSince) {
+          mostNeglected = { group, daysSince };
+        }
+      }
+    }
+    return mostNeglected;
+  };
+
+  const calculateAge = (dob: string) => {
+    if (!dob) return null;
+    const birth = new Date(dob);
+    const now = new Date();
+    let age = now.getFullYear() - birth.getFullYear();
+    const m = now.getMonth() - birth.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) age--;
+    return age;
+  };
+
+  const refreshInsights = async () => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'aiInsights', 'daily'));
+    } catch (_) {}
+    fetchAIInsights();
+  };
+
+  const fetchAIInsights = async () => {
+    if (!user) return;
+    setIsLoadingInsights(true);
+    setInsightsError(null);
+
+    try {
+      const cacheRef = doc(db, 'users', user.uid, 'aiInsights', 'daily');
+      const cacheSnap = await getDoc(cacheRef);
+      if (cacheSnap.exists()) {
+        const cached = cacheSnap.data() as { insights: { workout: string; food: string; labs: string }; generatedAt: string };
+        const ageHours = (Date.now() - new Date(cached.generatedAt).getTime()) / 3600000;
+        if (ageHours < 24) {
+          setAiInsights(cached.insights);
+          setIsLoadingInsights(false);
+          return;
+        }
+      }
+
+      const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+      const profileData = profileSnap.exists() ? profileSnap.data() as any : null;
+
+      let contextParts: string[] = [];
+
+      if (profileData) {
+        const age = calculateAge(profileData.dob);
+        const parts = [
+          profileData.name && `Name: ${profileData.name}`,
+          age && `Age: ${age}`,
+          profileData.gender && `Gender: ${profileData.gender}`,
+          profileData.heightCm && `Height: ${profileData.heightCm} cm`,
+          profileData.foodPreference && `Diet: ${profileData.foodPreference}`,
+          profileData.allergies && `Allergies: ${profileData.allergies}`,
+          profileData.activityLevel && `Activity: ${profileData.activityLevel}`,
+          profileData.primaryGoal && `Goal: ${profileData.primaryGoal}`,
+          profileData.chronicConditions?.length && `Conditions: ${profileData.chronicConditions.join(', ')}`,
+        ].filter(Boolean) as string[];
+        contextParts.push('PROFILE:\n' + parts.join('\n'));
+      }
+
+      if (bodyStats.length > 0) {
+        const cur = bodyStats[0];
+        const prev = bodyStats.length > 1 ? bodyStats[1] : null;
+        const parts = [
+          cur.weightKg != null && `Weight: ${cur.weightKg} kg`,
+          cur.pbf != null && `PBF: ${cur.pbf}%`,
+          cur.smm != null && `SMM: ${cur.smm} kg`,
+          prev?.weightKg != null && cur.weightKg != null && `Weight change: ${(cur.weightKg - prev.weightKg).toFixed(1)} kg`,
+          prev?.pbf != null && cur.pbf != null && `PBF change: ${(cur.pbf - prev.pbf).toFixed(1)}%`,
+        ].filter(Boolean) as string[];
+        contextParts.push('BODY STATS (latest):\n' + parts.join('\n'));
+      }
+
+      if (workoutSessions.length > 0) {
+        const last3 = workoutSessions.slice(0, 3);
+        contextParts.push('LAST 3 WORKOUTS:\n' + last3.map(s => `- ${s.date}: ${s.template}`).join('\n'));
+      }
+
+      if (labResults.length > 0) {
+        const latest = labResults[0];
+        if (latest.results && Array.isArray(latest.results)) {
+          const outOfRange = latest.results.filter((test: LabTest) => {
+            const key = test.testName.toLowerCase().replace(/\s+/g, '');
+            const range = labRanges[key];
+            if (!range) return false;
+            if (key === 'hdl') return test.value < range.min;
+            return test.value < range.min || test.value > range.max;
+          });
+          if (outOfRange.length > 0) {
+            contextParts.push(`LABS (latest, ${outOfRange.length} out of range):\n` +
+              outOfRange.map((t: LabTest) => `- ${t.testName}: ${t.value} ${t.unit}`).join('\n'));
+          } else {
+            contextParts.push('LABS: All markers in range');
+          }
+        }
+      }
+
+      if (muscleAlert) {
+        contextParts.push(`MUSCLE ALERT: ${muscleAlert.group} neglected — ${muscleAlert.daysSince} days since last session`);
+      }
+
+      const contextString = contextParts.join('\n\n');
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 600,
+          messages: [{
+            role: 'user',
+            content: `You are a personal health coach. Based on this user's health data, generate 3 short personalized insights.
+
+USER DATA:
+${contextString}
+
+Return ONLY a JSON object, no markdown, no preamble:
+{
+  "workout": "1-2 sentence actionable workout insight",
+  "food": "1-2 sentence food/nutrition insight based on their diet preference and goals",
+  "labs": "1-2 sentence insight based on lab results, or general health tip if no labs"
+}
+
+Rules:
+- Be specific, use actual numbers from their data
+- Keep each insight under 25 words
+- For food: respect their diet preference (veg/non-veg/vegan etc)
+- Tone: friendly coach, not medical advice`,
+          }],
+        }),
+      });
+
+      if (!response.ok) throw new Error('AI request failed');
+      const data = await response.json();
+      const content = data.content?.[0]?.text || '';
+      const parsed = JSON.parse(content);
+      const insights = {
+        workout: parsed.workout || '',
+        food: parsed.food || '',
+        labs: parsed.labs || '',
+      };
+      setAiInsights(insights);
+      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString() });
+    } catch (e) {
+      console.error('AI insights error:', e);
+      setInsightsError('Could not load insights');
+    } finally {
+      setIsLoadingInsights(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
@@ -385,6 +597,14 @@ export default function Home() {
               🔔 {upcomingTests.length} lab test{upcomingTests.length > 1 ? 's' : ''} due soon
             </span>
             <span className="text-xs bg-amber-500 text-white rounded-full px-2 py-0.5 font-medium">View</span>
+          </div>
+        )}
+
+        {muscleAlert && (
+          <div className="bg-amber-500/10 border border-amber-500/25 rounded-xl px-4 py-3 mb-4">
+            <span className="text-amber-400 text-sm">
+              ⚠️ {muscleAlert.group} day — {muscleAlert.daysSince} days since last session
+            </span>
           </div>
         )}
 
@@ -494,6 +714,65 @@ export default function Home() {
               </div>
               <span className="text-xs text-slate-500 whitespace-nowrap">{habitsDoneCount} / {habits.length} done today</span>
             </div>
+          </div>
+        )}
+
+        {(aiInsights || isLoadingInsights) && (
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-slate-300 text-xs font-bold tracking-wider">AI INSIGHTS</span>
+              <button onClick={refreshInsights} className="text-slate-500 text-xs hover:text-emerald-400 transition-colors">
+                Refresh ↻
+              </button>
+            </div>
+
+            {isLoadingInsights && (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-4">
+                <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin inline-block mr-2" />
+                <span className="text-slate-400 text-sm">✦ Generating insights…</span>
+              </div>
+            )}
+
+            {insightsError && !isLoadingInsights && (
+              <div className="text-slate-500 text-xs mb-2">{insightsError}</div>
+            )}
+
+            {aiInsights && !isLoadingInsights && (
+              <>
+                <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4 mb-3">
+                  <div className="text-emerald-400 text-xs font-bold tracking-wider">✦ Workout</div>
+                  <div className="text-slate-300 text-sm leading-relaxed mt-1">{aiInsights.workout}</div>
+                  <button
+                    onClick={() => navigate('/ai-coach?topic=workout')}
+                    className="text-emerald-400 text-xs mt-2 hover:underline"
+                  >
+                    Ask a follow-up →
+                  </button>
+                </div>
+
+                <div className="bg-blue-500/5 border border-blue-500/20 rounded-xl p-4 mb-3">
+                  <div className="text-blue-400 text-xs font-bold tracking-wider">✦ Food</div>
+                  <div className="text-slate-300 text-sm leading-relaxed mt-1">{aiInsights.food}</div>
+                  <button
+                    onClick={() => navigate('/ai-coach?topic=food')}
+                    className="text-blue-400 text-xs mt-2 hover:underline"
+                  >
+                    Ask a follow-up →
+                  </button>
+                </div>
+
+                <div className="bg-purple-500/5 border border-purple-500/20 rounded-xl p-4 mb-3">
+                  <div className="text-purple-400 text-xs font-bold tracking-wider">✦ Labs</div>
+                  <div className="text-slate-300 text-sm leading-relaxed mt-1">{aiInsights.labs}</div>
+                  <button
+                    onClick={() => navigate('/ai-coach?topic=labs')}
+                    className="text-purple-400 text-xs mt-2 hover:underline"
+                  >
+                    Ask a follow-up →
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -629,6 +908,13 @@ export default function Home() {
               <p className="text-xs">Track your yearly blood tests</p>
             </div>
           )}
+        </button>
+
+        <button
+          onClick={() => navigate('/ai-coach')}
+          className="fixed bottom-24 left-6 w-14 h-14 rounded-full bg-emerald-500 shadow-lg flex items-center justify-center text-white text-xl z-40 hover:bg-emerald-600 transition-colors"
+        >
+          ✦
         </button>
       </div>
     </div>
