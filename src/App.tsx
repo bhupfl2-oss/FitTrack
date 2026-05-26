@@ -13,6 +13,7 @@ import LabUpload from "@/pages/LabUpload";
 import Export from "@/pages/Export";
 import Wellness from "@/pages/Wellness";
 import HabitDetail from "@/pages/HabitDetail";
+import Profile from "@/pages/Profile";
 import Login from "@/pages/Login";
 
 function App() {
@@ -33,6 +34,7 @@ function App() {
             <Route path="export" element={<ProtectedRoute><Export /></ProtectedRoute>} />
             <Route path="wellness" element={<ProtectedRoute><Wellness /></ProtectedRoute>} />
             <Route path="wellness/:habitId" element={<ProtectedRoute><HabitDetail /></ProtectedRoute>} />
+            <Route path="profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
           </Route>
         </Routes>
       </Router>
