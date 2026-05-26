@@ -12,7 +12,6 @@ import {
   getDoc,
   doc,
   setDoc,
-  deleteDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
@@ -101,7 +100,6 @@ export default function Home() {
   const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [habitsDoneToday, setHabitsDoneToday] = useState<Record<string, boolean>>({});
-  const [weeklyHabitCounts, setWeeklyHabitCounts] = useState<Record<string, number>>({});
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [muscleAlert, setMuscleAlert] = useState<{ group: string; daysSince: number } | null>(null);
@@ -352,10 +350,8 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
             query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'),
               where('date', '>=', weekStartStr), where('date', '<=', todayStr))
           );
-          weekCountMap[habit.id] = weekSnap.size;
         }
         setHabitsDoneToday(doneMap);
-        setWeeklyHabitCounts(weekCountMap);
       } catch (error) {
         console.error('Error fetching data:', error);
       } finally {
@@ -460,12 +456,6 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
   const getFirstName = () => {
     if (!user?.displayName) return 'there';
     return user.displayName.split(' ')[0];
-  };
-
-  const getUserInitial = () => {
-    if (user?.photoURL) return null;
-    if (!user?.displayName) return 'U';
-    return user.displayName.charAt(0).toUpperCase();
   };
 
   if (loading) {
