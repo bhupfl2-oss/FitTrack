@@ -1,1 +1,8 @@
-{"rewrites":[{"source":"/(.*)", "destination":"/index.html"}]}
+{
+  "rewrites": [
+    {
+      "source": "/((?!sw\\.js|manifest\\.json|icon-).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
