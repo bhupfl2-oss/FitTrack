@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, Plus, ChevronLeft } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, addDoc, updateDoc, doc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
@@ -57,6 +57,10 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
   const [showAddFieldDropdown, setShowAddFieldDropdown] = useState(false);
   const [addFieldSearch, setAddFieldSearch] = useState('');
   const [customFieldDefs, setCustomFieldDefs] = useState<CustomFieldDef[]>([]);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [aiFilledFields, setAiFilledFields] = useState<Set<string>>(new Set());
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toStr = (val: number | null | undefined): string => {
     if (val == null || isNaN(Number(val))) return '';
@@ -114,10 +118,18 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
     }
     setShowAddFieldDropdown(false);
     setAddFieldSearch('');
+    setIsExtracting(false);
+    setAiFilledFields(new Set());
+    setExtractionError(null);
   }, [editData, isOpen]);
 
   const updateStat = (field: keyof BodyStats, value: string) => {
     setStats(prev => ({ ...prev, [field]: value }));
+    setAiFilledFields(prev => {
+      const next = new Set(prev);
+      next.delete(field as string);
+      return next;
+    });
   };
 
   const calculateDerived = () => {
@@ -230,6 +242,92 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
 
   if (!isOpen) return null;
 
+  const clearExtraction = () => {
+    setIsExtracting(false);
+    setAiFilledFields(new Set());
+    setExtractionError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsExtracting(true);
+    setExtractionError(null);
+
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result.split(',')[1]);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const mediaType = file.type;
+      const fileContent = file.type === 'application/pdf'
+        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+        : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1000,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Extract body composition stats from this image. Return ONLY a JSON object, no markdown, no preamble:\n{\n  \"weightKg\": number or null,\n  \"pbf\": number or null,\n  \"smm\": number or null,\n  \"legLeanMass\": number or null,\n  \"ecwRatio\": number or null,\n  \"date\": \"YYYY-MM-DD\" or null\n}\nRules:\n- Only include fields clearly visible in the image\n- weightKg = total body weight in kg\n- pbf = body fat percentage (PBF%)\n- smm = skeletal muscle mass in kg\n- legLeanMass = leg lean mass in kg\n- ecwRatio = extracellular water ratio (usually 0.3xx)\n- date = measurement date if visible\n- Return null for any field not found\n- No text outside the JSON object' },
+              fileContent,
+            ],
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const content = data.content?.[0]?.text || '';
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON found in response');
+
+      const extracted = JSON.parse(jsonMatch[0]);
+      const filled = new Set<string>();
+
+      setStats(prev => {
+        const next = { ...prev };
+        if (extracted.weightKg != null) { next.weightKg = String(extracted.weightKg); filled.add('weightKg'); }
+        if (extracted.pbf != null) { next.pbf = String(extracted.pbf); filled.add('pbf'); }
+        if (extracted.smm != null) { next.smm = String(extracted.smm); filled.add('smm'); }
+        if (extracted.legLeanMass != null) { next.legLeanMass = String(extracted.legLeanMass); filled.add('legLeanMass'); }
+        if (extracted.ecwRatio != null) { next.ecwRatio = String(extracted.ecwRatio); filled.add('ecwRatio'); }
+        if (extracted.date) { next.date = extracted.date; filled.add('date'); }
+        return next;
+      });
+
+      setAiFilledFields(filled);
+      setExtractionError(null);
+    } catch (error) {
+      console.error('Extraction error:', error);
+      setExtractionError('Could not read image \u2014 fill in manually');
+      setAiFilledFields(new Set());
+    } finally {
+      setIsExtracting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const calculatedFatMass = calculateDerived();
   const canSave = !isSaving && !!stats.date && !!stats.weightKg && !!stats.pbf;
 
@@ -260,6 +358,60 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto overscroll-contain p-4 pb-28 space-y-6">
 
+        {/* Upload zone / AI banner */}
+        {!isExtracting && aiFilledFields.size === 0 && !extractionError && (
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed border-slate-700 rounded-xl p-6 text-center cursor-pointer hover:border-slate-500 transition-colors"
+          >
+            <div className="text-sm font-medium text-slate-300">Upload InBody / scale screenshot</div>
+            <div className="text-xs text-slate-500 mt-1">AI will fill in the fields automatically</div>
+            <div className="flex items-center justify-center gap-2 mt-3">
+              <span className="text-xs bg-slate-800 text-slate-400 px-2 py-1 rounded-full">📷 Photo</span>
+              <span className="text-xs bg-slate-800 text-slate-400 px-2 py-1 rounded-full">🖼 PNG</span>
+              <span className="text-xs bg-slate-800 text-slate-400 px-2 py-1 rounded-full">📄 PDF</span>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
+        )}
+
+        {isExtracting && (
+          <div className="bg-emerald-900/40 border border-emerald-500/30 rounded-lg p-3 flex items-center gap-3">
+            <span className="text-emerald-400">✦</span>
+            <span className="text-sm text-emerald-100">AI reading your report…</span>
+            <div className="ml-auto w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+        )}
+
+        {!isExtracting && extractionError && (
+          <div className="bg-red-900/30 border border-red-500/30 rounded-lg p-3 flex items-center justify-between">
+            <span className="text-sm text-red-300">{extractionError}</span>
+            <button onClick={clearExtraction} className="text-xs text-slate-400 hover:text-white underline">Try again</button>
+          </div>
+        )}
+
+        {!isExtracting && aiFilledFields.size > 0 && !extractionError && (
+          <div className="bg-emerald-900/30 border border-emerald-500/30 rounded-lg p-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-emerald-400">✓</span>
+              <span className="text-sm text-emerald-100">{aiFilledFields.size} fields extracted · Review and edit before saving</span>
+            </div>
+            <button onClick={clearExtraction} className="text-xs text-slate-400 hover:text-white">× Clear</button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <div className="flex-1 h-px bg-slate-700" />
+          <span className="text-xs text-slate-500">or fill manually</span>
+          <div className="flex-1 h-px bg-slate-700" />
+        </div>
+
         {/* Date Field */}
         <div>
           <label className="block text-sm font-medium text-slate-300 mb-1">Date</label>
@@ -267,7 +419,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
             type="date"
             value={stats.date}
             onChange={(e) => updateStat('date', e.target.value)}
-            className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+            className={`w-full bg-slate-800 border rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('date') ? 'border-emerald-500' : 'border-slate-700'}`}
           />
         </div>
 
@@ -283,7 +435,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
               placeholder="70.5"
               value={stats.weightKg}
               onChange={(e) => updateStat('weightKg', e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className={`w-full bg-slate-800 border rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('weightKg') ? 'border-emerald-500' : 'border-slate-700'}`}
             />
           </div>
 
@@ -295,7 +447,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
               placeholder="15.5"
               value={stats.pbf}
               onChange={(e) => updateStat('pbf', e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className={`w-full bg-slate-800 border rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('pbf') ? 'border-emerald-500' : 'border-slate-700'}`}
             />
           </div>
 
@@ -307,7 +459,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
               placeholder="35.2"
               value={stats.smm}
               onChange={(e) => updateStat('smm', e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className={`w-full bg-slate-800 border rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('smm') ? 'border-emerald-500' : 'border-slate-700'}`}
             />
           </div>
 
@@ -319,7 +471,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
               placeholder="12.8"
               value={stats.legLeanMass}
               onChange={(e) => updateStat('legLeanMass', e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className={`w-full bg-slate-800 border rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('legLeanMass') ? 'border-emerald-500' : 'border-slate-700'}`}
             />
           </div>
 
@@ -331,7 +483,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
               placeholder="0.385"
               value={stats.ecwRatio}
               onChange={(e) => updateStat('ecwRatio', e.target.value)}
-              className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              className={`w-full bg-slate-800 border rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 ${aiFilledFields.has('ecwRatio') ? 'border-emerald-500' : 'border-slate-700'}`}
             />
           </div>
 
