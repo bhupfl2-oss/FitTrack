@@ -1,11 +1,9 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useOnboarding } from '@/hooks/useOnboarding';
 
 const STEPS = 4;
 
 export default function OnboardingWizard() {
-  const navigate = useNavigate();
   const { saveProfile, completeOnboarding } = useOnboarding();
   const [step, setStep] = useState(0);
   const [profile, setProfile] = useState({
@@ -18,10 +16,10 @@ export default function OnboardingWizard() {
   const handleSaveProfile = async () => {
     await saveProfile({
       name: profile.name,
-      age: Number(profile.age) || null,
+      age: Number(profile.age) || 0,
       gender: profile.gender,
-      heightCm: Number(profile.heightCm) || null,
-      targetWeightKg: Number(profile.targetWeightKg) || null,
+      heightCm: Number(profile.heightCm) || 0,
+      targetWeightKg: Number(profile.targetWeightKg) || 0,
       goal: profile.goal,
     });
     next();
