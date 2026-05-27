@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Target, Download, Check } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { useCompleteness } from '@/hooks/useCompleteness';
 import {
   collection,
   query,
@@ -106,6 +107,9 @@ export default function Home() {
   const [aiInsights, setAiInsights] = useState<{ workout: string; food: string; labs: string } | null>(null);
   const [isLoadingInsights, setIsLoadingInsights] = useState(false);
   const [insightIndex, setInsightIndex] = useState(0);
+
+  const { workouts: hasWorkouts, body: hasBody, labs: hasLabs, totalComplete } = useCompleteness();
+  const completeness = { workouts: hasWorkouts, body: hasBody, labs: hasLabs };
 
   const insightTopics = ['workout', 'food', 'labs'] as const;
   const insightColors: Record<typeof insightTopics[number], { bg: string; border: string; text: string }> = {
@@ -468,6 +472,46 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-24">
       <div className="p-5 space-y-4">
+
+        {totalComplete < 3 && (
+          <div className="bg-slate-900 border border-blue-500/20 rounded-xl p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-blue-400 text-xs font-medium">Complete your FitTrack</span>
+              <span className="text-slate-400 text-xs">{totalComplete} of 3</span>
+            </div>
+            <div className="h-1 bg-slate-800 rounded-full mb-3 overflow-hidden">
+              <div
+                className="h-full bg-blue-500 rounded-full transition-all"
+                style={{ width: `${Math.round((totalComplete / 3) * 100)}%` }}
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { key: 'workouts', label: 'Workouts', path: '/workouts' },
+                { key: 'body', label: 'Body', path: '/body' },
+                { key: 'labs', label: 'Labs', path: '/labs' },
+              ] as const).map(({ key, label, path }) => {
+                const done = completeness[key];
+                return (
+                  <div
+                    key={key}
+                    onClick={() => !done && navigate(path)}
+                    className={`text-center py-2 px-1 rounded-lg border transition-colors ${
+                      done
+                        ? 'bg-blue-500/10 border-blue-500/30 cursor-default'
+                        : 'bg-slate-800 border-slate-700 cursor-pointer hover:border-blue-500/40'
+                    }`}
+                  >
+                    <p className={`text-[11px] font-medium mb-0.5 ${done ? 'text-blue-400' : 'text-slate-300'}`}>{label}</p>
+                    <p className={`text-[10px] ${done ? 'text-blue-500' : 'text-slate-500'}`}>
+                      {done ? '✓ Done' : key === 'labs' ? 'Upload PDF' : 'Add now'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Header */}
         <div className="flex items-center justify-between">

@@ -71,24 +71,15 @@ export default function AddHabitModal({ onClose, onHabitAdded }: AddHabitModalPr
     <div className="fixed inset-0 bg-slate-950 text-white z-[60] flex flex-col" style={{ height: '100dvh' }}>
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-slate-800 flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-lg transition-colors">
-            <ChevronLeft size={24} />
-          </button>
-          <h1 className="text-lg font-semibold">New habit</h1>
-        </div>
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={loading || !formData.name || !formData.icon}
-          className="bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition-colors"
-        >
-          {loading ? 'Saving...' : 'Save'}
+        <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-lg transition-colors">
+          <ChevronLeft size={24} />
         </button>
+        <h1 className="text-lg font-semibold">New habit</h1>
+        <div className="w-10" />
       </div>
 
       {/* Scrollable content */}
-      <div className="flex-1 overflow-y-auto p-4 pb-20 space-y-6">
+      <div className="flex-1 overflow-y-auto p-4 space-y-6">
         {/* Name */}
         <div>
           <label className="block text-sm font-medium mb-2">Name</label>
@@ -183,6 +174,18 @@ export default function AddHabitModal({ onClose, onHabitAdded }: AddHabitModalPr
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-400"
           />
         </div>
+      </div>
+
+      {/* Save button — always visible at bottom */}
+      <div className="flex-shrink-0 p-4 border-t border-slate-800">
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={loading || !formData.name || !formData.icon}
+          className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium py-3 rounded-lg transition-colors"
+        >
+          {loading ? 'Saving...' : 'Save habit'}
+        </button>
       </div>
     </div>
   );

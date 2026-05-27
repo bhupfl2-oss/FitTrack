@@ -166,6 +166,9 @@ export default function WorkoutSession() {
           sets: exercise.sets || [{ reps: '', weight: '' }],
         })) || []
       );
+    } else if (location.state?.aiWorkout) {
+      // AI suggested workout
+      loadAiSuggestedWorkout();
     } else if (templateType === 'custom' && location.state?.customWorkout) {
       const customWorkout = location.state.customWorkout;
       setTemplate(customWorkout.name);
@@ -266,6 +269,32 @@ export default function WorkoutSession() {
       setLastSessionExercises(lastExercises);
     } catch (_) {
       // silent — ghost values are best-effort
+    }
+  };
+
+  // --- Load AI suggested workout ---
+  const loadAiSuggestedWorkout = async () => {
+    if (!user) return;
+    try {
+      const draftRef = doc(db, 'users', user.uid, 'draftSessions', 'aiSuggested');
+      const draftSnap = await getDoc(draftRef);
+      if (draftSnap.exists()) {
+        const draft = draftSnap.data();
+        setTemplate('AI Suggested Workout');
+        setDraftKey('aiSuggested');
+        setExercises(
+          draft.exercises?.map((exercise: any, index: number) => ({
+            id: `exercise-${index}`,
+            name: exercise.name,
+            hasWeight: exercise.hasWeight !== false,
+            note: exercise.note,
+            sets: exercise.sets || [{ reps: '', weight: '' }],
+          })) || []
+        );
+        if (draft.sessionDate) setSessionDate(draft.sessionDate);
+      }
+    } catch (_) {
+      // silent
     }
   };
 
@@ -468,6 +497,13 @@ export default function WorkoutSession() {
       </div>
 
       <div className="p-6 space-y-6">
+        {/* AI suggested banner */}
+        {location.state?.aiWorkout && (
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2 text-emerald-400 text-sm">
+            ✦ AI suggested · edit as needed
+          </div>
+        )}
+
         {/* Date picker */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
           <span style={{ fontSize: '13px', color: '#6b7280' }}>Date</span>
