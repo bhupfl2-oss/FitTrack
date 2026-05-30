@@ -108,11 +108,20 @@ export default function OnboardingWizard() {
               ))}
             </div>
 
-            <div className="border-l-2 border-emerald-500/30 pl-3 mb-6">
+            <div className="border-l-2 border-emerald-500/30 pl-3 mb-4">
               <p className="text-xs text-slate-400 leading-relaxed">
                 Low energy + rising body fat + low Vitamin D might all be part of the same story.
                 FitTrack connects the dots so you don't have to.
               </p>
+            </div>
+
+            {/* Export highlight */}
+            <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-3.5 flex items-center gap-3 mb-6">
+              <span className="text-xl flex-shrink-0">📤</span>
+              <div>
+                <p className="text-sm font-semibold text-white">Export & share</p>
+                <p className="text-xs text-slate-400 mt-0.5">Download last week or month as PDF or TXT — share with your doctor or gym coach</p>
+              </div>
             </div>
 
             <button onClick={() => setStep(2)}
@@ -166,6 +175,13 @@ export default function OnboardingWizard() {
                   title: 'Log food',
                   sub: 'Describe what you ate or take a photo',
                   path: '/food',
+                  border: 'border-slate-700 bg-slate-900',
+                },
+                {
+                  icon: '📤',
+                  title: 'Export my health data',
+                  sub: 'Download workouts, food or labs to share with your doctor or coach',
+                  path: '/export',
                   border: 'border-slate-700 bg-slate-900',
                 },
               ].map(({ icon, title, sub, path, border, badge }) => (
