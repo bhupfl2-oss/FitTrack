@@ -19,6 +19,7 @@ import {
   limit,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { bumpDataVersion } from '@/lib/dataVersion';
 import { cleanData } from '@/lib/cleanData';
 
 interface Exercise {
@@ -447,6 +448,8 @@ export default function WorkoutSession() {
         });
       }
 
+      await bumpDataVersion(user.uid);
+      await bumpDataVersion(user.uid);
       // Clear draft on successful save
       if (draftKey) {
         try {

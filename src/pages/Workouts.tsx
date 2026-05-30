@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUp, ArrowDown, TrendingUp, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil } from 'lucide-react';
+import { ArrowUp, ArrowDown, TrendingUp, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { useActivityRings } from '@/hooks/useActivityRings';
 
 interface WorkoutSession {
   id: string;
@@ -47,6 +48,18 @@ interface CustomWorkout {
 interface ExerciseItem {
   name: string;
   category: string;
+}
+
+interface AIPlanExercise {
+  exercise: string;
+  sets: number;
+  reps: number;
+  suggestedWeight: number;
+  lastWeight: number;
+}
+
+interface AIWorkoutPlan {
+  plan: AIPlanExercise[];
 }
 
 const EXERCISE_LIBRARY: ExerciseItem[] = [
@@ -108,6 +121,13 @@ const DEFAULT_TEMPLATES = [
   { type: 'lower', title: 'Lower Body', subtitle: 'Quads · Hamstrings · Glutes', icon: TrendingUp },
 ];
 
+const QUICK_CHIPS = [
+  { label: '🦵 Legs · 30m', prompt: 'legs today, only 30 minutes' },
+  { label: '💪 Push · intense', prompt: 'push day, want to push hard today' },
+  { label: '🔙 Pull day', prompt: 'pull day' },
+  { label: '⚡ Quick 20m', prompt: 'quick full body workout, only 20 minutes' },
+];
+
 const calculateOneRM = (weight: number, reps: number): number => weight * (1 + reps / 30);
 
 export default function Workouts() {
@@ -129,6 +149,21 @@ export default function Workouts() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('all');
 
+  // AI Planner state
+  const [aiInput, setAiInput] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiIntro, setAiIntro] = useState('');
+  const [aiPlan, setAiPlan] = useState<AIPlanExercise[] | null>(null);
+  const [aiError, setAiError] = useState('');
+
+  const rings = useActivityRings(user?.uid || '');
+
+  // Arc helper for SVG rings
+  const arc = (r: number, val: number) => {
+    const c = 2 * Math.PI * r;
+    return { dasharray: c, dashoffset: c * (1 - Math.min(1, Math.max(0, val))) };
+  };
+
   useEffect(() => {
     if (!user) return;
     const fetchData = async () => {
@@ -147,6 +182,189 @@ export default function Workouts() {
     fetchData();
   }, [user]);
 
+  // ── AI PLANNER ──
+  const buildContext = async (input: string): Promise<string> => {
+    if (!user) return '';
+    const parts: string[] = [];
+
+    // Fetch profile for fitness context
+    try {
+      const profileDoc = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+      if (profileDoc.exists()) {
+        const p = profileDoc.data() as any;
+        const profileParts = [
+          p.primaryGoal && `Goal: ${p.primaryGoal}`,
+          p.fitnessFocus?.length && `Fitness focus: ${p.fitnessFocus.join(', ')}`,
+          p.fitnessTarget && `Target: ${p.fitnessTarget}`,
+          p.foodPreference && `Diet: ${p.foodPreference}`,
+          p.activityLevel && `Activity level: ${p.activityLevel}`,
+        ].filter(Boolean);
+        if (profileParts.length) parts.push('Profile:\n' + profileParts.join('\n'));
+      }
+    } catch {}
+
+    // Detect muscle group from input
+    const lower = input.toLowerCase();
+    const keywords: Record<string, string> = {
+      leg: 'legs', squat: 'legs', quad: 'legs', hamstring: 'legs',
+      push: 'push', chest: 'push', bench: 'push', shoulder: 'push',
+      pull: 'pull', back: 'pull', deadlift: 'pull', bicep: 'pull',
+    };
+    let matchedType = '';
+    for (const [kw, type] of Object.entries(keywords)) {
+      if (lower.includes(kw)) { matchedType = type; break; }
+    }
+
+    // Last session of same type
+    if (matchedType) {
+      const sameSessions = sessions.filter(s =>
+        s.template?.toLowerCase().includes(matchedType) ||
+        (matchedType === 'legs' && ['legs', 'lower', 'legsday'].some(t => s.template?.toLowerCase().includes(t))) ||
+        (matchedType === 'push' && ['push', 'upper', 'pushday'].some(t => s.template?.toLowerCase().includes(t))) ||
+        (matchedType === 'pull' && ['pull', 'pullday'].some(t => s.template?.toLowerCase().includes(t)))
+      );
+      if (sameSessions.length > 0) {
+        const last = sameSessions[0];
+        parts.push(`Last ${matchedType} session: ${last.date}`);
+        if (last.exercises && last.exercises.length > 0) {
+          const exLines = last.exercises.slice(0, 5).map(ex => {
+            const bestSet = ex.sets.reduce((b, c) => c.weight > b.weight ? c : b, ex.sets[0]);
+            return `  - ${ex.name}: ${ex.sets.length} sets, best set ${bestSet?.weight ?? 0}kg × ${bestSet?.reps ?? 0}`;
+          });
+          parts.push('Exercises:\n' + exLines.join('\n'));
+        }
+      }
+    }
+
+    // Latest body stats
+    try {
+      const bodySnap = await getDocs(query(
+        collection(db, 'users', user.uid, 'bodyComp'),
+        orderBy('date', 'desc'), limit(1)
+      ));
+      if (!bodySnap.empty) {
+        const b = bodySnap.docs[0].data();
+        parts.push(`Body stats: weight ${b.weightKg ?? '?'}kg, body fat ${b.pbf ?? '?'}%, muscle ${b.smm ?? '?'}kg`);
+      }
+    } catch {}
+
+    // Latest labs (out of range only)
+    try {
+      const labSnap = await getDocs(query(
+        collection(db, 'users', user.uid, 'labs'),
+        orderBy('date', 'desc'), limit(1)
+      ));
+      if (!labSnap.empty) {
+        const lab = labSnap.docs[0].data();
+        const labRanges: Record<string, { min: number; max: number }> = {
+          vitd: { min: 30, max: 100 }, b12: { min: 200, max: 900 },
+          hb: { min: 13.5, max: 17.5 }, creatinine: { min: 0.7, max: 1.3 },
+        };
+        if (lab.results && Array.isArray(lab.results)) {
+          const oor = lab.results.filter((t: any) => {
+            const key = t.testName?.toLowerCase().replace(/\s+/g, '');
+            const range = labRanges[key];
+            return range && (t.value < range.min || t.value > range.max);
+          });
+          if (oor.length > 0) {
+            parts.push('Lab flags: ' + oor.map((t: any) => `${t.testName} ${t.value} ${t.unit}`).join(', '));
+          }
+        }
+      }
+    } catch {}
+
+    return parts.join('\n');
+  };
+
+  const sendToAI = async (prompt: string) => {
+    if (!prompt.trim() || !user) return;
+    setAiLoading(true);
+    setAiPlan(null);
+    setAiIntro('');
+    setAiError('');
+
+    try {
+      const context = await buildContext(prompt);
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 800,
+          messages: [{
+            role: 'user',
+            content: `You are a personal fitness coach. The user wants a workout plan.
+
+User request: "${prompt}"
+
+Context:
+${context || 'No previous data available.'}
+
+Respond with exactly this format — a one sentence intro referencing their data, then a JSON block:
+
+<intro>One sentence about their last session or body stats that shows you know their history.</intro>
+<plan>{"plan":[{"exercise":"Exercise Name","sets":3,"reps":8,"suggestedWeight":80,"lastWeight":75}]}</plan>
+
+Rules:
+- 3-6 exercises appropriate for the muscle group
+- If time is mentioned (e.g. 30 mins), keep to 4 compound exercises max
+- suggestedWeight should be ~2.5kg more than lastWeight if last session data exists, else use a sensible starting weight
+- lastWeight of 0 means no previous data
+- Keep exercise names simple and standard`,
+          }],
+        }),
+      });
+
+      if (!response.ok) throw new Error('API request failed');
+      const data = await response.json();
+      const text = data.content?.[0]?.text || '';
+
+      // Parse intro
+      const introMatch = text.match(/<intro>([\s\S]*?)<\/intro>/);
+      if (introMatch) setAiIntro(introMatch[1].trim());
+
+      // Parse plan JSON
+      const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
+      if (planMatch) {
+        const parsed: AIWorkoutPlan = JSON.parse(planMatch[1].trim());
+        if (parsed.plan && Array.isArray(parsed.plan)) {
+          setAiPlan(parsed.plan);
+        }
+      }
+    } catch (e) {
+      console.error('AI planner error:', e);
+      setAiError('Something went wrong. Try again.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleAISend = () => sendToAI(aiInput);
+
+  const handleChip = (prompt: string) => {
+    setAiInput(prompt);
+    sendToAI(prompt);
+  };
+
+  const startFromAIPlan = () => {
+    if (!aiPlan) return;
+    const exercises = aiPlan.map(item => ({
+      name: item.exercise,
+      sets: Array.from({ length: item.sets }, () => ({
+        reps: item.reps,
+        weight: item.suggestedWeight,
+      })),
+    }));
+    navigate('/workout-session', { state: { template: 'custom', customWorkout: { name: aiInput || 'AI Plan', exercises: exercises.map(e => ({ name: e.name, category: 'custom', defaultSets: e.sets.length })) }, aiExercises: exercises } });
+  };
+
+  // ── EXISTING HANDLERS ──
   const openCreateModal = () => {
     setEditingWorkout(null);
     setWorkoutName('');
@@ -281,12 +499,178 @@ export default function Workouts() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-20">
-      <div className="p-6">
-        <h1 className="text-2xl font-bold text-white mb-6">Workouts</h1>
+      <div className="p-6 space-y-6">
+        <h1 className="text-2xl font-bold text-white">Workouts</h1>
+
+        {/* ── 2-RING HEADER: Train + Move ── */}
+        <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5">
+          <div className="flex items-center gap-3">
+            {/* 2-ring SVG */}
+            <div className="flex-shrink-0 w-[80px] h-[80px]">
+              <svg width="80" height="80" viewBox="0 0 80 80">
+                {/* Train - red - r=33 */}
+                <circle cx="40" cy="40" r="33" fill="none" stroke="rgba(255,55,95,0.14)" strokeWidth="9"/>
+                <circle cx="40" cy="40" r="33" fill="none" stroke="#ff375f" strokeWidth="9"
+                  strokeDasharray={arc(33, rings.train.pct / 100).dasharray}
+                  strokeDashoffset={arc(33, rings.train.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 40 40)"/>
+                {/* Move - green - r=21 */}
+                <circle cx="40" cy="40" r="21" fill="none" stroke="rgba(48,209,88,0.14)" strokeWidth="9"/>
+                <circle cx="40" cy="40" r="21" fill="none" stroke="#30d158" strokeWidth="9"
+                  strokeDasharray={arc(21, rings.move.pct / 100).dasharray}
+                  strokeDashoffset={arc(21, rings.move.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 40 40)"/>
+              </svg>
+            </div>
+            {/* Legend */}
+            <div className="flex-1 flex flex-col gap-2">
+              {[
+                { label: 'Train', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' },
+                { label: 'Move',  pct: rings.move.pct,  sub: rings.move.label,  color: '#30d158' },
+              ].map(({ label, pct, sub, color }) => (
+                <div key={label} className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[11px] font-medium text-white">{label}</span>
+                      <span className="text-[10px] font-mono" style={{ color }}>{Math.round(pct)}%</span>
+                    </div>
+                    <div className="text-[9px] text-slate-500 leading-tight truncate">{sub}</div>
+                    <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <div className="text-[9px] text-slate-600 font-mono mt-0.5">
+                {rings.train.done < rings.train.goal
+                  ? `${rings.train.goal - rings.train.done} session${rings.train.goal - rings.train.done > 1 ? 's' : ''} to close Train ring`
+                  : '🎉 Train ring closed this week'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── AI PLANNER ── */}
+        <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+          {/* emerald top accent */}
+          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-emerald-500 to-transparent" />
+          <div className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-[10px] font-mono text-emerald-400 tracking-wider uppercase">AI Planner</span>
+            </div>
+            <p className="text-sm font-medium text-white mb-3">What's your workout today?</p>
+
+            {/* Input row */}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={aiInput}
+                onChange={e => setAiInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAISend()}
+                placeholder='e.g. "legs, 30 mins, tired today"'
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                onClick={handleAISend}
+                disabled={aiLoading || !aiInput.trim()}
+                className="w-9 h-9 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors"
+              >
+                {aiLoading
+                  ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  : <Send className="w-4 h-4 text-white" />}
+              </button>
+            </div>
+
+            {/* Quick chips */}
+            <div className="flex gap-2 mt-2.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+              {QUICK_CHIPS.map(chip => (
+                <button
+                  key={chip.label}
+                  onClick={() => handleChip(chip.prompt)}
+                  className="flex-shrink-0 text-[10px] px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors"
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+
+            {/* AI Response */}
+            {aiError && (
+              <div className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                {aiError}
+              </div>
+            )}
+
+            {(aiIntro || aiPlan) && !aiLoading && (
+              <div className="mt-3 space-y-3">
+                {/* Intro text */}
+                {aiIntro && (
+                  <p className="text-xs text-slate-400 leading-relaxed">{aiIntro}</p>
+                )}
+
+                {/* Plan card */}
+                {aiPlan && aiPlan.length > 0 && (
+                  <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700">
+                    <div className="flex justify-between items-center px-3 py-2 bg-emerald-500/5 border-b border-slate-700">
+                      <span className="text-xs font-semibold text-emerald-400">⚡ Generated Plan</span>
+                      <span className="text-[10px] font-mono text-slate-500">{aiPlan.length} exercises</span>
+                    </div>
+                    {aiPlan.map((item, i) => (
+                      <div key={i} className="flex items-center justify-between px-3 py-2.5 border-b border-slate-700/50 last:border-0">
+                        <div>
+                          <div className="text-xs font-medium text-white">{item.exercise}</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5">{item.sets} × {item.reps} reps</div>
+                        </div>
+                        <div className="text-right font-mono">
+                          <div className="text-xs text-emerald-400">→ {item.suggestedWeight}kg</div>
+                          {item.lastWeight > 0 && (
+                            <div className="text-[10px] text-slate-600">last: {item.lastWeight}kg</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {/* Action buttons */}
+                    <div className="flex gap-2 p-3 border-t border-slate-700">
+                      <button
+                        onClick={startFromAIPlan}
+                        className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2.5 rounded-lg transition-colors"
+                      >
+                        🏋️ Start This Workout
+                      </button>
+                      <button
+                        onClick={() => { setAiPlan(null); setAiIntro(''); setAiInput(''); }}
+                        className="w-9 bg-slate-700 hover:bg-slate-600 rounded-lg flex items-center justify-center transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5 text-slate-400" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Refinement chips */}
+                {aiPlan && (
+                  <div className="flex gap-2 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+                    {['Make it harder', 'Less exercises', 'Add core work'].map(ref => (
+                      <button
+                        key={ref}
+                        onClick={() => { const newPrompt = `${aiInput} — ${ref.toLowerCase()}`; setAiInput(newPrompt); sendToAI(newPrompt); }}
+                        className="flex-shrink-0 text-[10px] px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors"
+                      >
+                        {ref}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* My Workouts */}
         {customWorkouts.length > 0 && (
-          <div className="mb-8">
+          <div>
             <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">MY WORKOUTS</h2>
             <div className="space-y-3">
               {customWorkouts.map(w => (
@@ -315,7 +699,7 @@ export default function Workouts() {
         )}
 
         {/* Quick Start */}
-        <div className="mb-8">
+        <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">QUICK START</h2>
             <button onClick={openCreateModal} className="bg-emerald-500 hover:bg-emerald-600 text-white text-sm px-3 py-1.5 rounded-lg flex items-center gap-1">
@@ -353,8 +737,7 @@ export default function Workouts() {
                 const stats = getSessionStats(session);
                 return (
                   <div key={session.id} className="bg-slate-900 border border-slate-800 rounded-lg p-4 hover:bg-slate-800 transition-colors">
-                    <button onClick={() => setSelectedSession(session)}
-                      className="w-full text-left">
+                    <button onClick={() => setSelectedSession(session)} className="w-full text-left">
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center space-x-2">
                           {stats.isRunning ? <Activity className="w-4 h-4 text-emerald-400" /> : <Dumbbell className="w-4 h-4 text-slate-400" />}
@@ -471,7 +854,6 @@ export default function Workouts() {
               <h2 className="text-lg font-bold text-white">{editingWorkout ? 'Edit Workout' : 'Create Workout'}</h2>
               <button onClick={closeCreateModal} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
-
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1">Workout Name</label>
@@ -479,7 +861,6 @@ export default function Workouts() {
                   onChange={e => setWorkoutName(e.target.value)}
                   className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
               </div>
-
               <div>
                 <div className="flex items-center justify-between mb-3">
                   <label className="text-sm font-medium text-slate-400">Exercises ({selectedExercises.length})</label>
@@ -516,7 +897,6 @@ export default function Workouts() {
                 )}
               </div>
             </div>
-
             <div className="px-5 py-4 border-t border-slate-800 flex-shrink-0">
               <button onClick={saveWorkout} disabled={isSavingWorkout || !workoutName.trim() || selectedExercises.length === 0}
                 className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-semibold py-3 rounded-xl">
@@ -535,7 +915,6 @@ export default function Workouts() {
               <h2 className="text-lg font-bold text-white">Exercise Library</h2>
               <button onClick={() => setShowLibrary(false)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
-
             <div className="px-5 pt-4 space-y-3 flex-shrink-0">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -551,7 +930,6 @@ export default function Workouts() {
                 ))}
               </div>
             </div>
-
             <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2">
               {filteredExercises.map(ex => {
                 const isSelected = !!selectedExercises.find(e => e.name === ex.name);
@@ -569,7 +947,6 @@ export default function Workouts() {
                 );
               })}
             </div>
-
             <div className="px-5 py-4 border-t border-slate-800 flex-shrink-0">
               <button onClick={() => setShowLibrary(false)} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 rounded-xl">
                 Done ({selectedExercises.length} selected)

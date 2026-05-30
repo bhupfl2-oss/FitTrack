@@ -8,10 +8,18 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js')
       .then((registration) => {
-        console.log('SW registered: ', registration);
+        console.log('SW registered:', registration);
+
+        // When a new SW is found, it will install then activate immediately
+        // (because we call skipWaiting in sw.js). When it activates and
+        // claims this page, we reload so the user gets the new version.
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          console.log('New SW activated — reloading for fresh version');
+          window.location.reload();
+        });
       })
-      .catch((registrationError) => {
-        console.log('SW registration failed: ', registrationError);
+      .catch((err) => {
+        console.log('SW registration failed:', err);
       });
   });
 }

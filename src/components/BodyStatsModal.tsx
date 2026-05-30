@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { X, Plus, ChevronLeft } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, addDoc, updateDoc, doc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
+import { bumpDataVersion } from '@/lib/dataVersion';
+import { calculateNutritionGoals } from '@/lib/calculateNutritionGoals';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
@@ -185,6 +187,8 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
         await setDoc(configRef, { customFieldDefs: mergedDefs }, { merge: true });
       }
 
+      await bumpDataVersion(user.uid);
+      calculateNutritionGoals(user.uid).catch(e => console.warn("Nutrition goals calc failed:", e));
       onSave();
       onClose();
     } catch (error) {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Home, Dumbbell, LineChart, FlaskConical, Leaf } from "lucide-react";
+import { Home, Dumbbell, LineChart, FlaskConical, Leaf, UtensilsCrossed } from "lucide-react";
 import { useLocation, Link } from "react-router-dom";
 import { collection, query, orderBy, limit, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -62,28 +62,34 @@ export default function BottomNav() {
   }, [user]);
 
   const navItems = [
-    { path: "/", icon: Home, label: "Home" },
-    { path: "/workouts", icon: Dumbbell, label: "Workouts" },
-    { path: "/body", icon: LineChart, label: "Body" },
-    { path: "/labs", icon: FlaskConical, label: "Labs" },
-    { path: "/wellness", icon: Leaf, label: "Wellness" },
+    { path: "/",          icon: Home,            label: "Home",     accent: "text-emerald-400" },
+    { path: "/workouts",  icon: Dumbbell,        label: "Workouts", accent: "text-emerald-400" },
+    { path: "/food",      icon: UtensilsCrossed, label: "Food",     accent: "text-orange-400"  },
+    { path: "/body",      icon: LineChart,       label: "Body",     accent: "text-emerald-400" },
+    { path: "/labs",      icon: FlaskConical,    label: "Labs",     accent: "text-blue-400"    },
+    { path: "/wellness",  icon: Leaf,            label: "Wellness", accent: "text-emerald-400" },
   ];
 
   if (location.pathname === '/ai-coach') return null;
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-slate-950 border-t border-slate-800 z-50">
-      <div className="flex justify-around items-center h-16 max-w-md mx-auto">
-        {navItems.map(({ path, icon: Icon, label }) => {
+      {/* Scrollable row — all 6 items visible on most phones, swipeable on very small screens */}
+      <div
+        className="flex items-center h-16 overflow-x-auto"
+        style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}
+      >
+        {navItems.map(({ path, icon: Icon, label, accent }) => {
           const isActive = location.pathname === path;
           const showAlert = path === '/workouts' && workoutAlert;
           return (
             <Link
               key={path}
               to={path}
-              className={`flex flex-col items-center justify-center space-y-1 transition-colors relative ${
-                isActive ? "text-emerald-400" : "text-slate-500"
+              className={`flex flex-col items-center justify-center gap-1 transition-colors relative flex-shrink-0 ${
+                isActive ? accent : 'text-slate-500'
               }`}
+              style={{ minWidth: '60px', flex: '1 0 60px', paddingBottom: '2px' }}
             >
               <div className="relative">
                 <Icon size={20} />
@@ -91,7 +97,14 @@ export default function BottomNav() {
                   <span className="absolute -top-0.5 -right-1 w-2 h-2 bg-red-500 rounded-full" />
                 )}
               </div>
-              <span className="text-xs">{label}</span>
+              <span className="text-[10px] font-mono tracking-tight">{label}</span>
+              {/* Active indicator dot */}
+              {isActive && (
+                <span
+                  className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
+                  style={{ background: 'currentColor' }}
+                />
+              )}
             </Link>
           );
         })}

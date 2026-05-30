@@ -19,6 +19,8 @@ import Profile from "@/pages/Profile";
 import AICoach from "@/pages/AICoach";
 import Login from "@/pages/Login";
 import OnboardingWizard from "@/pages/OnboardingWizard";
+import Food from "@/pages/Food";
+import ActivityCalendar from "@/pages/ActivityCalendar";
 
 function AppContent() {
   const { user, loading: authLoading } = useAuth();
@@ -53,6 +55,8 @@ function AppContent() {
         <Route path="wellness" element={<ProtectedRoute><Wellness /></ProtectedRoute>} />
         <Route path="wellness/:habitId" element={<ProtectedRoute><HabitDetail /></ProtectedRoute>} />
         <Route path="profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+        <Route path="food" element={<ProtectedRoute><Food /></ProtectedRoute>} />
+        <Route path="activity-calendar" element={<ProtectedRoute><ActivityCalendar /></ProtectedRoute>} />
       </Route>
     </Routes>
   );

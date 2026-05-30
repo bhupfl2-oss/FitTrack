@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Target, Download, Check } from 'lucide-react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { Target, Download } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useCompleteness } from '@/hooks/useCompleteness';
 import {
@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
+import { useActivityRings } from '@/hooks/useActivityRings';
 
 interface WorkoutSession {
   id: string;
@@ -94,6 +95,7 @@ const muscleGroupMap: Record<string, string[]> = {
 export default function Home() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [loading, setLoading] = useState(true);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
@@ -102,6 +104,12 @@ export default function Home() {
   const [habits, setHabits] = useState<Habit[]>([]);
   const [habitsDoneToday, setHabitsDoneToday] = useState<Record<string, boolean>>({});
   const todayStr = new Date().toISOString().split('T')[0];
+  const [ringsKey, setRingsKey] = useState(0);
+
+  // Re-fetch rings every time user navigates back to Home
+  useEffect(() => { setRingsKey(k => k + 1); }, [location.key]);
+
+  const rings = useActivityRings(user?.uid || '', ringsKey);
 
   const [muscleAlert, setMuscleAlert] = useState<{ group: string; daysSince: number } | null>(null);
   const [aiInsights, setAiInsights] = useState<{ workout: string; food: string; labs: string } | null>(null);
@@ -211,6 +219,8 @@ export default function Home() {
           profileData.foodPreference && `Diet: ${profileData.foodPreference}`,
           profileData.activityLevel && `Activity: ${profileData.activityLevel}`,
           profileData.primaryGoal && `Goal: ${profileData.primaryGoal}`,
+          profileData.fitnessFocus?.length && `Fitness focus: ${profileData.fitnessFocus.join(', ')}`,
+          profileData.fitnessTarget && `Target: ${profileData.fitnessTarget}`,
           profileData.chronicConditions?.length && `Conditions: ${profileData.chronicConditions.join(', ')}`,
         ].filter(Boolean) as string[];
         if (parts.length) contextParts.push('PROFILE:\n' + parts.join('\n'));
@@ -339,7 +349,6 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         setHabits(habitsData);
 
         const doneMap: Record<string, boolean> = {};
-
         for (const habit of habitsData) {
           const todaySnap = await getDocs(
             query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'), where('date', '==', todayStr))
@@ -469,10 +478,19 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
   const habitsDoneCount = Object.values(habitsDoneToday).filter(Boolean).length;
   const currentTopic = insightTopics[insightIndex];
 
+  // Ring arc helper
+  const arc = (r: number, val: number) => {
+    const c = 2 * Math.PI * r;
+    return { dasharray: c, dashoffset: c * (1 - Math.min(1, Math.max(0, val))) };
+  };
+
+  const dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-24">
       <div className="p-5 space-y-4">
 
+        {/* Completion bar */}
         {totalComplete < 3 && (
           <div className="bg-slate-900 border border-blue-500/20 rounded-xl p-3">
             <div className="flex items-center justify-between mb-2">
@@ -526,6 +544,113 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
           </button>
         </div>
 
+        {/* ── ACTIVITY RINGS ── */}
+        <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5">
+          <div className="flex items-center gap-3">
+            {/* 4-ring SVG */}
+            <div className="flex-shrink-0 w-[108px] h-[108px]">
+              <svg width="108" height="108" viewBox="0 0 108 108">
+                {/* Train - red - r=48 */}
+                <circle cx="54" cy="54" r="48" fill="none" stroke="rgba(255,55,95,0.14)" strokeWidth="8"/>
+                <circle cx="54" cy="54" r="48" fill="none" stroke="#ff375f" strokeWidth="8"
+                  strokeDasharray={arc(48, rings.train.pct / 100).dasharray}
+                  strokeDashoffset={arc(48, rings.train.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 54 54)"/>
+                {/* Move - green - r=37 */}
+                <circle cx="54" cy="54" r="37" fill="none" stroke="rgba(48,209,88,0.14)" strokeWidth="8"/>
+                <circle cx="54" cy="54" r="37" fill="none" stroke="#30d158" strokeWidth="8"
+                  strokeDasharray={arc(37, rings.move.pct / 100).dasharray}
+                  strokeDashoffset={arc(37, rings.move.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 54 54)"/>
+                {/* Track - blue - r=26 */}
+                <circle cx="54" cy="54" r="26" fill="none" stroke="rgba(50,173,230,0.14)" strokeWidth="8"/>
+                <circle cx="54" cy="54" r="26" fill="none" stroke="#32ade6" strokeWidth="8"
+                  strokeDasharray={arc(26, rings.track.pct / 100).dasharray}
+                  strokeDashoffset={arc(26, rings.track.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 54 54)"/>
+                {/* Fuel - orange - r=15 */}
+                <circle cx="54" cy="54" r="15" fill="none" stroke="rgba(249,115,22,0.14)" strokeWidth="8"/>
+                <circle cx="54" cy="54" r="15" fill="none" stroke="#f97316" strokeWidth="8"
+                  strokeDasharray={arc(15, rings.fuel.pct / 100).dasharray}
+                  strokeDashoffset={arc(15, rings.fuel.pct / 100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 54 54)"/>
+              </svg>
+            </div>
+
+            {/* Legend */}
+            <div className="flex-1 flex flex-col gap-1.5">
+              {[
+                { label: 'Train', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' },
+                { label: 'Move',  pct: rings.move.pct,  sub: rings.move.label,  color: '#30d158' },
+                { label: 'Track', pct: rings.track.pct, sub: rings.track.label, color: '#32ade6' },
+                { label: 'Fuel',  pct: rings.fuel.pct,  sub: rings.fuel.label,  color: '#f97316' },
+              ].map(({ label, pct, sub, color }) => (
+                <div key={label} className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[11px] font-medium text-white">{label}</span>
+                      <span className="text-[10px] font-mono" style={{ color }}>{Math.round(pct)}%</span>
+                    </div>
+                    <div className="text-[9px] text-slate-500 leading-tight truncate">{sub}</div>
+                    <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── WEEKLY MINI RINGS STRIP ── */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 cursor-pointer"
+          onClick={() => navigate('/activity-calendar')}>
+          <div className="flex justify-between items-center mb-2.5">
+            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">This Week</span>
+            <span className="text-[10px] font-mono text-emerald-400">
+              🔥 {streakData.weeks > 0 ? `${streakData.weeks}-wk streak` : `${streakData.thisWeekCount} done`}
+              <span className="text-slate-600 ml-2">History →</span>
+            </span>
+          </div>
+          <div className="flex justify-between">
+            {rings.weekDays.map((day, idx) => (
+              <div key={day.dateStr} className="flex flex-col items-center gap-1">
+                <svg width="28" height="28" viewBox="0 0 28 28" style={{ opacity: day.isFuture ? 0.2 : 1 }}>
+                  {/* Train */}
+                  <circle cx="14" cy="14" r="11.5" fill="none" stroke="rgba(255,55,95,0.15)" strokeWidth="4"/>
+                  <circle cx="14" cy="14" r="11.5" fill="none" stroke="#ff375f" strokeWidth="4"
+                    strokeDasharray={arc(11.5, day.trainVal).dasharray}
+                    strokeDashoffset={arc(11.5, day.trainVal).dashoffset}
+                    strokeLinecap="round" transform="rotate(-90 14 14)"/>
+                  {/* Move */}
+                  <circle cx="14" cy="14" r="8" fill="none" stroke="rgba(48,209,88,0.15)" strokeWidth="3.5"/>
+                  <circle cx="14" cy="14" r="8" fill="none" stroke="#30d158" strokeWidth="3.5"
+                    strokeDasharray={arc(8, day.moveVal).dasharray}
+                    strokeDashoffset={arc(8, day.moveVal).dashoffset}
+                    strokeLinecap="round" transform="rotate(-90 14 14)"/>
+                  {/* Track */}
+                  <circle cx="14" cy="14" r="5" fill="none" stroke="rgba(50,173,230,0.15)" strokeWidth="3"/>
+                  <circle cx="14" cy="14" r="5" fill="none" stroke="#32ade6" strokeWidth="3"
+                    strokeDasharray={arc(5, day.trackVal).dasharray}
+                    strokeDashoffset={arc(5, day.trackVal).dashoffset}
+                    strokeLinecap="round" transform="rotate(-90 14 14)"/>
+                  {/* Fuel */}
+                  <circle cx="14" cy="14" r="2.5" fill="none" stroke="rgba(249,115,22,0.15)" strokeWidth="2.5"/>
+                  <circle cx="14" cy="14" r="2.5" fill="none" stroke="#f97316" strokeWidth="2.5"
+                    strokeDasharray={arc(2.5, day.fuelVal).dasharray}
+                    strokeDashoffset={arc(2.5, day.fuelVal).dashoffset}
+                    strokeLinecap="round" transform="rotate(-90 14 14)"/>
+                </svg>
+                <span className={`text-[8px] font-mono ${day.isToday ? 'text-emerald-400' : 'text-slate-600'}`}>
+                  {dayLabels[idx]}
+                </span>
+                {day.isToday && <div className="w-1 h-1 rounded-full bg-emerald-400" />}
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* Lab alert */}
         {upcomingTests.length > 0 && (
           <div
@@ -549,7 +674,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
           </div>
         )}
 
-        {/* Body Comp — compact grid */}
+        {/* Body Comp */}
         {bodyStats.length > 0 && (
           <button onClick={() => navigate('/body')} className="w-full text-left">
             <div className="text-slate-500 text-[10px] uppercase tracking-wider mb-2">Body</div>
@@ -589,10 +714,9 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
           </button>
         )}
 
-        {/* Divider */}
         <div className="border-t border-slate-800/60" />
 
-        {/* AI Insight — single rotating card */}
+        {/* AI Insight */}
         {(aiInsights || isLoadingInsights) && (
           <div>
             {isLoadingInsights ? (
@@ -617,10 +741,13 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
                       {currentTopic.charAt(0).toUpperCase() + currentTopic.slice(1)}
                     </span>
                     <button
-                      onClick={() => navigate(`/ai-coach?topic=${currentTopic}`)}
+                      onClick={() => currentTopic === 'food'
+                        ? navigate('/food')
+                        : navigate(`/ai-coach?topic=${currentTopic}`)
+                      }
                       className="text-slate-500 text-xs hover:text-white transition-colors"
                     >
-                      · Ask more →
+                      {currentTopic === 'food' ? '· Open Food →' : '· Ask more →'}
                     </button>
                   </div>
                   <div className="flex items-center">
@@ -633,43 +760,50 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
           </div>
         )}
 
-        {/* Divider */}
         <div className="border-t border-slate-800/60" />
 
-        {/* Habits — horizontal chips */}
+        {/* ── QUICK HABITS GRID ── */}
         {habits.length > 0 && (
           <div>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-slate-500 text-[10px] uppercase tracking-wider">Today's habits</span>
-              <button onClick={() => navigate('/wellness')} className="text-slate-500 text-xs hover:text-slate-300">
-                Tap →
+              <span className="text-slate-500 text-[10px] uppercase tracking-wider font-mono">🔵 Track · Today</span>
+              <button onClick={() => navigate('/wellness')} className="text-[10px] font-mono text-blue-400">
+                {habitsDoneCount} / {habits.length} done
               </button>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
-              {habits.map(habit => {
+            <div className="grid grid-cols-2 gap-px bg-slate-800 rounded-xl overflow-hidden border border-slate-800">
+              {habits.slice(0, 4).map((habit) => {
                 const done = habitsDoneToday[habit.id] || false;
                 return (
                   <button
                     key={habit.id}
                     onClick={() => toggleHabit(habit.id)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full flex-shrink-0 border transition-all ${
-                      done
-                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
-                        : 'bg-slate-900 border-slate-700 text-slate-400'
-                    }`}
+                    className={`p-3 text-left transition-colors ${done ? 'bg-slate-900/60' : 'bg-slate-900'}`}
                   >
-                    <span className="text-sm">{habit.icon || '💪'}</span>
-                    <span className="text-xs font-medium">{habit.name}</span>
-                    {done && <Check className="w-3 h-3" />}
+                    <div className="flex justify-between items-start mb-1">
+                      <span className="text-lg">{habit.icon || '💪'}</span>
+                      <div className={`w-4 h-4 rounded-full border flex items-center justify-center text-[8px] flex-shrink-0 transition-colors ${
+                        done ? 'bg-blue-500 border-blue-500 text-white' : 'border-slate-600'
+                      }`}>
+                        {done ? '✓' : ''}
+                      </div>
+                    </div>
+                    <div className="text-[11px] font-medium text-white">{habit.name}</div>
+                    <div className={`text-[9px] mt-0.5 ${done ? 'text-blue-400' : 'text-slate-500'}`}>
+                      {done ? 'Done ✓' : `Goal: ${habit.targetValue}${habit.targetUnit ? ' ' + habit.targetUnit : ''}`}
+                    </div>
                   </button>
                 );
               })}
             </div>
-            <div className="text-[10px] text-slate-600 mt-1.5">{habitsDoneCount} / {habits.length} done today</div>
+            {habits.length > 4 && (
+              <button onClick={() => navigate('/wellness')} className="text-[10px] text-slate-500 mt-2 font-mono">
+                +{habits.length - 4} more habits in Wellness →
+              </button>
+            )}
           </div>
         )}
 
-        {/* Divider */}
         <div className="border-t border-slate-800/60" />
 
         {/* Today's Workout */}
@@ -701,7 +835,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
           </button>
         </div>
 
-        {/* Streak — compact row */}
+        {/* Streak */}
         <div className="bg-slate-900 rounded-xl px-4 py-3 border border-slate-800 flex items-center justify-between">
           <div>
             <div className="flex items-baseline gap-1">
@@ -722,7 +856,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
 
       </div>
 
-      {/* FAB */}
+      {/* FAB — unchanged */}
       <button
         onClick={() => navigate('/ai-coach')}
         className="fixed bottom-24 left-6 w-14 h-14 rounded-full bg-emerald-500 shadow-lg flex items-center justify-center text-white text-xl z-40 hover:bg-emerald-600 transition-colors"
