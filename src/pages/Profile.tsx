@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronLeft } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { calculateNutritionGoals } from '@/lib/calculateNutritionGoals';
@@ -90,6 +91,7 @@ function getInitials(name: string): string {
 
 export default function Profile() {
   const { user } = useAuth();
+  usePageLoadTime('Profile', false);
   const navigate = useNavigate();
   const [saving, setSaving] = useState(false);
   const [profile, setProfile] = useState<ProfileData>({

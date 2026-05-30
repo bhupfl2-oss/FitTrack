@@ -25,7 +25,11 @@ function todayStr(): string {
  * Ensures the 3 default habits exist for the user.
  * Returns their IDs keyed by lowercase name.
  */
+// Module-level cache — avoids re-checking Firestore on every page load
+const _cache: Record<string, Record<string, DefaultHabit>> = {};
+
 export async function ensureDefaultHabits(uid: string): Promise<Record<string, DefaultHabit>> {
+  if (_cache[uid]) return _cache[uid];
   const snap = await getDocs(collection(db, 'users', uid, 'habits'));
   const existing = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
 
@@ -54,6 +58,7 @@ export async function ensureDefaultHabits(uid: string): Promise<Record<string, D
     }
   }
 
+  _cache[uid] = result;
   return result;
 }
 

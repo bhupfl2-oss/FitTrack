@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
@@ -108,6 +109,7 @@ export default function Workouts() {
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Workouts', loading);
   const [showPrevSessions, setShowPrevSessions] = useState(false);
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
@@ -158,7 +160,7 @@ export default function Workouts() {
         setSessions(fetchedSessions);
         setCustomWorkouts(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as CustomWorkout)));
 
-        // Ensure default habits exist + fetch today's steps
+        // ensureDefaultHabits is cached after first call — fast on repeat visits
         const defaultHabits = await ensureDefaultHabits(user.uid);
         const stepsHabit = defaultHabits['steps'];
         if (stepsHabit) {

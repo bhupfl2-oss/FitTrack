@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   collection, query, orderBy, getDocs,
   doc, getDoc, where
@@ -89,6 +90,7 @@ export default function ActivityCalendar() {
   const [viewMonth, setViewMonth] = useState(now.getMonth());
   const [monthData, setMonthData] = useState<Record<string, DayData>>({});
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('ActivityCalendar', loading);
   const [selectedDate, setSelectedDate] = useState<string | null>(dateStr(now));
   const [expandedExercises, setExpandedExercises] = useState(false);
 

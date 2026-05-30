@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { bumpDataVersion } from '@/lib/dataVersion';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 interface ExtractedTest {
@@ -265,6 +266,7 @@ Rules:
         ? `${savedCount} tests saved. ${skippedCount} skipped (already logged for this date).`
         : `${savedCount} tests saved successfully.`;
       alert(msg);
+      await bumpDataVersion(user.uid);
       navigate('/labs');
 
     } catch (error) {

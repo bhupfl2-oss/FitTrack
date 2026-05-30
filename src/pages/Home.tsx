@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Target, Download } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { useCompleteness } from '@/hooks/useCompleteness';
 import {
   collection,
@@ -98,6 +99,7 @@ export default function Home() {
   const navigate = useNavigate();
   const location = useLocation();
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Home', loading);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
@@ -335,7 +337,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         labs: parsed.labs || '',
       };
       setAiInsights(insights);
-      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString() });
+      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString(), needsRefresh: false });
     } catch (e) {
       console.error('AI insights error:', e);
     } finally {
@@ -347,63 +349,57 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
     if (!user) return;
     const fetchAllData = async () => {
       try {
-        const workoutsQuery = query(
-          collection(db, 'users', user.uid, 'workoutSessions'),
-          orderBy('date', 'desc'),
-          limit(50)
-        );
-        const workoutsSnapshot = await getDocs(workoutsQuery);
+        // Ensure default habits first (idempotent), then fire all reads in parallel
+        await ensureDefaultHabits(user.uid);
+
+        const [
+          workoutsSnapshot,
+          bodySnapshot,
+          labsSnapshot,
+          testsSnapshot,
+          habitsSnap,
+        ] = await Promise.all([
+          getDocs(query(collection(db, 'users', user.uid, 'workoutSessions'), orderBy('date', 'desc'), limit(50))),
+          getDocs(query(collection(db, 'users', user.uid, 'bodyComp'), orderBy('date', 'desc'), limit(50))),
+          getDocs(query(collection(db, 'users', user.uid, 'labs'), orderBy('date', 'desc'), limit(10))),
+          getDocs(query(collection(db, 'users', user.uid, 'tests'), orderBy('nextDueDate', 'asc'))),
+          getDocs(collection(db, 'users', user.uid, 'habits')),
+        ]);
+
         const sessions = workoutsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as WorkoutSession));
         setWorkoutSessions(sessions);
         setMuscleAlert(getMuscleGroupAlert(sessions));
 
-        const bodySnapshot = await getDocs(query(
-          collection(db, 'users', user.uid, 'bodyComp'),
-          orderBy('date', 'desc'), limit(50)
-        ));
         setBodyStats(bodySnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BodyStats)));
-
-        const labsSnapshot = await getDocs(query(
-          collection(db, 'users', user.uid, 'labs'),
-          orderBy('date', 'desc'), limit(10)
-        ));
         setLabResults(labsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)));
 
-        const testsSnapshot = await getDocs(query(
-          collection(db, 'users', user.uid, 'tests'),
-          orderBy('nextDueDate', 'asc')
-        ));
         const tests = testsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
         const now = new Date();
         const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
         setUpcomingTests(tests.filter(t => t.nextDueDate && new Date(t.nextDueDate) <= thirtyDaysFromNow));
 
-        // Ensure Water/Sleep/Steps habits exist, then fetch all
-        await ensureDefaultHabits(user.uid);
-        const habitsSnap = await getDocs(collection(db, 'users', user.uid, 'habits'));
         const habitsData = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as Habit));
         setHabits(habitsData);
 
-        // Load water + steps counts
+        // Fire all habit-related reads in parallel
         const waterH = habitsData.find(h => h.name?.toLowerCase().includes('water'));
         const stepsH = habitsData.find(h => h.name?.toLowerCase().includes('step'));
-        if (waterH) {
-          const val = await getHabitLogToday(user.uid, waterH.id);
-          setWaterCount(val);
-        }
-        if (stepsH) {
-          const val = await getHabitLogToday(user.uid, stepsH.id);
-          setStepsCount(val);
-          setStepsInput(String(val));
-        }
+
+        const [waterVal, stepsVal, ...habitLogResults] = await Promise.all([
+          waterH ? getHabitLogToday(user.uid, waterH.id) : Promise.resolve(0),
+          stepsH ? getHabitLogToday(user.uid, stepsH.id) : Promise.resolve(0),
+          ...habitsData.map(habit =>
+            getDocs(query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'), where('date', '==', todayStr)))
+          ),
+        ]);
+
+        if (waterH) { setWaterCount(waterVal as number); }
+        if (stepsH) { setStepsCount(stepsVal as number); setStepsInput(String(stepsVal)); }
 
         const doneMap: Record<string, boolean> = {};
-        for (const habit of habitsData) {
-          const todaySnap = await getDocs(
-            query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'), where('date', '==', todayStr))
-          );
-          doneMap[habit.id] = !todaySnap.empty;
-        }
+        habitsData.forEach((habit, i) => {
+          doneMap[habit.id] = !(habitLogResults[i] as any).empty;
+        });
         setHabitsDoneToday(doneMap);
       } catch (error) {
         console.error('Error fetching data:', error);
@@ -794,11 +790,13 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
                         ? navigate('/food')
                         : currentTopic === 'workout'
                         ? navigate('/workouts')
+                        : currentTopic === 'labs'
+                        ? navigate('/labs')
                         : navigate(`/ai-coach?topic=${currentTopic}`)
                       }
                       className="text-slate-500 text-xs hover:text-white transition-colors"
                     >
-                      {currentTopic === 'food' ? '· Open Food →' : currentTopic === 'workout' ? '· Open Workouts →' : '· Ask more →'}
+                      {currentTopic === 'food' ? '· Open Food →' : currentTopic === 'workout' ? '· Open Workouts →' : currentTopic === 'labs' ? '· Open Labs →' : '· Ask more →'}
                     </button>
                   </div>
                   <div className="flex items-center">

@@ -13,13 +13,12 @@ import { db } from '@/lib/firebase';
  */
 export async function bumpDataVersion(uid: string): Promise<void> {
   try {
-    await setDoc(
-      doc(db, 'users', uid, 'meta', 'dataVersion'),
-      { updatedAt: new Date().toISOString() },
-      { merge: true }
-    );
+    const now = new Date().toISOString();
+    await Promise.all([
+      setDoc(doc(db, 'users', uid, 'meta', 'dataVersion'), { updatedAt: now }, { merge: true }),
+      setDoc(doc(db, 'users', uid, 'aiInsights', 'daily'), { needsRefresh: true }, { merge: true }),
+    ]);
   } catch (e) {
-    // Non-critical — fail silently
     console.warn('bumpDataVersion failed:', e);
   }
 }

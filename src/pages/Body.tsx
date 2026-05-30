@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Plus, Minus, TrendingUp, TrendingDown, Edit3, Trash2 } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip, XAxis } from 'recharts';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import BodyStatsModal from '@/components/BodyStatsModal';
 import GoalsModal from '@/components/GoalsModal';
 import { Button } from '@/components/ui/button';
@@ -72,6 +73,7 @@ export default function Body() {
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Body', loading);
   const [timeRange, setTimeRange] = useState<'1W' | '1M' | '3M' | 'All'>('1M');
   const [editData, setEditData] = useState<{
     id: string;

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { Plus, Send, Camera, Search, X, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   doc, getDoc, setDoc,
 
@@ -70,6 +71,7 @@ export default function Food() {
   const [date, setDate] = useState(todayStr());
   const [dayLog, setDayLog] = useState<DayLog | null>(null);
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Food', loading);
   const [foodPreference, setFoodPreference] = useState<string>('');  // 'veg', 'non-veg', 'vegan', etc.
   const [aiInsightText, setAiInsightText] = useState<string>('');
 

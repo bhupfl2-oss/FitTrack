@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Flame, Check, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   collection,
   query,
@@ -19,6 +20,7 @@ export default function Wellness() {
   const [habitLogsToday, setHabitLogsToday] = useState<Record<string, Log[]>>({});
   const [weekStatus, setWeekStatus] = useState<WeekStatus[]>([]);
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Wellness', loading);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [valueModal, setValueModal] = useState<{ habitId: string; habitName: string } | null>(null);
   const [tempValue, setTempValue] = useState('');

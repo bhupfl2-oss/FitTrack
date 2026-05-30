@@ -1,666 +1,698 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, TrendingUp, TrendingDown, AlertCircle, ChevronRight } from 'lucide-react';
+import { Plus, AlertCircle, ChevronRight, ChevronDown, ChevronUp, Send, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import LabsModal from '@/components/LabsModal';
-import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc, updateDoc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { bumpDataVersion } from '@/lib/dataVersion';
+import { generateHealthPlan, computeTestStatuses, getHealthPlanSummary, type TestStatus } from '@/lib/healthPlan';
 
-interface LabTest {
-  testName: string;
-  value: number;
-  unit: string;
-}
-
-interface LabResults {
-  id: string;
-  date: string;
-  results: LabTest[];
-  createdAt: any;
-}
-
-interface LabRanges {
-  [key: string]: { min: number; max: number; unit: string };
-}
-
+interface LabTest { testName: string; value: number; unit: string; }
+interface LabResults { id: string; date: string; results: LabTest[]; createdAt: any; }
 interface LabTestCard {
-  id: string;
-  name: string;
-  unit: string;
-  referenceRangeLow: number | null;
-  referenceRangeHigh: number | null;
-  reminderIntervalMonths: number | null;
-  nextDueDate: Date | null;
-  latestReading: { value: number; date: Date; } | null;
-  pinned?: boolean;
+  id: string; name: string; unit: string;
+  referenceRangeLow: number | null; referenceRangeHigh: number | null;
+  reminderIntervalMonths: number | null; nextDueDate: Date | null;
+  latestReading: { value: number; date: Date; } | null; pinned?: boolean;
 }
 
-const labRanges: LabRanges = {
-  tsh: { min: 0.4, max: 4.0, unit: 'mIU/L' },
-  vitD: { min: 30, max: 100, unit: 'ng/mL' },
-  b12: { min: 200, max: 900, unit: 'pg/mL' },
-  hb: { min: 13.5, max: 17.5, unit: 'g/dL' },
-  hba1c: { min: 4, max: 5.6, unit: '%' },
-  totalCholesterol: { min: 0, max: 200, unit: 'mg/dL' },
-  ldl: { min: 0, max: 100, unit: 'mg/dL' },
-  hdl: { min: 40, max: 1000, unit: 'mg/dL' }, // HDL has lower limit only
-  triglycerides: { min: 0, max: 150, unit: 'mg/dL' },
-  creatinine: { min: 0.7, max: 1.3, unit: 'mg/dL' },
+const getTestIcon = (testName: string): string => {
+  const n = testName.toLowerCase();
+  if (n.includes('tsh') || n.includes('t3') || n.includes('t4')) return '🩸';
+  if (n.includes('hba1c') || n.includes('blood sugar') || n.includes('glucose')) return '🍬';
+  if (n.includes('vitamin d') || n.includes('vit d')) return '☀️';
+  if (n.includes('vitamin b12') || n.includes('b12')) return '💊';
+  if (n.includes('hemoglobin') || n.includes('hb') || n.includes('cbc')) return '🔴';
+  if (n.includes('calcium')) return '🦴';
+  if (n.includes('alt') || n.includes('ast') || n.includes('liver')) return '🫀';
+  if (n.includes('testosterone')) return '⚡';
+  if (n.includes('cholesterol') || n.includes('ldl') || n.includes('hdl') || n.includes('triglycerides')) return '🫁';
+  return '🧪';
 };
 
-// Helper function to get all unique test names across all entries
-const getAllTestNames = (labResults: LabResults[]): string[] => {
-  const testNames = new Set<string>();
-  labResults.forEach(result => {
-    if (result && result.results && Array.isArray(result.results)) {
-      result.results.forEach(test => {
-        if (test && test.testName) {
-          testNames.add(test.testName);
-        }
-      });
-    }
-  });
-  return Array.from(testNames).sort();
+const getTestCategory = (testName: string): string => {
+  const n = testName.toLowerCase();
+  if (n.includes('tsh') || n.includes('t3') || n.includes('t4')) return 'Thyroid';
+  if (n.includes('hba1c') || n.includes('glucose')) return 'Diabetes';
+  if (n.includes('vitamin') || n.includes('calcium')) return 'Nutrition';
+  if (n.includes('alt') || n.includes('ast')) return 'Liver';
+  if (n.includes('testosterone')) return 'Hormones';
+  return 'Blood Test';
 };
 
 export default function Labs() {
-  // v2 - new UI active
   const { user } = useAuth();
   const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [labResults, setLabResults] = useState<LabResults[]>([]);
+  // labResults kept for migration compatibility
+  const [, setLabResults] = useState<LabResults[]>([]);
   const [tests, setTests] = useState<LabTestCard[]>([]);
   const [loading, setLoading] = useState(true);
+  usePageLoadTime('Labs', loading);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
+  // Health plan state
+  const [testStatuses, setTestStatuses] = useState<TestStatus[]>([]);
+  const [healthPlanExpanded, setHealthPlanExpanded] = useState(false);
+  const [customizingTest, setCustomizingTest] = useState<string | null>(null);
+  const [profile, setProfile] = useState<any>(null);
+
+  // AI insight state
+  interface ChatMsg { role: 'user' | 'ai'; text: string; }
+  const [insightText, setInsightText] = useState('');
+  const [insightGeneratedAt, setInsightGeneratedAt] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [insightLoading, setInsightLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Fetch lab results (old collection) ──────────────────────────────────
   useEffect(() => {
     if (!user) return;
-
-    const fetchLabResults = async () => {
+    const run = async () => {
       try {
-        // First, run migration to clean up malformed documents
         await cleanupMalformedDocuments();
-        
-        // Then fetch clean data
-        const q = query(
-          collection(db, 'users', user.uid, 'labs'),
-          orderBy('date', 'desc'),
-          limit(50)
-        );
-        const querySnapshot = await getDocs(q);
-        const allResults: any[] = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        
-        // Filter out malformed entries
-        const validResults = allResults.filter(entry => 
-          entry && 
-          entry.results && 
-          Array.isArray(entry.results)
-        ) as LabResults[];
-        
-        setLabResults(validResults);
-      } catch (error) {
-        console.error('Error fetching lab results:', error);
-      } finally {
-        setLoading(false);
-      }
+        const q = query(collection(db, 'users', user.uid, 'labs'), orderBy('date', 'desc'), limit(50));
+        const snap = await getDocs(q);
+        setLabResults(snap.docs.map(d => ({ id: d.id, ...d.data() } as LabResults))
+          .filter(e => e?.results && Array.isArray(e.results)));
+      } catch (e) { console.error(e); }
+      finally { setLoading(false); }
     };
-
-    fetchLabResults();
+    run();
   }, [user]);
 
-  // New Firestore listener for tests collection
+  // ── Fetch tests (new collection) + compute health plan ──────────────────
   useEffect(() => {
     if (!user) return;
-
-    const fetchTests = async () => {
+    const run = async () => {
       try {
-        const testsQuery = query(
-          collection(db, 'users', user.uid, 'tests'),
-          orderBy('createdAt', 'desc')
-        );
-        const testsSnapshot = await getDocs(testsQuery);
-        
-        
-        // Fetch all readings in parallel instead of sequentially
-        const fetchedTests = await Promise.all(testsSnapshot.docs.map(async (testDoc) => {
-          const testData = testDoc.data();
-          
-          const readingsQuery = query(
+        const snap = await getDocs(query(collection(db, 'users', user.uid, 'tests'), orderBy('createdAt', 'desc')));
+
+        const fetchedTests = await Promise.all(snap.docs.map(async testDoc => {
+          const d = testDoc.data();
+          const rSnap = await getDocs(query(
             collection(db, 'users', user.uid, 'tests', testDoc.id, 'readings'),
-            orderBy('date', 'desc'),
-            limit(1)
-          );
-          const readingsSnapshot = await getDocs(readingsQuery);
-          
-          const latestReading = readingsSnapshot.docs.length > 0 
-            ? {
-                value: readingsSnapshot.docs[0].data().value,
-                date: new Date(readingsSnapshot.docs[0].data().date)
-              }
-            : null;
-          
+            orderBy('date', 'desc'), limit(1)
+          ));
           return {
             id: testDoc.id,
-            name: testData.name,
-            unit: testData.unit,
-            referenceRangeLow: testData.referenceRangeLow || null,
-            referenceRangeHigh: testData.referenceRangeHigh || null,
-            reminderIntervalMonths: testData.reminderIntervalMonths || null,
-            nextDueDate: testData.nextDueDate ? new Date(testData.nextDueDate) : null,
-            latestReading,
-            pinned: testData.pinned || false
-          };
+            name: d.name, unit: d.unit,
+            referenceRangeLow: d.referenceRangeLow || null,
+            referenceRangeHigh: d.referenceRangeHigh || null,
+            reminderIntervalMonths: d.reminderIntervalMonths || null,
+            nextDueDate: d.nextDueDate ? new Date(d.nextDueDate) : null,
+            latestReading: rSnap.docs.length > 0
+              ? { value: rSnap.docs[0].data().value, date: new Date(rSnap.docs[0].data().date) }
+              : null,
+            pinned: d.pinned || false,
+          } as LabTestCard;
         }));
-        
-        setTests(fetchedTests);
-      } catch (error) {
-        console.error('Error fetching tests:', error);
-      }
-    };
 
-    fetchTests();
+        setTests(fetchedTests);
+
+        // Load profile → compute health plan
+        try {
+          const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+          const prof = profileSnap.exists() ? profileSnap.data() as any : {};
+          setProfile(prof);
+          let age = 30;
+          if (prof.dob) {
+            const birth = new Date(prof.dob);
+            age = new Date().getFullYear() - birth.getFullYear();
+          }
+          const plan = generateHealthPlan({
+            age, gender: prof.gender,
+            chronicConditions: prof.chronicConditions,
+            fitnessFocus: prof.fitnessFocus,
+            foodPreference: prof.foodPreference,
+            primaryGoal: prof.primaryGoal,
+          });
+          const statuses = computeTestStatuses(plan, fetchedTests.map(t => ({
+            id: t.id, name: t.name,
+            latestReading: t.latestReading,
+            reminderIntervalMonths: t.reminderIntervalMonths,
+          })));
+          setTestStatuses(statuses);
+
+          // Load cached labs AI insight
+          const insightSnap = await getDoc(doc(db, 'users', user.uid, 'aiInsights', 'labs'));
+          if (insightSnap.exists()) {
+            const cached = insightSnap.data() as any;
+            setInsightText(cached.text || '');
+            setInsightGeneratedAt(cached.generatedAt || null);
+          }
+        } catch (e) { console.warn('Health plan error:', e); }
+
+      } catch (e) { console.error('Error fetching tests:', e); }
+    };
+    run();
   }, [user]);
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = () => setOpenMenuId(null);
-    if (openMenuId) document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, [openMenuId]);
-
-  // Migration function for old lab data to new tests collection
+  // ── Migration ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
-
-    const migrateLabData = async () => {
-      // Only run migration if not already done
+    const migrate = async () => {
       if (localStorage.getItem('labsMigrated') === 'true') return;
-
       try {
-        // Check if tests collection is empty
-        const testsQuery = query(
-          collection(db, 'users', user.uid, 'tests'),
-          limit(1)
-        );
-        const testsSnapshot = await getDocs(testsQuery);
-        
-        if (!testsSnapshot.empty) {
-          // Tests collection already has data, mark as migrated
-          localStorage.setItem('labsMigrated', 'true');
-          return;
-        }
-
-        // Read all existing lab results from the old collection
-        const labsQuery = query(
-          collection(db, 'users', user.uid, 'labs'),
-          orderBy('date', 'desc'),
-          limit(100)
-        );
-        const labsSnapshot = await getDocs(labsQuery);
-        
+        const testsSnap = await getDocs(query(collection(db, 'users', user.uid, 'tests'), limit(1)));
+        if (!testsSnap.empty) { localStorage.setItem('labsMigrated', 'true'); return; }
+        const labsSnap = await getDocs(query(collection(db, 'users', user.uid, 'labs'), orderBy('date', 'desc'), limit(100)));
         const testMap = new Map<string, any>();
         const now = new Date().toISOString();
-
-        for (const labDoc of labsSnapshot.docs) {
+        for (const labDoc of labsSnap.docs) {
           const labData = labDoc.data();
-          
           if (!labData.results || !Array.isArray(labData.results)) continue;
-
-          for (const testResult of labData.results) {
-            if (!testResult.testName || typeof testResult.value !== 'number') continue;
-
-            const testName = testResult.testName;
-            const unit = testResult.unit || '';
-
-            // Find or create test document
-            let testDoc = testMap.get(testName);
-            if (!testDoc) {
-              testDoc = {
-                name: testName,
-                unit: unit,
-                referenceRangeLow: null,
-                referenceRangeHigh: null,
-                reminderIntervalMonths: null,
-                nextDueDate: null,
-                createdAt: now
-              };
-              testMap.set(testName, testDoc);
+          for (const tr of labData.results) {
+            if (!tr.testName || typeof tr.value !== 'number') continue;
+            if (!testMap.has(tr.testName)) {
+              testMap.set(tr.testName, { name: tr.testName, unit: tr.unit || '', referenceRangeLow: null, referenceRangeHigh: null, reminderIntervalMonths: null, nextDueDate: null, createdAt: now });
             }
-
-            // Create test document in Firestore
             const testRef = doc(collection(db, 'users', user.uid, 'tests'));
-            await setDoc(testRef, cleanData(testDoc));
-
-            // Add reading to the test
-            const readingData = {
-              value: testResult.value,
-              date: labData.date || labData.createdAt || now,
-              reportUrl: null,
-              createdAt: now
-            };
-
-            await addDoc(
-              collection(db, 'users', user.uid, 'tests', testRef.id, 'readings'),
-              cleanData(readingData)
-            );
+            await setDoc(testRef, cleanData(testMap.get(tr.testName)));
+            await addDoc(collection(db, 'users', user.uid, 'tests', testRef.id, 'readings'), cleanData({ value: tr.value, date: labData.date || now, reportUrl: null, createdAt: now }));
           }
         }
-
-        // Mark migration as complete
         localStorage.setItem('labsMigrated', 'true');
-        showToast('Lab data migrated to new format');
-
-        // Refresh the tests data
         window.location.reload();
-
-      } catch (error) {
-        console.error('Error migrating lab data:', error);
-      }
+      } catch (e) { console.error('Migration error:', e); }
     };
-
-    migrateLabData();
+    migrate();
   }, [user]);
 
-  // Migration function to clean up malformed documents
   const cleanupMalformedDocuments = async () => {
     if (!user) return;
-    
     try {
-      const q = query(
-        collection(db, 'users', user.uid, 'labs'),
-        limit(100) // Check up to 100 documents
-      );
-      const querySnapshot = await getDocs(q);
-      
-      const malformedDocs: string[] = [];
-      
-      querySnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        if (!data.results || !Array.isArray(data.results)) {
-          malformedDocs.push(doc.id);
+      const snap = await getDocs(query(collection(db, 'users', user.uid, 'labs'), limit(100)));
+      for (const d of snap.docs) {
+        if (!d.data().results || !Array.isArray(d.data().results)) {
+          await deleteDoc(doc(db, 'users', user.uid, 'labs', d.id));
         }
-      });
-      
-      // Delete malformed documents
-      for (const docId of malformedDocs) {
-        await deleteDoc(doc(db, 'users', user.uid, 'labs', docId));
-        console.log('Deleted malformed lab document:', docId);
       }
-      
-      if (malformedDocs.length > 0) {
-        console.log(`Cleaned up ${malformedDocs.length} malformed lab documents`);
-      }
-    } catch (error) {
-      console.error('Error during cleanup migration:', error);
-    }
+    } catch (e) { console.error(e); }
   };
+
+  // ── Build AI context from tests + health plan ────────────────────────────
+  const buildLabContext = () => {
+    const parts: string[] = [];
+
+    if (profile) {
+      const p = [
+        profile.primaryGoal && `Goal: ${profile.primaryGoal}`,
+        profile.fitnessFocus?.length && `Fitness: ${profile.fitnessFocus.join(', ')}`,
+        profile.foodPreference && `Diet: ${profile.foodPreference}`,
+        profile.chronicConditions?.length && `Conditions: ${profile.chronicConditions.join(', ')}`,
+      ].filter(Boolean);
+      if (p.length) parts.push('Profile:\n' + p.join('\n'));
+    }
+
+    if (tests.length > 0) {
+      const testLines = tests
+        .filter(t => t.latestReading)
+        .slice(0, 15)
+        .map(t => {
+          const s = getTestStatus(t);
+          return `${t.name}: ${t.latestReading!.value} ${t.unit} (${s.status}) — ${t.latestReading!.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`;
+        });
+      if (testLines.length) parts.push('Latest lab results:\n' + testLines.join('\n'));
+    }
+
+    const overdue = testStatuses.filter(s => s.status === 'overdue').map(s => s.recommended.name);
+    const never = testStatuses.filter(s => s.status === 'never' && s.recommended.priority === 'essential').map(s => s.recommended.name);
+    if (overdue.length) parts.push(`Overdue tests: ${overdue.join(', ')}`);
+    if (never.length) parts.push(`Never tested (essential): ${never.join(', ')}`);
+
+    return parts.join('\n\n');
+  };
+
+  // ── Generate / refresh labs insight ──────────────────────────────────────
+  const generateInsight = async () => {
+    if (!user) return;
+    setInsightLoading(true);
+    try {
+      const context = buildLabContext();
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 300,
+          messages: [{
+            role: 'user',
+            content: `You are a health coach reviewing someone's lab results. Give a 2-3 sentence personalised insight based on their data. Be specific, reference actual values. End with one clear action.
+
+${context}
+
+Response: plain text only, no markdown, no headers.`,
+          }],
+        }),
+      });
+      const data = await response.json();
+      const text = data.content?.[0]?.text || '';
+      const now = new Date().toISOString();
+      setInsightText(text);
+      setInsightGeneratedAt(now);
+      await setDoc(doc(db, 'users', user.uid, 'aiInsights', 'labs'), { text, generatedAt: now });
+    } catch (e) { console.error('Insight error:', e); }
+    finally { setInsightLoading(false); }
+  };
+
+  // ── Chat with AI about labs ───────────────────────────────────────────────
+  const sendChat = async (inputOverride?: string) => {
+    const input = (inputOverride ?? chatInput).trim();
+    if (!input || !user) return;
+    setChatInput('');
+    setChatLoading(true);
+    setChatMessages(prev => [...prev, { role: 'user', text: input }]);
+
+    try {
+      const context = buildLabContext();
+      const history = chatMessages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text }));
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 500,
+          system: `You are a personal health advisor. Answer questions about the user's lab results, health plan, and test packages. Be specific, reference their actual data. For package coverage questions, list covered and missing tests clearly.
+
+Format rules:
+- No markdown headers (no ##)
+- No bold (**text**)  
+- For tables: use "Test | Yes/No" format per line
+- Use plain section labels ending with colon e.g. "Covered by package:"
+- Keep responses concise and scannable
+
+${context}`,
+          messages: [...history, { role: 'user', content: input }],
+        }),
+      });
+      const data = await response.json();
+      const text = data.content?.[0]?.text || '';
+      setChatMessages(prev => [...prev, { role: 'ai', text }]);
+    } catch (e) {
+      setChatMessages(prev => [...prev, { role: 'ai', text: 'Something went wrong. Try again.' }]);
+    } finally { setChatLoading(false); }
+  };
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
 
   const refreshData = () => {
     if (!user) return;
     setLoading(true);
-    const fetchLabResults = async () => {
-      try {
-        // Run cleanup first
-        await cleanupMalformedDocuments();
-        
-        const q = query(
-          collection(db, 'users', user.uid, 'labs'),
-          orderBy('date', 'desc'),
-          limit(50)
-        );
-        const querySnapshot = await getDocs(q);
-        const allResults: any[] = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        
-        // Filter out malformed entries
-        const validResults = allResults.filter(entry => 
-          entry && 
-          entry.results && 
-          Array.isArray(entry.results)
-        ) as LabResults[];
-        
-        setLabResults(validResults);
-      } catch (error) {
-        console.error('Error fetching lab results:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchLabResults();
-  };
-
-  const deleteEntry = async (id: string) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'users', user.uid, 'labs', id));
-      setLabResults(prev => prev.filter(result => result.id !== id));
-    } catch (error) {
-      console.error('Error deleting entry:', error);
-    }
-  };
-
-  const calculateDelta = (current: number, previous: number | undefined, testName: string) => {
-    if (previous === undefined || previous === 0) return null;
-    const delta = current - previous;
-    
-    // Convert test name to metric key for ranges
-    const getMetricKey = (name: string): string => {
-      const keyMap: { [key: string]: string } = {
-        'TSH': 'tsh',
-        'Vit D': 'vitD',
-        'B12': 'b12',
-        'Hb': 'hb',
-        'HbA1c': 'hba1c',
-        'Total Cholesterol': 'totalCholesterol',
-        'LDL': 'ldl',
-        'HDL': 'hdl',
-        'Triglycerides': 'triglycerides',
-        'Creatinine': 'creatinine',
-      };
-      return keyMap[name] || name.toLowerCase();
-    };
-    
-    const metric = getMetricKey(testName);
-    
-    // Metric-specific improvement logic
-    let isImprovement = false;
-    switch (metric) {
-      case 'tsh':
-      case 'hba1c':
-      case 'totalcholesterol':
-      case 'ldl':
-      case 'triglycerides':
-      case 'creatinine':
-        // DOWN is better for these metrics
-        isImprovement = delta < 0;
-        break;
-      case 'vitd':
-      case 'b12':
-      case 'hb':
-      case 'hdl':
-        // UP is better for these metrics
-        isImprovement = delta > 0;
-        break;
-      default:
-        // Default: UP is better for most metrics
-        isImprovement = delta > 0;
-    }
-    
-    return { value: delta, isImprovement };
-  };
-
-  const isOutOfRange = (value: number, testName: string) => {
-    const getMetricKey = (name: string): string => {
-      const keyMap: { [key: string]: string } = {
-        'TSH': 'tsh',
-        'Vit D': 'vitD',
-        'B12': 'b12',
-        'Hb': 'hb',
-        'HbA1c': 'hba1c',
-        'Total Cholesterol': 'totalCholesterol',
-        'LDL': 'ldl',
-        'HDL': 'hdl',
-        'Triglycerides': 'triglycerides',
-        'Creatinine': 'creatinine',
-      };
-      return keyMap[name] || name.toLowerCase();
-    };
-    
-    const metric = getMetricKey(testName);
-    const range = labRanges[metric];
-    if (!range) return false;
-    
-    if (metric === 'hdl') {
-      // HDL has only a lower limit
-      return value < range.min;
-    }
-    
-    return value < range.min || value > range.max;
-  };
-
-  const formatValue = (value: number | undefined, unit: string) => {
-    if (value === undefined) return '--';
-    const precision = unit === 'mIU/L' || unit === '%' || unit === 'mg/dL' && value < 10 ? 1 : 0;
-    return `${value.toFixed(precision)}${unit}`;
-  };
-
-  const renderDelta = (current: number | undefined, previous: number | undefined, testName: string) => {
-    if (current === undefined || previous === undefined) return null;
-    
-    const delta = calculateDelta(current, previous, testName);
-    if (!delta) return null;
-    
-    const Icon = delta.isImprovement ? TrendingUp : TrendingDown;
-    const color = delta.isImprovement ? 'text-emerald-500' : 'text-red-500';
-    
-    return (
-      <div className="flex items-center space-x-1">
-        <Icon className={`w-3 h-3 ${color}`} />
-      </div>
-    );
-  };
-
-  const getTestValue = (result: LabResults, testName: string): number | undefined => {
-    if (!result || !result.results) return undefined;
-    const test = result.results.find(t => t.testName === testName);
-    return test?.value;
-  };
-
-  const getTestUnit = (result: LabResults, testName: string): string => {
-    if (!result || !result.results) return '';
-    const test = result.results.find(t => t.testName === testName);
-    return test?.unit || '';
-  };
-
-  // Helper functions for test cards
-  const getTestIcon = (testName: string): string => {
-    const name = testName.toLowerCase();
-    if (name.includes('tsh') || name.includes('t3') || name.includes('t4') || name.includes('thyroid')) return '🩸';
-    if (name.includes('hba1c') || name.includes('blood sugar') || name.includes('glucose') || name.includes('fasting')) return '🍬';
-    if (name.includes('vitamin d') || name.includes('vit d')) return '☀️';
-    if (name.includes('vitamin b12') || name.includes('b12')) return '💊';
-    if (name.includes('hemoglobin') || name.includes('hb') || name.includes('cbc')) return '🔴';
-    if (name.includes('calcium')) return '🦴';
-    if (name.includes('alt') || name.includes('ast') || name.includes('liver')) return '🫀';
-    if (name.includes('testosterone')) return '⚡';
-    if (name.includes('cholesterol') || name.includes('ldl') || name.includes('hdl') || name.includes('triglycerides')) return '🫁';
-    return '🧪';
-  };
-
-  const getTestCategory = (testName: string): string => {
-    const name = testName.toLowerCase();
-    if (name.includes('tsh') || name.includes('t3') || name.includes('t4')) return 'Thyroid';
-    if (name.includes('hba1c') || name.includes('glucose') || name.includes('blood sugar')) return 'Diabetes';
-    if (name.includes('vitamin') || name.includes('calcium')) return 'Nutrition';
-    if (name.includes('alt') || name.includes('ast') || name.includes('bilirubin')) return 'Liver';
-    if (name.includes('testosterone')) return 'Hormones';
-    return 'Blood Test';
-  };
-
-  const getTestStatus = (test: LabTestCard): { status: string; color: string; accentColor: string } => {
-    if (!test.latestReading) {
-      return { status: 'No readings yet', color: 'text-gray-500', accentColor: '#374151' };
-    }
-
-    const { value } = test.latestReading;
-    const { referenceRangeLow, referenceRangeHigh } = test;
-
-    if (referenceRangeLow === null && referenceRangeHigh === null) {
-      return { status: '—', color: 'text-gray-500', accentColor: '#374151' };
-    }
-
-    const isCritical = referenceRangeHigh && value > referenceRangeHigh * 1.2 || 
-                      referenceRangeLow && value < referenceRangeLow * 0.8;
-
-    if (isCritical) {
-      return { status: 'Critical', color: 'text-red-500', accentColor: '#ef4444' };
-    }
-
-    if (referenceRangeHigh && value > referenceRangeHigh) {
-      return { status: '↑ High', color: 'text-amber-500', accentColor: '#f59e0b' };
-    }
-
-    if (referenceRangeLow && value < referenceRangeLow) {
-      return { status: '↓ Low', color: 'text-blue-500', accentColor: '#3b82f6' };
-    }
-
-    return { status: '✓ Normal', color: 'text-green-500', accentColor: '#10b981' };
-  };
-
-  const getDueDateChip = (nextDueDate: Date | null): { text: string; color: string } => {
-    if (!nextDueDate) return { text: '', color: '' };
-
-    const now = new Date();
-    const diffTime = nextDueDate.getTime() - now.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    if (diffDays < 0) {
-      return { text: `Due ${Math.abs(diffDays)} days ago`, color: 'bg-red-500' };
-    }
-
-    if (diffDays <= 30) {
-      return { text: `Due in ${diffDays} days`, color: 'bg-amber-500' };
-    }
-
-    const diffMonths = Math.floor(diffDays / 30);
-    return { text: `Due in ${diffMonths} months`, color: 'bg-green-500' };
-  };
-
-  const sortTests = (tests: LabTestCard[]): LabTestCard[] => {
-    return tests.sort((a, b) => {
-      // Pinned tests always first
-      if (a.pinned && !b.pinned) return -1;
-      if (b.pinned && !a.pinned) return 1;
-
-      const aStatus = getTestStatus(a);
-      const bStatus = getTestStatus(b);
-
-      // Critical first
-      if (aStatus.status === 'Critical' && bStatus.status !== 'Critical') return -1;
-      if (bStatus.status === 'Critical' && aStatus.status !== 'Critical') return 1;
-
-      // High/Low next
-      const aIsOutOfRange = aStatus.status === '↑ High' || aStatus.status === '↓ Low';
-      const bIsOutOfRange = bStatus.status === '↑ High' || bStatus.status === '↓ Low';
-      if (aIsOutOfRange && !bIsOutOfRange) return -1;
-      if (bIsOutOfRange && !aIsOutOfRange) return 1;
-
-      // Overdue
-      const aIsOverdue = a.nextDueDate && a.nextDueDate < new Date();
-      const bIsOverdue = b.nextDueDate && b.nextDueDate < new Date();
-      if (aIsOverdue && !bIsOverdue) return -1;
-      if (bIsOverdue && !aIsOverdue) return 1;
-
-      // Due soon
-      const aIsDueSoon = a.nextDueDate && a.nextDueDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      const bIsDueSoon = b.nextDueDate && b.nextDueDate <= new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      if (aIsDueSoon && !bIsDueSoon) return -1;
-      if (bIsDueSoon && !aIsDueSoon) return 1;
-
-      return 0;
+    cleanupMalformedDocuments().then(async () => {
+      const q = query(collection(db, 'users', user.uid, 'labs'), orderBy('date', 'desc'), limit(50));
+      const snap = await getDocs(q);
+      setLabResults(snap.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)).filter(e => e?.results && Array.isArray(e.results)));
+      setLoading(false);
     });
   };
 
-  const showToast = (message: string) => {
-    // Simple toast implementation - could be enhanced with a proper toast library
-    console.log(message);
-    alert(message);
+  useEffect(() => {
+    const h = () => setOpenMenuId(null);
+    if (openMenuId) document.addEventListener('click', h);
+    return () => document.removeEventListener('click', h);
+  }, [openMenuId]);
+
+  const getTestStatus = (test: LabTestCard) => {
+    if (!test.latestReading) return { status: 'No readings yet', color: 'text-gray-500', accentColor: '#374151' };
+    const { value } = test.latestReading;
+    const { referenceRangeLow: low, referenceRangeHigh: high } = test;
+    if (low === null && high === null) return { status: '—', color: 'text-gray-500', accentColor: '#374151' };
+    if ((high && value > high * 1.2) || (low && value < low * 0.8)) return { status: 'Critical', color: 'text-red-500', accentColor: '#ef4444' };
+    if (high && value > high) return { status: '↑ High', color: 'text-amber-500', accentColor: '#f59e0b' };
+    if (low && value < low) return { status: '↓ Low', color: 'text-blue-500', accentColor: '#3b82f6' };
+    return { status: '✓ Normal', color: 'text-green-500', accentColor: '#10b981' };
   };
 
-  const handlePinToggle = async (testId: string, currentPinned: boolean) => {
+  const getDueDateChip = (d: Date | null) => {
+    if (!d) return { text: '', color: '' };
+    const days = Math.ceil((d.getTime() - Date.now()) / 86400000);
+    if (days < 0) return { text: `Due ${Math.abs(days)}d ago`, color: 'bg-red-500' };
+    if (days <= 30) return { text: `Due in ${days}d`, color: 'bg-amber-500' };
+    return { text: `Due in ${Math.floor(days / 30)}mo`, color: 'bg-green-500' };
+  };
+
+  const sortTests = (arr: LabTestCard[]) => [...arr].sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    const as = getTestStatus(a), bs = getTestStatus(b);
+    if (as.status === 'Critical' && bs.status !== 'Critical') return -1;
+    if (bs.status === 'Critical' && as.status !== 'Critical') return 1;
+    const aOor = as.status === '↑ High' || as.status === '↓ Low';
+    const bOor = bs.status === '↑ High' || bs.status === '↓ Low';
+    if (aOor && !bOor) return -1;
+    if (!aOor && bOor) return 1;
+    return 0;
+  });
+
+  const handlePinToggle = async (testId: string, pinned: boolean) => {
     if (!user) return;
-    
-    try {
-      await updateDoc(
-        doc(db, 'users', user.uid, 'tests', testId),
-        cleanData({ pinned: !currentPinned })
-      );
-      
-      // Update local state
-      setTests(prev => prev.map(test => 
-        test.id === testId ? { ...test, pinned: !currentPinned } : test
-      ));
-      
-      showToast(currentPinned ? 'Unpinned' : 'Pinned');
-      setOpenMenuId(null);
-    } catch (error) {
-      console.error('Error updating pin status:', error);
-    }
+    await updateDoc(doc(db, 'users', user.uid, 'tests', testId), cleanData({ pinned: !pinned }));
+    setTests(prev => prev.map(t => t.id === testId ? { ...t, pinned: !pinned } : t));
+    setOpenMenuId(null);
   };
 
-  const handleDeleteTest = async (testId: string, testName: string) => {
-    if (!user) return;
-    
-    const confirmed = window.confirm(`Delete ${testName}? This removes all readings permanently.`);
-    if (!confirmed) return;
-    
-    try {
-      // Delete all readings first
-      const readingsQuery = query(
-        collection(db, 'users', user.uid, 'tests', testId, 'readings')
-      );
-      const readingsSnapshot = await getDocs(readingsQuery);
-      
-      for (const readingDoc of readingsSnapshot.docs) {
-        await deleteDoc(doc(db, 'users', user.uid, 'tests', testId, 'readings', readingDoc.id));
-      }
-
-      // Delete the test document
-      await deleteDoc(doc(db, 'users', user.uid, 'tests', testId));
-
-      // Update local state
-      setTests(prev => prev.filter(test => test.id !== testId));
-      
-      showToast('Test deleted');
-      setOpenMenuId(null);
-    } catch (error) {
-      console.error('Error deleting test:', error);
-      showToast('Error deleting test');
-    }
+  const handleDeleteTest = async (testId: string, name: string) => {
+    if (!user || !window.confirm(`Delete ${name}? This removes all readings.`)) return;
+    const rSnap = await getDocs(collection(db, 'users', user.uid, 'tests', testId, 'readings'));
+    for (const r of rSnap.docs) await deleteDoc(r.ref);
+    await deleteDoc(doc(db, 'users', user.uid, 'tests', testId));
+    setTests(prev => prev.filter(t => t.id !== testId));
+    await bumpDataVersion(user.uid);
+    setOpenMenuId(null);
   };
 
-  if (loading) {
+  const TestCard = ({ test }: { test: LabTestCard }) => {
+    const status = getTestStatus(test);
+    const dueChip = getDueDateChip(test.nextDueDate);
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
-        <div className="text-center">Loading...</div>
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center gap-3 cursor-pointer hover:bg-slate-800 transition-colors relative"
+        style={{ borderLeft: `3px solid ${test.pinned ? '#f59e0b' : status.accentColor}` }}
+        onClick={() => navigate(`/labs/${test.id}`)}>
+        <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ backgroundColor: `${test.pinned ? '#f59e0b' : status.accentColor}15` }}>
+          <span className="text-lg">{getTestIcon(test.name)}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-white truncate">{test.name}</div>
+          <div className="text-xs text-slate-400">
+            {getTestCategory(test.name)} · {test.latestReading
+              ? test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+              : 'No readings'}
+          </div>
+          {dueChip.text && <span className={`inline-block px-2 py-0.5 rounded-full text-xs text-white mt-1 ${dueChip.color}`}>{dueChip.text}</span>}
+        </div>
+        <div className="text-right flex-shrink-0">
+          {test.latestReading ? (
+            <>
+              <div className="text-sm font-mono text-white">{test.latestReading.value}<span className="text-xs text-slate-400 ml-1">{test.unit}</span></div>
+              <div className={`text-xs mt-0.5 ${status.color}`}>{status.status}</div>
+            </>
+          ) : <div className="text-sm text-slate-400">No readings</div>}
+        </div>
+        <button onClick={e => { e.stopPropagation(); setOpenMenuId(openMenuId === test.id ? null : test.id); }}
+          className="text-slate-400 hover:text-white p-1 flex-shrink-0">⋮</button>
+        {openMenuId === test.id && (
+          <div className="absolute top-full right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50 min-w-[160px]">
+            <button onClick={e => { e.stopPropagation(); handlePinToggle(test.id, test.pinned || false); }}
+              className="w-full flex items-center gap-3 px-3 py-2 hover:bg-slate-700 transition-colors text-left">
+              <span>📌</span><span className="text-sm text-white">{test.pinned ? 'Unpin' : 'Pin to top'}</span>
+            </button>
+            <button onClick={e => { e.stopPropagation(); handleDeleteTest(test.id, test.name); }}
+              className="w-full flex items-center gap-3 px-3 py-2 hover:bg-slate-700 transition-colors text-left">
+              <span>🗑️</span><span className="text-sm text-red-400">Delete test</span>
+            </button>
+          </div>
+        )}
       </div>
     );
-  }
+  };
+
+  if (loading) return (
+    <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+      <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+
+  const sortedTests = sortTests(tests);
+  const pinnedTests = sortedTests.filter(t => t.pinned);
+  const unpinnedTests = sortedTests.filter(t => !t.pinned);
+
+  const overdueCount = testStatuses.filter(s => s.status === 'overdue').length;
+  const neverCount = testStatuses.filter(s => s.status === 'never').length;
+  const dueSoonCount = testStatuses.filter(s => s.status === 'due_soon').length;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-20">
-      <div className="p-6">
+      <div className="p-5 space-y-5">
+
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white mb-1">Lab Results</h1>
-            <p className="text-slate-400 text-sm">
-              {tests.length > 0 ? `${tests.length} tests tracked` : 'No tests yet'}
-            </p>
+            <h1 className="text-2xl font-bold">Lab Results</h1>
+            <p className="text-slate-400 text-sm">{tests.length > 0 ? `${tests.length} tests tracked` : 'No tests yet'}</p>
           </div>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="w-12 h-12 bg-emerald-500 rounded-full flex items-center justify-center shadow-lg hover:bg-emerald-600 transition-colors"
-          >
-            <Plus className="w-6 h-6 text-white" />
+          <button onClick={() => setIsModalOpen(true)}
+            className="w-11 h-11 bg-emerald-500 rounded-full flex items-center justify-center hover:bg-emerald-600 transition-colors">
+            <Plus className="w-5 h-5 text-white" />
           </button>
         </div>
 
-        {/* Upload Report Button */}
-        <button
-          onClick={() => navigate('/labs/upload')}
-          className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-lg p-4 flex items-center justify-between mb-6 hover:from-emerald-600 hover:to-emerald-700 transition-all"
-        >
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-white/15 rounded-lg flex items-center justify-center">
-              <span className="text-lg">📄</span>
+        {/* ── HEALTH PLAN ── */}
+        {testStatuses.length > 0 && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+            <button onClick={() => setHealthPlanExpanded(e => !e)}
+              className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-slate-800/50 transition-colors">
+              <div className="w-10 h-10 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center text-xl flex-shrink-0">🩺</div>
+              <div className="flex-1 text-left">
+                <div className="text-sm font-semibold text-white">Your Health Plan</div>
+                <div className="text-[10px] text-slate-400 font-mono mt-0.5">{getHealthPlanSummary(testStatuses)}</div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {overdueCount > 0 && <span className="text-[9px] font-mono bg-red-500/15 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full">{overdueCount} overdue</span>}
+                {neverCount > 0 && !overdueCount && <span className="text-[9px] font-mono bg-blue-500/15 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full">{neverCount} new</span>}
+                {dueSoonCount > 0 && !overdueCount && !neverCount && <span className="text-[9px] font-mono bg-amber-500/15 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full">{dueSoonCount} due soon</span>}
+                {healthPlanExpanded ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
+              </div>
+            </button>
+
+            {healthPlanExpanded && (
+              <div className="border-t border-slate-800">
+                {(['overdue', 'due_soon', 'never', 'recent'] as const).map(statusKey => {
+                  const items = testStatuses.filter(s => s.status === statusKey);
+                  if (!items.length) return null;
+                  const cfg = {
+                    overdue:  { label: '🔴 Overdue',     color: 'text-red-400',     bg: 'bg-red-500/5' },
+                    due_soon: { label: '⚠️ Due soon',    color: 'text-amber-400',   bg: 'bg-amber-500/5' },
+                    never:    { label: '➕ Never done',   color: 'text-blue-400',    bg: 'bg-blue-500/5' },
+                    recent:   { label: '✅ Up to date',  color: 'text-emerald-400', bg: 'bg-emerald-500/5' },
+                  }[statusKey];
+                  return (
+                    <div key={statusKey}>
+                      <div className={`px-4 py-1.5 text-[9px] font-mono font-semibold uppercase tracking-wider ${cfg.color} ${cfg.bg}`}>
+                        {cfg.label} · {items.length}
+                      </div>
+                      {items.map(item => (
+                        <div key={item.recommended.name} className="flex items-center gap-3 px-4 py-3 border-b border-slate-800/40 last:border-0">
+                          <span className="text-lg flex-shrink-0">{item.recommended.icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-sm font-medium text-white">{item.recommended.name}</span>
+                              <span className={`text-[8px] font-mono px-1.5 py-0.5 rounded ${
+                                item.recommended.priority === 'essential' ? 'bg-red-500/10 text-red-400' :
+                                item.recommended.priority === 'important' ? 'bg-amber-500/10 text-amber-400' :
+                                'bg-slate-700 text-slate-500'}`}>
+                                {item.recommended.priority}
+                              </span>
+                            </div>
+                            <div className="text-[9px] text-slate-500 mt-0.5">{item.recommended.reason}</div>
+                            {item.lastDone && (
+                              <div className="text-[9px] font-mono text-slate-600 mt-0.5">
+                                Last: {item.lastDone.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
+                                {item.lastValue ? ` · ${item.lastValue}` : ''}
+                                {item.daysUntilDue !== null && item.daysUntilDue < 0 && <span className="text-red-400 ml-1">({Math.abs(item.daysUntilDue)}d overdue)</span>}
+                                {item.daysUntilDue !== null && item.daysUntilDue >= 0 && item.daysUntilDue <= 45 && <span className="text-amber-400 ml-1">(due in {item.daysUntilDue}d)</span>}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                            {/* Interval customizer */}
+                            {customizingTest === item.recommended.name ? (
+                              <div className="flex items-center gap-1">
+                                <select defaultValue={item.intervalMonths}
+                                  onChange={async e => {
+                                    const months = parseInt(e.target.value);
+                                    if (item.existingTestId && user) {
+                                      await updateDoc(doc(db, 'users', user.uid, 'tests', item.existingTestId), { reminderIntervalMonths: months });
+                                      setTests(prev => prev.map(t => t.id === item.existingTestId ? { ...t, reminderIntervalMonths: months } : t));
+                                    }
+                                    setCustomizingTest(null);
+                                  }}
+                                  className="bg-slate-800 border border-slate-700 rounded text-[10px] text-white px-1.5 py-1 focus:outline-none">
+                                  {[1, 3, 6, 12, 24].map(m => <option key={m} value={m}>{m === 12 ? '1 year' : m === 24 ? '2 years' : `${m}mo`}</option>)}
+                                </select>
+                                <button onClick={() => setCustomizingTest(null)} className="text-slate-500 text-xs">✕</button>
+                              </div>
+                            ) : (
+                              <button onClick={() => setCustomizingTest(item.recommended.name)}
+                                className="text-[9px] font-mono text-slate-600 hover:text-slate-400 border border-slate-700 rounded px-1.5 py-0.5">
+                                every {item.intervalMonths}mo
+                              </button>
+                            )}
+                            {item.existingTestId
+                              ? <button onClick={() => navigate(`/labs/${item.existingTestId}`)} className="text-[9px] font-mono text-emerald-400 hover:text-emerald-300">View →</button>
+                              : <button onClick={() => navigate('/labs/upload')} className="text-[9px] font-mono text-blue-400 hover:text-blue-300">Upload →</button>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── AI LABS INSIGHT ── */}
+        <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 via-indigo-400 to-transparent" />
+          <div className="p-4">
+            {/* Header */}
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+              <span className="text-[10px] font-mono text-blue-400 tracking-wider uppercase">Lab Insight</span>
+              {insightGeneratedAt && (
+                <span className="ml-auto text-[9px] font-mono text-slate-600">
+                  {new Date(insightGeneratedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                </span>
+              )}
+              <button onClick={generateInsight} disabled={insightLoading}
+                className="text-slate-600 hover:text-blue-400 transition-colors disabled:opacity-40 p-0.5">
+                <RefreshCw className={`w-3 h-3 ${insightLoading ? 'animate-spin' : ''}`} />
+              </button>
             </div>
+
+            {/* Insight text or empty state */}
+            {insightLoading ? (
+              <div className="flex items-center gap-2 py-2">
+                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                <span className="text-xs text-slate-400">Analysing your lab data…</span>
+              </div>
+            ) : insightText ? (
+              <p className="text-xs text-slate-300 leading-relaxed mb-3">{insightText}</p>
+            ) : (
+              <div className="mb-3">
+                <p className="text-xs text-slate-500 mb-2">Get an AI summary of your lab results and what to focus on.</p>
+                <button onClick={generateInsight}
+                  className="text-xs bg-blue-500/10 border border-blue-500/20 text-blue-400 px-3 py-1.5 rounded-lg hover:bg-blue-500/20 transition-colors">
+                  ✦ Generate insight
+                </button>
+              </div>
+            )}
+
+            {/* Chat messages */}
+            {chatMessages.length > 0 && (
+              <div className="space-y-2 mb-3 max-h-60 overflow-y-auto border-t border-slate-800 pt-3" style={{ scrollbarWidth: 'none' }}>
+                {chatMessages.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    {msg.role === 'user' ? (
+                      <div className="bg-blue-500/15 border border-blue-500/20 rounded-2xl rounded-tr-sm px-3 py-2 max-w-[80%]">
+                        <p className="text-xs text-blue-100">{msg.text}</p>
+                      </div>
+                    ) : (
+                      <div className="max-w-[95%] space-y-1.5">
+                        {msg.text
+                          .replace(/#{1,3}\s/g, '')           // remove ## headers
+                          .replace(/\*\*(.*?)\*\*/g, '$1')    // remove bold
+                          .replace(/\|---\|---\|/g, '')       // remove table separators
+                          .split('\n')
+                          .filter(l => l.trim())
+                          .map((line, j) => {
+                            const isTableRow = line.includes('|') && line.trim().startsWith('|');
+                            const isBullet = line.trim().startsWith('-') || line.trim().startsWith('•');
+                            const isHeader = /^[A-Z][^a-z]*:/.test(line.trim()) || line.trim().endsWith(':');
+                            if (isTableRow) {
+                              const cells = line.split('|').filter(c => c.trim());
+                              if (cells.length >= 2) return (
+                                <div key={j} className="flex items-center justify-between bg-slate-800/60 rounded-lg px-2.5 py-1.5">
+                                  <span className="text-[11px] text-slate-300 flex-1">{cells[0].trim()}</span>
+                                  <span className={`text-[11px] font-medium flex-shrink-0 ml-2 ${
+                                    cells[1].includes('✅') || cells[1].toLowerCase().includes('yes') ? 'text-emerald-400' :
+                                    cells[1].includes('❌') || cells[1].toLowerCase().includes('no') ? 'text-red-400' :
+                                    'text-slate-300'}`}>
+                                    {cells[1].trim()}
+                                  </span>
+                                </div>
+                              );
+                            }
+                            if (isHeader) return <p key={j} className="text-[11px] font-semibold text-white pt-1">{line.trim()}</p>;
+                            if (isBullet) return (
+                              <div key={j} className="flex gap-1.5">
+                                <span className="text-slate-500 flex-shrink-0 text-[11px]">·</span>
+                                <p className="text-[11px] text-slate-300 leading-relaxed">{line.replace(/^[-•]\s*/, '')}</p>
+                              </div>
+                            );
+                            return <p key={j} className="text-[11px] text-slate-300 leading-relaxed">{line.trim()}</p>;
+                          })}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="flex gap-1.5 px-1">
+                    {[0, 150, 300].map(d => (
+                      <div key={d} className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />
+                    ))}
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+            )}
+
+            {/* Quick starters */}
+            {chatMessages.length === 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {[
+                  'What does my latest report say?',
+                  'What tests am I missing?',
+                  'Does a package cover my needs?',
+                  'When should I get tested next?',
+                ].map(q => (
+                  <button key={q} onClick={() => {
+                    if (q === 'Does a package cover my needs?') {
+                      setChatMessages([{ role: 'ai', text: `Sure! Tell me which package you're considering and I'll check if it covers your needs.\n\nYou can:\n- Type the package name (e.g. "Dr Lal Pathlabs Full Body Checkup")\n- List the tests included\n- Upload a PDF of the package — I'll read it\n\nSome popular ones to start with:\n- Dr Lal Pathlabs | Aarogyam 1.2\n- Thyrocare | Aarogyam C\n- 1mg | Full Body Checkup Advanced\n- Healthians | Good Health Package\n\nWhich one are you considering, or paste your own list?` }]);
+                    } else {
+                      sendChat(q);
+                    }
+                  }}
+                    className="text-[10px] px-2.5 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-blue-500/40 hover:text-blue-400 transition-colors">
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Input */}
+            <div className="flex gap-2">
+              <input type="text" value={chatInput} onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendChat()}
+                placeholder={chatMessages.length > 0 ? 'Ask a follow-up…' : 'Ask about your labs or a test package…'}
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500" />
+              <button onClick={() => sendChat()} disabled={chatLoading || !chatInput.trim()}
+                className="w-8 h-8 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 rounded-xl flex items-center justify-center transition-colors">
+                <Send className="w-3.5 h-3.5 text-white" />
+              </button>
+            </div>
+
+            {chatMessages.length > 0 && (
+              <button onClick={() => setChatMessages([])} className="mt-2 text-[9px] font-mono text-slate-600 hover:text-slate-400">
+                clear chat
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Upload button */}
+        <button onClick={() => navigate('/labs/upload')}
+          className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 rounded-xl p-4 flex items-center justify-between hover:from-emerald-600 hover:to-emerald-700 transition-all">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-white/15 rounded-lg flex items-center justify-center"><span className="text-lg">📄</span></div>
             <div className="text-left">
               <div className="text-white font-semibold text-sm">Upload Lab Report</div>
               <div className="text-white/70 text-xs">AI auto-fills all test values</div>
@@ -669,363 +701,44 @@ export default function Labs() {
           <ChevronRight className="w-5 h-5 text-white/60" />
         </button>
 
-        {/* Test Cards List */}
+        {/* Test cards */}
         {tests.length > 0 ? (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-white">Your Tests</h2>
-              <div className="bg-slate-800 text-slate-300 px-2 py-1 rounded-full text-xs">
-                {tests.length}
-              </div>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-white">Your Tests</h2>
+              <span className="bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full text-xs">{tests.length}</span>
             </div>
-            
-            <div className="space-y-4">
-              {(() => {
-                const sortedTests = sortTests(tests);
-                const pinnedTests = sortedTests.filter(test => test.pinned);
-                const unpinnedTests = sortedTests.filter(test => !test.pinned);
-                
-                return (
-                  <>
-                    {/* Pinned Tests Section */}
-                    {pinnedTests.length > 0 && (
-                      <div>
-                        <div className="flex items-center space-x-2 mb-3">
-                          <span className="text-amber-400">📌</span>
-                          <h3 className="text-sm font-semibold text-amber-400">Pinned</h3>
-                          <div className="bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full text-xs">
-                            {pinnedTests.length}
-                          </div>
-                        </div>
-                        <div className="space-y-3">
-                          {pinnedTests.map((test) => {
-                            const status = getTestStatus(test);
-                            const dueChip = getDueDateChip(test.nextDueDate);
-                            const icon = getTestIcon(test.name);
-                            const category = getTestCategory(test.name);
-                            
-                            return (
-                              <div
-                                key={test.id}
-                                className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-800 transition-colors relative"
-                                style={{ borderLeft: `3px solid #f59e0b` }}
-                                onClick={() => navigate(`/labs/${test.id}`)}
-                              >
-                                {/* Test Icon */}
-                                <div 
-                                  className="w-9 h-9 rounded-lg flex items-center justify-center"
-                                  style={{ backgroundColor: '#f59e0b15' }}
-                                >
-                                  <span className="text-lg">{icon}</span>
-                                </div>
-                                
-                                {/* Test Info */}
-                                <div className="flex-1">
-                                  <div className="text-sm font-medium text-white">{test.name}</div>
-                                  <div className="text-xs text-slate-400 mb-1">
-                                    {category} · {test.latestReading ? 
-                                      `${test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 
-                                      'No readings'
-                                    }
-                                  </div>
-                                  {dueChip.text && (
-                                    <div className={`inline-block px-2 py-0.5 rounded-full text-xs text-white ${dueChip.color}`}>
-                                      {dueChip.text}
-                                    </div>
-                                  )}
-                                </div>
-                                
-                                {/* Value & Status */}
-                                <div className="text-right">
-                                  {test.latestReading ? (
-                                    <>
-                                      <div className="text-sm font-mono text-white">
-                                        {test.latestReading.value}
-                                        <span className="text-xs text-slate-400 ml-1">{test.unit}</span>
-                                      </div>
-                                      <div className={`text-xs ${status.color} mt-1`}>
-                                        {status.status}
-                                      </div>
-                                    </>
-                                  ) : (
-                                    <div className="text-sm text-slate-400">No readings yet</div>
-                                  )}
-                                </div>
 
-                                {/* Options Menu */}
-                                <button
-                                  onClick={(e) => { 
-                                    e.stopPropagation(); 
-                                    setOpenMenuId(openMenuId === test.id ? null : test.id); 
-                                  }}
-                                  className="text-slate-400 hover:text-white p-1 rounded transition-colors"
-                                >
-                                  <span className="text-lg">⋮</span>
-                                </button>
-
-                                {/* Dropdown Menu */}
-                                {openMenuId === test.id && (
-                                  <div className="absolute top-full right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50 min-w-[160px]">
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handlePinToggle(test.id, test.pinned || false);
-                                      }}
-                                      className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
-                                    >
-                                      <span>📌</span>
-                                      <span className="text-sm text-white">
-                                        {test.pinned ? 'Unpin' : 'Pin to top'}
-                                      </span>
-                                    </button>
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDeleteTest(test.id, test.name);
-                                      }}
-                                      className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
-                                    >
-                                      <span>🗑️</span>
-                                      <span className="text-sm text-red-400">Delete test</span>
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Unpinned Tests Section */}
-                    {unpinnedTests.length > 0 && (
-                      <div className="space-y-3">
-                        {unpinnedTests.map((test) => {
-                          const status = getTestStatus(test);
-                          const dueChip = getDueDateChip(test.nextDueDate);
-                          const icon = getTestIcon(test.name);
-                          const category = getTestCategory(test.name);
-                          
-                          return (
-                            <div
-                              key={test.id}
-                              className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center space-x-3 cursor-pointer hover:bg-slate-800 transition-colors relative"
-                              style={{ borderLeft: `3px solid ${status.accentColor}` }}
-                              onClick={() => navigate(`/labs/${test.id}`)}
-                            >
-                              {/* Test Icon */}
-                              <div 
-                                className="w-9 h-9 rounded-lg flex items-center justify-center"
-                                style={{ backgroundColor: `${status.accentColor}15` }}
-                              >
-                                <span className="text-lg">{icon}</span>
-                              </div>
-                              
-                              {/* Test Info */}
-                              <div className="flex-1">
-                                <div className="text-sm font-medium text-white">{test.name}</div>
-                                <div className="text-xs text-slate-400 mb-1">
-                                  {category} · {test.latestReading ? 
-                                    `${test.latestReading.date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}` : 
-                                    'No readings'
-                                  }
-                                </div>
-                                {dueChip.text && (
-                                  <div className={`inline-block px-2 py-0.5 rounded-full text-xs text-white ${dueChip.color}`}>
-                                    {dueChip.text}
-                                  </div>
-                                )}
-                              </div>
-                              
-                              {/* Value & Status */}
-                              <div className="text-right">
-                                {test.latestReading ? (
-                                  <>
-                                    <div className="text-sm font-mono text-white">
-                                      {test.latestReading.value}
-                                      <span className="text-xs text-slate-400 ml-1">{test.unit}</span>
-                                    </div>
-                                    <div className={`text-xs ${status.color} mt-1`}>
-                                      {status.status}
-                                    </div>
-                                  </>
-                                ) : (
-                                  <div className="text-sm text-slate-400">No readings yet</div>
-                                )}
-                              </div>
-
-                              {/* Options Menu */}
-                              <button
-                                onClick={(e) => { 
-                                  e.stopPropagation(); 
-                                  setOpenMenuId(openMenuId === test.id ? null : test.id); 
-                                }}
-                                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
-                              >
-                                <span className="text-lg">⋮</span>
-                              </button>
-
-                              {/* Dropdown Menu */}
-                              {openMenuId === test.id && (
-                                <div className="absolute top-full right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-lg z-50 min-w-[160px]">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handlePinToggle(test.id, test.pinned || false);
-                                    }}
-                                    className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
-                                  >
-                                    <span>📌</span>
-                                    <span className="text-sm text-white">
-                                      {test.pinned ? 'Unpin' : 'Pin to top'}
-                                    </span>
-                                  </button>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleDeleteTest(test.id, test.name);
-                                    }}
-                                    className="w-full flex items-center space-x-3 px-3 py-2 text-left hover:bg-slate-700 transition-colors"
-                                  >
-                                    <span>🗑️</span>
-                                    <span className="text-sm text-red-400">Delete test</span>
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-        ) : (
-          <div className="bg-slate-900 rounded-lg p-8 border border-slate-800 text-center">
-            <AlertCircle className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-            <h3 className="text-lg font-semibold text-white mb-2">No lab results yet</h3>
-            <p className="text-slate-400 text-sm mb-4">
-              Track your yearly blood tests to monitor your health trends over time
-            </p>
-            <button
-              onClick={() => setIsModalOpen(true)}
-              className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg flex items-center space-x-2 mx-auto"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add First Result</span>
-            </button>
-          </div>
-        )}
-
-        {/* Hidden old table */}
-        {false && (
-          <div className="mt-8">
-            <h3 className="text-lg font-semibold text-white mb-4">Legacy Table View</h3>
-            {labResults.length > 0 ? (() => {
-              const validEntries = labResults.filter(entry => 
-                entry && 
-                entry.results && 
-                Array.isArray(entry.results)
-              );
-              
-              if (validEntries.length === 0) {
-                return (
-                  <div className="bg-slate-900 rounded-lg p-8 border border-slate-800 text-center">
-                    <AlertCircle className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-                    <h3 className="text-lg font-semibold text-white mb-2">No valid lab results</h3>
-                    <p className="text-slate-400 text-sm mb-4">
-                      All lab entries were cleaned up. Add new results to get started.
-                    </p>
-                  </div>
-                );
-              }
-              
-              const allTestNames = getAllTestNames(validEntries);
-              
-              return (
-                <div className="overflow-x-auto">
-                  <table className="w-full bg-slate-900 rounded-lg border border-slate-800">
-                    <thead>
-                      <tr className="border-b border-slate-800">
-                        <th className="sticky left-0 bg-slate-900 text-left p-3 text-sm font-medium text-slate-400 border-r border-slate-800">
-                          Date
-                        </th>
-                        {allTestNames.map((testName) => (
-                          <th key={testName} className="text-left p-3 text-sm font-medium text-slate-400 min-w-[120px]">
-                            {testName}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {validEntries.map((result, index) => {
-                        const previousResult = validEntries[index + 1];
-                        return (
-                          <tr key={result.id} className="border-b border-slate-800 last:border-0">
-                            <td className="sticky left-0 bg-slate-900 p-3 border-r border-slate-800">
-                              <div className="flex items-center justify-between">
-                                <span className="text-sm text-white">
-                                  {new Date(result.date).toLocaleDateString('en-US', { 
-                                    month: 'short', 
-                                    day: 'numeric',
-                                    year: 'numeric'
-                                  })}
-                                </span>
-                                <button
-                                  onClick={() => deleteEntry(result.id)}
-                                  className="text-slate-400 hover:text-red-400 p-1"
-                                >
-                                  <AlertCircle className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                            {allTestNames.map((testName) => {
-                              const currentValue = getTestValue(result, testName);
-                              const currentUnit = getTestUnit(result, testName);
-                              const previousValue = getTestValue(previousResult, testName);
-                              const outOfRange = currentValue !== undefined && isOutOfRange(currentValue, testName);
-                              
-                              return (
-                                <td key={testName} className="p-3">
-                                  <div className="flex items-center space-x-2">
-                                    <span className={`text-sm ${
-                                      outOfRange ? 'text-red-400 font-medium' : 'text-white'
-                                    }`}>
-                                      {formatValue(currentValue, currentUnit)}
-                                    </span>
-                                    {renderDelta(currentValue, previousValue, testName)}
-                                  </div>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+            {pinnedTests.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-amber-400 text-sm">📌</span>
+                  <span className="text-xs font-semibold text-amber-400">Pinned</span>
                 </div>
-              );
-            })() : (
-              <div className="bg-slate-900 rounded-lg p-8 border border-slate-800 text-center">
-                <AlertCircle className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-                <h3 className="text-lg font-semibold text-white mb-2">No lab results yet</h3>
-                <p className="text-slate-400 text-sm mb-4">
-                  Track your yearly blood tests to monitor your health trends over time
-                </p>
+                {pinnedTests.map(t => <TestCard key={t.id} test={t} />)}
               </div>
             )}
+
+            {unpinnedTests.length > 0 && (
+              <div className="space-y-3">
+                {unpinnedTests.map(t => <TestCard key={t.id} test={t} />)}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="bg-slate-900 rounded-xl p-8 border border-slate-800 text-center">
+            <AlertCircle className="w-12 h-12 text-slate-500 mx-auto mb-3" />
+            <h3 className="text-lg font-semibold mb-2">No lab results yet</h3>
+            <p className="text-slate-400 text-sm mb-4">Track your yearly blood tests to monitor health trends over time</p>
+            <button onClick={() => setIsModalOpen(true)}
+              className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg inline-flex items-center gap-2">
+              <Plus className="w-4 h-4" /><span>Add First Result</span>
+            </button>
           </div>
         )}
       </div>
 
-      {/* Modal */}
-      <LabsModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSave={refreshData}
-      />
+      <LabsModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSave={refreshData} />
     </div>
   );
 }
