@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Home, Dumbbell, LineChart, FlaskConical, Leaf, UtensilsCrossed } from "lucide-react";
+import { Home, Dumbbell, LineChart, FlaskConical, UtensilsCrossed } from "lucide-react";
 import { useLocation, Link } from "react-router-dom";
 import { collection, query, orderBy, limit, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -67,7 +67,6 @@ export default function BottomNav() {
     { path: "/food",      icon: UtensilsCrossed, label: "Food",     accent: "text-orange-400"  },
     { path: "/body",      icon: LineChart,       label: "Body",     accent: "text-emerald-400" },
     { path: "/labs",      icon: FlaskConical,    label: "Labs",     accent: "text-blue-400"    },
-    { path: "/wellness",  icon: Leaf,            label: "Wellness", accent: "text-emerald-400" },
   ];
 
   if (location.pathname === '/ai-coach') return null;

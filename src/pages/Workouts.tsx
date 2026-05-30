@@ -1,164 +1,145 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUp, ArrowDown, TrendingUp, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send } from 'lucide-react';
+import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 import { useActivityRings } from '@/hooks/useActivityRings';
+import { bumpDataVersion } from '@/lib/dataVersion';
+import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 
+// ── Types ──────────────────────────────────────────────────────────────────
 interface WorkoutSession {
-  id: string;
-  date: string;
-  template: string;
-  duration?: number;
-  durationMins?: number;
-  exercises?: Exercise[];
-  type?: 'workout' | 'running';
+  id: string; date: string; template: string;
+  duration?: number; durationMins?: number;
+  exercises?: Exercise[]; type?: 'workout' | 'running';
   effortType?: 'recovery' | 'tempo' | 'endurance';
   surface?: 'road' | 'treadmill' | 'hill';
-  distanceKm?: number;
-  paceMinPerKm?: number;
-  notes?: string;
-  createdAt: any;
+  distanceKm?: number; paceMinPerKm?: number; notes?: string; createdAt: any;
 }
-
-interface Exercise {
-  name: string;
-  sets: ExerciseSet[];
-}
-
-interface ExerciseSet {
-  reps: number;
-  weight: number;
-}
-
-interface OneRMData {
-  date: string;
-  oneRM: number;
-}
-
+interface Exercise { name: string; sets: ExerciseSet[]; }
+interface ExerciseSet { reps: number; weight: number; }
+interface OneRMData { date: string; oneRM: number; }
 interface CustomWorkout {
-  id?: string;
-  name: string;
+  id?: string; name: string;
   exercises: { name: string; category: string; defaultSets: number }[];
   createdAt?: any;
 }
+interface ExerciseItem { name: string; category: string; }
+interface AIPlanExercise { exercise: string; sets: number; reps: number; suggestedWeight: number; lastWeight: number; }
+interface ChatMessage { role: 'user' | 'ai'; text: string; plan?: AIPlanExercise[]; logged?: boolean; loggedActivity?: string; askForDetails?: boolean; }
 
-interface ExerciseItem {
-  name: string;
-  category: string;
-}
-
-interface AIPlanExercise {
-  exercise: string;
-  sets: number;
-  reps: number;
-  suggestedWeight: number;
-  lastWeight: number;
-}
-
-interface AIWorkoutPlan {
-  plan: AIPlanExercise[];
-}
-
+// ── Constants ──────────────────────────────────────────────────────────────
 const EXERCISE_LIBRARY: ExerciseItem[] = [
-  { name: 'Bench Press', category: 'push' },
-  { name: 'Incline Bench Press', category: 'push' },
-  { name: 'Overhead Press', category: 'push' },
-  { name: 'Incline Dumbbell Press', category: 'push' },
-  { name: 'Cable Fly', category: 'push' },
-  { name: 'Chest Dip', category: 'push' },
-  { name: 'Lateral Raise', category: 'push' },
-  { name: 'Front Raise', category: 'push' },
-  { name: 'Tricep Pushdown', category: 'push' },
-  { name: 'Skull Crushers', category: 'push' },
-  { name: 'Close Grip Bench Press', category: 'push' },
-  { name: 'Arnold Press', category: 'push' },
-  { name: 'Deadlift', category: 'pull' },
-  { name: 'Pull-ups', category: 'pull' },
-  { name: 'Chin-ups', category: 'pull' },
-  { name: 'Barbell Row', category: 'pull' },
-  { name: 'Dumbbell Row', category: 'pull' },
-  { name: 'Cable Row', category: 'pull' },
-  { name: 'Face Pull', category: 'pull' },
-  { name: 'Lat Pulldown', category: 'pull' },
-  { name: 'Bicep Curl', category: 'pull' },
-  { name: 'Hammer Curl', category: 'pull' },
-  { name: 'Preacher Curl', category: 'pull' },
-  { name: 'T-Bar Row', category: 'pull' },
-  { name: 'Squat', category: 'legs' },
-  { name: 'Romanian Deadlift', category: 'legs' },
-  { name: 'Leg Press', category: 'legs' },
-  { name: 'Leg Curl', category: 'legs' },
-  { name: 'Leg Extension', category: 'legs' },
-  { name: 'Calf Raise', category: 'legs' },
-  { name: 'Bulgarian Split Squat', category: 'legs' },
-  { name: 'Lunges', category: 'legs' },
-  { name: 'Hack Squat', category: 'legs' },
-  { name: 'Glute Bridge', category: 'legs' },
-  { name: 'Hip Thrust', category: 'legs' },
-  { name: 'Plank', category: 'core' },
-  { name: 'Crunches', category: 'core' },
-  { name: 'Russian Twists', category: 'core' },
-  { name: 'Leg Raises', category: 'core' },
-  { name: 'Cable Crunch', category: 'core' },
-  { name: 'Ab Wheel Rollout', category: 'core' },
-  { name: 'Mountain Climbers', category: 'core' },
-  { name: 'Barbell Clean', category: 'full body' },
-  { name: 'Burpees', category: 'full body' },
-  { name: 'Kettlebell Swing', category: 'full body' },
-  { name: 'Box Jumps', category: 'full body' },
+  { name: 'Bench Press', category: 'push' }, { name: 'Incline Bench Press', category: 'push' },
+  { name: 'Overhead Press', category: 'push' }, { name: 'Incline Dumbbell Press', category: 'push' },
+  { name: 'Cable Fly', category: 'push' }, { name: 'Chest Dip', category: 'push' },
+  { name: 'Lateral Raise', category: 'push' }, { name: 'Front Raise', category: 'push' },
+  { name: 'Tricep Pushdown', category: 'push' }, { name: 'Skull Crushers', category: 'push' },
+  { name: 'Close Grip Bench Press', category: 'push' }, { name: 'Arnold Press', category: 'push' },
+  { name: 'Deadlift', category: 'pull' }, { name: 'Pull-ups', category: 'pull' },
+  { name: 'Chin-ups', category: 'pull' }, { name: 'Barbell Row', category: 'pull' },
+  { name: 'Dumbbell Row', category: 'pull' }, { name: 'Cable Row', category: 'pull' },
+  { name: 'Face Pull', category: 'pull' }, { name: 'Lat Pulldown', category: 'pull' },
+  { name: 'Bicep Curl', category: 'pull' }, { name: 'Hammer Curl', category: 'pull' },
+  { name: 'Preacher Curl', category: 'pull' }, { name: 'T-Bar Row', category: 'pull' },
+  { name: 'Squat', category: 'legs' }, { name: 'Romanian Deadlift', category: 'legs' },
+  { name: 'Leg Press', category: 'legs' }, { name: 'Leg Curl', category: 'legs' },
+  { name: 'Leg Extension', category: 'legs' }, { name: 'Calf Raise', category: 'legs' },
+  { name: 'Bulgarian Split Squat', category: 'legs' }, { name: 'Lunges', category: 'legs' },
+  { name: 'Hack Squat', category: 'legs' }, { name: 'Glute Bridge', category: 'legs' },
+  { name: 'Hip Thrust', category: 'legs' }, { name: 'Plank', category: 'core' },
+  { name: 'Crunches', category: 'core' }, { name: 'Russian Twists', category: 'core' },
+  { name: 'Leg Raises', category: 'core' }, { name: 'Cable Crunch', category: 'core' },
+  { name: 'Ab Wheel Rollout', category: 'core' }, { name: 'Mountain Climbers', category: 'core' },
+  { name: 'Barbell Clean', category: 'full body' }, { name: 'Burpees', category: 'full body' },
+  { name: 'Kettlebell Swing', category: 'full body' }, { name: 'Box Jumps', category: 'full body' },
   { name: 'Battle Ropes', category: 'full body' },
 ];
 
-const DEFAULT_TEMPLATES = [
-  { type: 'push', title: 'Push Day', subtitle: 'Chest · Shoulders · Triceps', icon: ArrowUp },
-  { type: 'pull', title: 'Pull Day', subtitle: 'Back · Biceps', icon: ArrowDown },
-  { type: 'legs', title: 'Legs Day', subtitle: 'Quads · Hamstrings · Glutes · Calves', icon: TrendingUp },
-  { type: 'running', title: 'Running 🏃', subtitle: 'Distance · Pace · Time', icon: Activity },
-  { type: 'upper', title: 'Upper Body', subtitle: 'Chest · Back · Shoulders', icon: ArrowUp },
-  { type: 'lower', title: 'Lower Body', subtitle: 'Quads · Hamstrings · Glutes', icon: TrendingUp },
-];
+// Workout library grouped by tab
+const WORKOUT_LIBRARY = {
+  strength: [
+    { type: 'push', title: 'Push Day', subtitle: 'Chest · Shoulders · Triceps', emoji: '💪' },
+    { type: 'pull', title: 'Pull Day', subtitle: 'Back · Biceps', emoji: '🏋️' },
+    { type: 'legs', title: 'Legs Day', subtitle: 'Quads · Hamstrings · Glutes', emoji: '🦵' },
+    { type: 'upper', title: 'Upper Body', subtitle: 'Chest · Back · Shoulders', emoji: '🏋️' },
+    { type: 'lower', title: 'Lower Body', subtitle: 'Quads · Hamstrings · Glutes', emoji: '⬇️' },
+    { type: 'fullbody', title: 'Full Body', subtitle: 'All muscle groups', emoji: '⚡' },
+  ],
+  cardio: [
+    { type: 'running', title: 'Running', subtitle: 'Distance · Pace · Time', emoji: '🏃' },
+    { type: 'cycling', title: 'Cycling', subtitle: 'Distance · Cadence · Time', emoji: '🚴' },
+    { type: 'hiit', title: 'HIIT', subtitle: 'High intensity intervals', emoji: '🔥' },
+    { type: 'walk', title: 'Walking', subtitle: 'Steps · Distance · Time', emoji: '🚶' },
+  ],
+  mindbody: [
+    { type: 'yoga', title: 'Yoga', subtitle: 'Flexibility · Mindfulness', emoji: '🧘' },
+    { type: 'stretching', title: 'Stretching', subtitle: 'Mobility · Recovery', emoji: '🤸' },
+    { type: 'meditation', title: 'Meditation', subtitle: 'Mindfulness · Breathing', emoji: '🌿' },
+  ],
+  other: [
+    { type: 'hiking', title: 'Hiking', subtitle: 'Trail · Elevation · Distance', emoji: '🏔️' },
+    { type: 'swimming', title: 'Swimming', subtitle: 'Laps · Distance · Time', emoji: '🏊' },
+    { type: 'sports', title: 'Sports', subtitle: 'Game · Match · Training', emoji: '⚽' },
+    { type: 'martial_arts', title: 'Martial Arts', subtitle: 'Training · Sparring', emoji: '🥊' },
+  ],
+};
 
-const QUICK_CHIPS = [
-  { label: '🦵 Legs · 30m', prompt: 'legs today, only 30 minutes' },
-  { label: '💪 Push · intense', prompt: 'push day, want to push hard today' },
-  { label: '🔙 Pull day', prompt: 'pull day' },
-  { label: '⚡ Quick 20m', prompt: 'quick full body workout, only 20 minutes' },
-];
+const LIBRARY_TABS = [
+  { key: 'strength', label: 'Strength' },
+  { key: 'cardio', label: 'Cardio' },
+  { key: 'mindbody', label: 'Mind-Body' },
+  { key: 'other', label: 'Other' },
+] as const;
 
 const calculateOneRM = (weight: number, reps: number): number => weight * (1 + reps / 30);
 
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+// ── Component ──────────────────────────────────────────────────────────────
 export default function Workouts() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showPrevSessions, setShowPrevSessions] = useState(false);
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
   const [editingWorkout, setEditingWorkout] = useState<CustomWorkout | null>(null);
-
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
   const [workoutName, setWorkoutName] = useState('');
   const [selectedExercises, setSelectedExercises] = useState<{ name: string; category: string; defaultSets: number }[]>([]);
   const [isSavingWorkout, setIsSavingWorkout] = useState(false);
-
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('all');
 
-  // AI Planner state
-  const [aiInput, setAiInput] = useState('');
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiIntro, setAiIntro] = useState('');
-  const [aiPlan, setAiPlan] = useState<AIPlanExercise[] | null>(null);
-  const [aiError, setAiError] = useState('');
+  // Workout library state
+  const [libraryExpanded, setLibraryExpanded] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<'strength' | 'cardio' | 'mindbody' | 'other'>('strength');
+  const [todayRecommendation, setTodayRecommendation] = useState<{ type: string; title: string; subtitle: string; emoji: string } | null>(null);
+
+  // AI chat state — multi-turn
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const rings = useActivityRings(user?.uid || '');
 
-  // Arc helper for SVG rings
+  // Steps state
+  const [stepsHabitId, setStepsHabitId] = useState<string | null>(null);
+  const [stepsToday, setStepsToday] = useState<number>(0);
+  const [stepsGoal, setStepsGoal] = useState<number>(8000);
+  const [stepInput, setStepInput] = useState('');
+  const [savingSteps, setSavingSteps] = useState(false);
+
   const arc = (r: number, val: number) => {
     const c = 2 * Math.PI * r;
     return { dasharray: c, dashoffset: c * (1 - Math.min(1, Math.max(0, val))) };
@@ -168,11 +149,29 @@ export default function Workouts() {
     if (!user) return;
     const fetchData = async () => {
       try {
-        const q = query(collection(db, 'users', user.uid, 'workoutSessions'), orderBy('date', 'desc'), limit(20));
-        const snap = await getDocs(q);
-        setSessions(snap.docs.map(d => ({ id: d.id, ...d.data() } as WorkoutSession)));
-        const tSnap = await getDocs(collection(db, 'users', user.uid, 'workoutTemplates'));
+        const [sessSnap, tSnap, profileSnap] = await Promise.all([
+          getDocs(query(collection(db, 'users', user.uid, 'workoutSessions'), orderBy('date', 'desc'), limit(20))),
+          getDocs(collection(db, 'users', user.uid, 'workoutTemplates')),
+          getDoc(doc(db, 'users', user.uid, 'profile', 'data')),
+        ]);
+        const fetchedSessions = sessSnap.docs.map(d => ({ id: d.id, ...d.data() } as WorkoutSession));
+        setSessions(fetchedSessions);
         setCustomWorkouts(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as CustomWorkout)));
+
+        // Ensure default habits exist + fetch today's steps
+        const defaultHabits = await ensureDefaultHabits(user.uid);
+        const stepsHabit = defaultHabits['steps'];
+        if (stepsHabit) {
+          setStepsHabitId(stepsHabit.id);
+          setStepsGoal(stepsHabit.targetValue || 8000);
+          const val = await getHabitLogToday(user.uid, stepsHabit.id);
+          setStepsToday(val);
+          setStepInput(String(val));
+        }
+
+        // Compute today's recommendation based on last session + profile
+        const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+        computeRecommendation(fetchedSessions, profile);
       } catch (e) {
         console.error('Error fetching data:', e);
       } finally {
@@ -182,109 +181,173 @@ export default function Workouts() {
     fetchData();
   }, [user]);
 
-  // ── AI PLANNER ──
-  const buildContext = async (input: string): Promise<string> => {
+  // Scroll chat to bottom on new message
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  const computeRecommendation = (fetchedSessions: WorkoutSession[], profile: any) => {
+    const focus = profile.fitnessFocus || [];
+    const goal = (profile.primaryGoal || '').toLowerCase();
+
+    // Detect what was done recently to rotate
+    const last = fetchedSessions[0];
+    const lastTemplate = last?.template?.toLowerCase() || '';
+
+    // Simple rotation: push → pull → legs → push
+    if (lastTemplate.includes('push') || lastTemplate.includes('chest')) {
+      setTodayRecommendation(WORKOUT_LIBRARY.strength[1]); // pull
+    } else if (lastTemplate.includes('pull') || lastTemplate.includes('back')) {
+      setTodayRecommendation(WORKOUT_LIBRARY.strength[2]); // legs
+    } else if (lastTemplate.includes('leg')) {
+      setTodayRecommendation(WORKOUT_LIBRARY.strength[0]); // push
+    } else if (focus.some((f: string) => f.includes('Running') || f.includes('Marathon'))) {
+      setTodayRecommendation(WORKOUT_LIBRARY.cardio[0]); // running
+    } else if (focus.some((f: string) => f.includes('Yoga'))) {
+      setTodayRecommendation(WORKOUT_LIBRARY.mindbody[0]); // yoga
+    } else if (goal.includes('muscle')) {
+      setTodayRecommendation(WORKOUT_LIBRARY.strength[0]); // push
+    } else {
+      setTodayRecommendation(WORKOUT_LIBRARY.strength[5]); // full body
+    }
+  };
+
+  // ── Save steps ─────────────────────────────────────────────────────────
+  const saveSteps = async (val: number) => {
+    if (!user || !stepsHabitId || val < 0) return;
+    setSavingSteps(true);
+    try {
+      await setHabitLogToday(user.uid, stepsHabitId, val);
+      setStepsToday(val);
+    } catch (e) { console.error('Error saving steps:', e); }
+    finally { setSavingSteps(false); }
+  };
+
+  // ── AI context builder ─────────────────────────────────────────────────
+  const buildContext = async (): Promise<string> => {
     if (!user) return '';
     const parts: string[] = [];
-
-    // Fetch profile for fitness context
     try {
       const profileDoc = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
       if (profileDoc.exists()) {
         const p = profileDoc.data() as any;
-        const profileParts = [
+        const pp = [
           p.primaryGoal && `Goal: ${p.primaryGoal}`,
           p.fitnessFocus?.length && `Fitness focus: ${p.fitnessFocus.join(', ')}`,
           p.fitnessTarget && `Target: ${p.fitnessTarget}`,
-          p.foodPreference && `Diet: ${p.foodPreference}`,
           p.activityLevel && `Activity level: ${p.activityLevel}`,
         ].filter(Boolean);
-        if (profileParts.length) parts.push('Profile:\n' + profileParts.join('\n'));
+        if (pp.length) parts.push('Profile:\n' + pp.join('\n'));
       }
     } catch {}
 
-    // Detect muscle group from input
-    const lower = input.toLowerCase();
-    const keywords: Record<string, string> = {
-      leg: 'legs', squat: 'legs', quad: 'legs', hamstring: 'legs',
-      push: 'push', chest: 'push', bench: 'push', shoulder: 'push',
-      pull: 'pull', back: 'pull', deadlift: 'pull', bicep: 'pull',
-    };
-    let matchedType = '';
-    for (const [kw, type] of Object.entries(keywords)) {
-      if (lower.includes(kw)) { matchedType = type; break; }
+    // Last 3 sessions summary
+    if (sessions.length > 0) {
+      const recent = sessions.slice(0, 3).map(s => {
+        if (s.type === 'running') return `${s.date}: Running ${s.distanceKm ?? '?'}km`;
+        const exSummary = (s.exercises || []).slice(0, 3).map(ex => {
+          const best = ex.sets.reduce((b, c) => c.weight > b.weight ? c : b, ex.sets[0]);
+          return `${ex.name} ${best?.weight ?? 0}kg×${best?.reps ?? 0}`;
+        }).join(', ');
+        return `${s.date}: ${s.template} — ${exSummary}`;
+      });
+      parts.push('Recent sessions:\n' + recent.join('\n'));
     }
 
-    // Last session of same type
-    if (matchedType) {
-      const sameSessions = sessions.filter(s =>
-        s.template?.toLowerCase().includes(matchedType) ||
-        (matchedType === 'legs' && ['legs', 'lower', 'legsday'].some(t => s.template?.toLowerCase().includes(t))) ||
-        (matchedType === 'push' && ['push', 'upper', 'pushday'].some(t => s.template?.toLowerCase().includes(t))) ||
-        (matchedType === 'pull' && ['pull', 'pullday'].some(t => s.template?.toLowerCase().includes(t)))
-      );
-      if (sameSessions.length > 0) {
-        const last = sameSessions[0];
-        parts.push(`Last ${matchedType} session: ${last.date}`);
-        if (last.exercises && last.exercises.length > 0) {
-          const exLines = last.exercises.slice(0, 5).map(ex => {
-            const bestSet = ex.sets.reduce((b, c) => c.weight > b.weight ? c : b, ex.sets[0]);
-            return `  - ${ex.name}: ${ex.sets.length} sets, best set ${bestSet?.weight ?? 0}kg × ${bestSet?.reps ?? 0}`;
-          });
-          parts.push('Exercises:\n' + exLines.join('\n'));
-        }
-      }
-    }
-
-    // Latest body stats
     try {
-      const bodySnap = await getDocs(query(
-        collection(db, 'users', user.uid, 'bodyComp'),
-        orderBy('date', 'desc'), limit(1)
-      ));
+      const bodySnap = await getDocs(query(collection(db, 'users', user.uid, 'bodyComp'), orderBy('date', 'desc'), limit(1)));
       if (!bodySnap.empty) {
         const b = bodySnap.docs[0].data();
-        parts.push(`Body stats: weight ${b.weightKg ?? '?'}kg, body fat ${b.pbf ?? '?'}%, muscle ${b.smm ?? '?'}kg`);
-      }
-    } catch {}
-
-    // Latest labs (out of range only)
-    try {
-      const labSnap = await getDocs(query(
-        collection(db, 'users', user.uid, 'labs'),
-        orderBy('date', 'desc'), limit(1)
-      ));
-      if (!labSnap.empty) {
-        const lab = labSnap.docs[0].data();
-        const labRanges: Record<string, { min: number; max: number }> = {
-          vitd: { min: 30, max: 100 }, b12: { min: 200, max: 900 },
-          hb: { min: 13.5, max: 17.5 }, creatinine: { min: 0.7, max: 1.3 },
-        };
-        if (lab.results && Array.isArray(lab.results)) {
-          const oor = lab.results.filter((t: any) => {
-            const key = t.testName?.toLowerCase().replace(/\s+/g, '');
-            const range = labRanges[key];
-            return range && (t.value < range.min || t.value > range.max);
-          });
-          if (oor.length > 0) {
-            parts.push('Lab flags: ' + oor.map((t: any) => `${t.testName} ${t.value} ${t.unit}`).join(', '));
-          }
-        }
+        parts.push(`Body: ${b.weightKg ?? '?'}kg, ${b.pbf ?? '?'}% BF, SMM ${b.smm ?? '?'}kg`);
       }
     } catch {}
 
     return parts.join('\n');
   };
 
-  const sendToAI = async (prompt: string) => {
-    if (!prompt.trim() || !user) return;
-    setAiLoading(true);
-    setAiPlan(null);
-    setAiIntro('');
-    setAiError('');
+  // ── Detect if user is logging a completed activity ─────────────────────
+  const isLoggingActivity = (input: string): boolean => {
+    const lower = input.toLowerCase();
+    const logPatterns = ['i did', 'i went', 'i ran', 'i walked', 'i cycled', 'i completed',
+      'just did', 'just finished', 'finished', 'done with', 'did a', 'did my',
+      'went for', 'had a', 'completed'];
+    return logPatterns.some(p => lower.includes(p));
+  };
+
+  // ── Log a quick activity to Firestore ──────────────────────────────────
+  const logQuickActivity = async (activityName: string, activityType: string, durationMins?: number, distanceKm?: number) => {
+    if (!user) return;
+    try {
+      const sessionData = cleanData({
+        date: todayStr(),
+        template: activityType,
+        type: activityType === 'running' || activityType === 'walk' || activityType === 'cycling' ? 'running' : 'workout',
+        notes: activityName,
+        durationMins: durationMins || null,
+        distanceKm: distanceKm || null,
+        exercises: [],
+        createdAt: serverTimestamp(),
+      });
+      const ref = await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), sessionData);
+      const newSession = { id: ref.id, ...sessionData } as WorkoutSession;
+      setSessions(prev => [newSession, ...prev]);
+      await bumpDataVersion(user.uid);
+    } catch (e) {
+      console.error('Error logging activity:', e);
+    }
+  };
+
+  // ── Main AI chat send ──────────────────────────────────────────────────
+  const sendChat = async (inputOverride?: string) => {
+    const input = (inputOverride ?? chatInput).trim();
+    if (!input || !user) return;
+    setChatInput('');
+    setChatLoading(true);
+
+    // Add user message
+    const userMsg: ChatMessage = { role: 'user', text: input };
+    setChatMessages(prev => [...prev, userMsg]);
 
     try {
-      const context = await buildContext(prompt);
+      const context = await buildContext();
+      const isLogging = isLoggingActivity(input);
+
+      // Build conversation history for multi-turn
+      const history = chatMessages.map(m => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.text + (m.plan ? `\n[Plan: ${JSON.stringify(m.plan)}]` : ''),
+      }));
+
+      const systemPrompt = isLogging
+        ? `You are a fitness coach. The user is logging a completed activity. 
+Parse what they did, confirm it's logged, and suggest what to add (e.g. if they walked, suggest some strength or if they did chest suggest adding shoulders).
+If they didn't share exercise details (weights/reps), ask them to share for better tracking.
+
+Context:
+${context}
+
+Respond in this format:
+<logged>brief activity description e.g. "20 min brisk walk"</logged>
+<response>Your friendly 1-2 sentence response acknowledging what they did and either asking for details or suggesting additions.</response>
+<suggest_plan>true or false — suggest a complementary workout plan?</suggest_plan>
+${isLogging ? '<plan>{"plan":[]} // empty if no plan, or include exercises if suggesting complementary workout</plan>' : ''}`
+        : `You are a personal fitness coach. The user is asking for a workout plan or advice.
+
+Context:
+${context}
+
+Previous conversation context is provided in the messages.
+
+Respond with:
+<intro>One sentence acknowledging their request or referencing their history.</intro>
+<plan>{"plan":[{"exercise":"Name","sets":3,"reps":8,"suggestedWeight":80,"lastWeight":75}]}</plan>
+
+Rules:
+- 3-6 exercises for the muscle group
+- Time constraints: keep to 4 exercises max if <30 mins
+- suggestedWeight: ~2.5kg more than lastWeight if data exists, else sensible default
+- lastWeight 0 means no data
+- For cardio/yoga/other non-weight: return empty plan array and put details in intro`;
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -297,94 +360,114 @@ export default function Workouts() {
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
           max_tokens: 800,
-          messages: [{
-            role: 'user',
-            content: `You are a personal fitness coach. The user wants a workout plan.
-
-User request: "${prompt}"
-
-Context:
-${context || 'No previous data available.'}
-
-Respond with exactly this format — a one sentence intro referencing their data, then a JSON block:
-
-<intro>One sentence about their last session or body stats that shows you know their history.</intro>
-<plan>{"plan":[{"exercise":"Exercise Name","sets":3,"reps":8,"suggestedWeight":80,"lastWeight":75}]}</plan>
-
-Rules:
-- 3-6 exercises appropriate for the muscle group
-- If time is mentioned (e.g. 30 mins), keep to 4 compound exercises max
-- suggestedWeight should be ~2.5kg more than lastWeight if last session data exists, else use a sensible starting weight
-- lastWeight of 0 means no previous data
-- Keep exercise names simple and standard`,
-          }],
+          system: systemPrompt,
+          messages: [...history, { role: 'user', content: input }],
         }),
       });
 
-      if (!response.ok) throw new Error('API request failed');
+      if (!response.ok) throw new Error('API failed');
       const data = await response.json();
       const text = data.content?.[0]?.text || '';
 
-      // Parse intro
-      const introMatch = text.match(/<intro>([\s\S]*?)<\/intro>/);
-      if (introMatch) setAiIntro(introMatch[1].trim());
+      if (isLogging) {
+        // Parse logging response
+        const loggedMatch = text.match(/<logged>([\s\S]*?)<\/logged>/);
+        const responseMatch = text.match(/<response>([\s\S]*?)<\/response>/);
+        const suggestMatch = text.match(/<suggest_plan>([\s\S]*?)<\/suggest_plan>/);
+        const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
 
-      // Parse plan JSON
-      const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
-      if (planMatch) {
-        const parsed: AIWorkoutPlan = JSON.parse(planMatch[1].trim());
-        if (parsed.plan && Array.isArray(parsed.plan)) {
-          setAiPlan(parsed.plan);
+        const loggedActivity = loggedMatch?.[1]?.trim() || input;
+        const responseText = responseMatch?.[1]?.trim() || 'Logged!';
+        const shouldSuggest = suggestMatch?.[1]?.trim() === 'true';
+
+        // Actually log it
+        const activityType = input.toLowerCase().includes('run') ? 'running'
+          : input.toLowerCase().includes('walk') ? 'walk'
+          : input.toLowerCase().includes('cycl') ? 'cycling'
+          : input.toLowerCase().includes('yoga') ? 'yoga'
+          : 'workout';
+
+        // Extract duration if mentioned
+        const durationMatch = input.match(/(\d+)\s*min/i);
+        const durationMins = durationMatch ? parseInt(durationMatch[1]) : undefined;
+        const distMatch = input.match(/(\d+\.?\d*)\s*km/i);
+        const distanceKm = distMatch ? parseFloat(distMatch[1]) : undefined;
+
+        await logQuickActivity(loggedActivity, activityType, durationMins, distanceKm);
+
+        let plan: AIPlanExercise[] = [];
+        if (shouldSuggest && planMatch) {
+          try {
+            const parsed = JSON.parse(planMatch[1].trim());
+            plan = parsed.plan || [];
+          } catch {}
         }
+
+        const aiMsg: ChatMessage = {
+          role: 'ai',
+          text: responseText,
+          logged: true,
+          loggedActivity,
+          plan: plan.length > 0 ? plan : undefined,
+          askForDetails: responseText.toLowerCase().includes('detail') || responseText.toLowerCase().includes('weight') || responseText.toLowerCase().includes('share'),
+        };
+        setChatMessages(prev => [...prev, aiMsg]);
+
+      } else {
+        // Parse plan response
+        const introMatch = text.match(/<intro>([\s\S]*?)<\/intro>/);
+        const planMatch = text.match(/<plan>([\s\S]*?)<\/plan>/);
+
+        let plan: AIPlanExercise[] = [];
+        if (planMatch) {
+          try {
+            const parsed = JSON.parse(planMatch[1].trim());
+            plan = parsed.plan || [];
+          } catch {}
+        }
+
+        const aiMsg: ChatMessage = {
+          role: 'ai',
+          text: introMatch?.[1]?.trim() || text.slice(0, 200),
+          plan: plan.length > 0 ? plan : undefined,
+        };
+        setChatMessages(prev => [...prev, aiMsg]);
       }
     } catch (e) {
-      console.error('AI planner error:', e);
-      setAiError('Something went wrong. Try again.');
+      console.error('AI chat error:', e);
+      setChatMessages(prev => [...prev, { role: 'ai', text: 'Something went wrong. Try again.' }]);
     } finally {
-      setAiLoading(false);
+      setChatLoading(false);
     }
   };
 
-  const handleAISend = () => sendToAI(aiInput);
-
-  const handleChip = (prompt: string) => {
-    setAiInput(prompt);
-    sendToAI(prompt);
-  };
-
-  const startFromAIPlan = () => {
-    if (!aiPlan) return;
-    const exercises = aiPlan.map(item => ({
+  const startFromAIPlan = (plan: AIPlanExercise[]) => {
+    const exercises = plan.map(item => ({
       name: item.exercise,
-      sets: Array.from({ length: item.sets }, () => ({
-        reps: item.reps,
-        weight: item.suggestedWeight,
-      })),
+      sets: Array.from({ length: item.sets }, () => ({ reps: item.reps, weight: item.suggestedWeight })),
     }));
-    navigate('/workout-session', { state: { template: 'custom', customWorkout: { name: aiInput || 'AI Plan', exercises: exercises.map(e => ({ name: e.name, category: 'custom', defaultSets: e.sets.length })) }, aiExercises: exercises } });
+    navigate('/workout-session', {
+      state: {
+        template: 'custom',
+        customWorkout: { name: 'AI Plan', exercises: exercises.map(e => ({ name: e.name, category: 'custom', defaultSets: e.sets.length })) },
+        aiExercises: exercises,
+      },
+    });
   };
 
-  // ── EXISTING HANDLERS ──
-  const openCreateModal = () => {
-    setEditingWorkout(null);
-    setWorkoutName('');
-    setSelectedExercises([]);
-    setShowCreateModal(true);
+  // ── Workout library handlers ───────────────────────────────────────────
+  const startWorkoutFromLibrary = (type: string) => {
+    if (type === 'running' || type === 'walk' || type === 'cycling') {
+      navigate('/running-session');
+    } else {
+      navigate('/workout-session', { state: { template: type } });
+    }
   };
 
-  const openEditModal = (w: CustomWorkout) => {
-    setEditingWorkout(w);
-    setWorkoutName(w.name);
-    setSelectedExercises(w.exercises);
-    setShowCreateModal(true);
-  };
-
-  const closeCreateModal = () => {
-    setShowCreateModal(false);
-    setEditingWorkout(null);
-    setWorkoutName('');
-    setSelectedExercises([]);
-  };
+  // ── Custom workout handlers ────────────────────────────────────────────
+  const openCreateModal = () => { setEditingWorkout(null); setWorkoutName(''); setSelectedExercises([]); setShowCreateModal(true); };
+  const openEditModal = (w: CustomWorkout) => { setEditingWorkout(w); setWorkoutName(w.name); setSelectedExercises(w.exercises); setShowCreateModal(true); };
+  const closeCreateModal = () => { setShowCreateModal(false); setEditingWorkout(null); setWorkoutName(''); setSelectedExercises([]); };
 
   const deleteWorkout = async (w: CustomWorkout) => {
     if (!user || !w.id) return;
@@ -392,16 +475,11 @@ Rules:
     try {
       await deleteDoc(doc(db, 'users', user.uid, 'workoutTemplates', w.id));
       setCustomWorkouts(prev => prev.filter(x => x.id !== w.id));
-    } catch (e) {
-      console.error('Error deleting workout:', e);
-      alert('Failed to delete workout');
-    }
+    } catch (e) { alert('Failed to delete'); }
   };
 
-  const startWorkout = (templateType: string, customId?: string) => {
-    if (templateType === 'running') {
-      navigate('/running-session');
-    } else if (customId) {
+  const startSavedWorkout = (templateType: string, customId?: string) => {
+    if (customId) {
       const workout = customWorkouts.find(w => w.id === customId);
       navigate('/workout-session', { state: { template: templateType, customWorkout: workout } });
     } else {
@@ -416,16 +494,12 @@ Rules:
   };
 
   const getExerciseOneRMHistory = (exerciseName: string): OneRMData[] => {
-    return sessions
-      .filter(s => s.type !== 'running')
-      .map(s => {
-        const ex = s.exercises?.find(e => e.name === exerciseName);
-        if (!ex || ex.sets.length === 0) return null;
-        const best = ex.sets.reduce((b, c) => calculateOneRM(c.weight, c.reps) > calculateOneRM(b.weight, b.reps) ? c : b);
-        return { date: s.date, oneRM: calculateOneRM(best.weight, best.reps) };
-      })
-      .filter(Boolean)
-      .sort((a, b) => new Date(a!.date).getTime() - new Date(b!.date).getTime()) as OneRMData[];
+    return sessions.filter(s => s.type !== 'running').map(s => {
+      const ex = s.exercises?.find(e => e.name === exerciseName);
+      if (!ex || ex.sets.length === 0) return null;
+      const best = ex.sets.reduce((b, c) => calculateOneRM(c.weight, c.reps) > calculateOneRM(b.weight, b.reps) ? c : b);
+      return { date: s.date, oneRM: calculateOneRM(best.weight, best.reps) };
+    }).filter(Boolean).sort((a, b) => new Date(a!.date).getTime() - new Date(b!.date).getTime()) as OneRMData[];
   };
 
   const renderOneRMChart = (exerciseName: string) => {
@@ -446,19 +520,15 @@ Rules:
     );
   };
 
-  const filteredExercises = EXERCISE_LIBRARY.filter(ex => {
-    const matchSearch = ex.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchCat = filterCategory === 'all' || ex.category === filterCategory;
-    return matchSearch && matchCat;
-  });
+  const filteredExercises = EXERCISE_LIBRARY.filter(ex =>
+    ex.name.toLowerCase().includes(searchTerm.toLowerCase()) &&
+    (filterCategory === 'all' || ex.category === filterCategory)
+  );
 
   const toggleExercise = (ex: ExerciseItem) => {
     const exists = selectedExercises.find(e => e.name === ex.name);
-    if (exists) {
-      setSelectedExercises(prev => prev.filter(e => e.name !== ex.name));
-    } else {
-      setSelectedExercises(prev => [...prev, { name: ex.name, category: ex.category, defaultSets: 3 }]);
-    }
+    if (exists) setSelectedExercises(prev => prev.filter(e => e.name !== ex.name));
+    else setSelectedExercises(prev => [...prev, { name: ex.name, category: ex.category, defaultSets: 3 }]);
   };
 
   const moveExercise = (index: number, dir: 'up' | 'down') => {
@@ -473,60 +543,44 @@ Rules:
     if (!user || !workoutName.trim() || selectedExercises.length === 0) return;
     setIsSavingWorkout(true);
     try {
-      if (editingWorkout && editingWorkout.id) {
-        const data = cleanData({ name: workoutName.trim(), exercises: selectedExercises });
-        await updateDoc(doc(db, 'users', user.uid, 'workoutTemplates', editingWorkout.id), data);
-        setCustomWorkouts(prev => prev.map(w =>
-          w.id === editingWorkout.id ? { ...w, name: workoutName.trim(), exercises: selectedExercises } : w
-        ));
+      if (editingWorkout?.id) {
+        await updateDoc(doc(db, 'users', user.uid, 'workoutTemplates', editingWorkout.id), cleanData({ name: workoutName.trim(), exercises: selectedExercises }));
+        setCustomWorkouts(prev => prev.map(w => w.id === editingWorkout.id ? { ...w, name: workoutName.trim(), exercises: selectedExercises } : w));
       } else {
-        const data = cleanData({ name: workoutName.trim(), exercises: selectedExercises, createdAt: serverTimestamp() });
-        const ref = await addDoc(collection(db, 'users', user.uid, 'workoutTemplates'), data);
+        const ref = await addDoc(collection(db, 'users', user.uid, 'workoutTemplates'), cleanData({ name: workoutName.trim(), exercises: selectedExercises, createdAt: serverTimestamp() }));
         setCustomWorkouts(prev => [...prev, { id: ref.id, name: workoutName.trim(), exercises: selectedExercises }]);
       }
       closeCreateModal();
-    } catch (e) {
-      console.error('Error saving workout:', e);
-      alert('Failed to save workout');
-    } finally {
-      setIsSavingWorkout(false);
-    }
+    } catch (e) { alert('Failed to save workout'); }
+    finally { setIsSavingWorkout(false); }
   };
 
-  if (loading) {
-    return <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center"><div>Loading...</div></div>;
-  }
+  if (loading) return <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center"><div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" /></div>;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white pb-20">
-      <div className="p-6 space-y-6">
-        <h1 className="text-2xl font-bold text-white">Workouts</h1>
+    <div className="min-h-screen bg-slate-950 text-white pb-24">
+      <div className="p-5 space-y-4">
+        <h1 className="text-2xl font-bold">Workouts</h1>
 
-        {/* ── 2-RING HEADER: Train + Move ── */}
+        {/* ── 2-RING HEADER ── */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5">
           <div className="flex items-center gap-3">
-            {/* 2-ring SVG */}
-            <div className="flex-shrink-0 w-[80px] h-[80px]">
-              <svg width="80" height="80" viewBox="0 0 80 80">
-                {/* Train - red - r=33 */}
-                <circle cx="40" cy="40" r="33" fill="none" stroke="rgba(255,55,95,0.14)" strokeWidth="9"/>
-                <circle cx="40" cy="40" r="33" fill="none" stroke="#ff375f" strokeWidth="9"
-                  strokeDasharray={arc(33, rings.train.pct / 100).dasharray}
-                  strokeDashoffset={arc(33, rings.train.pct / 100).dashoffset}
-                  strokeLinecap="round" transform="rotate(-90 40 40)"/>
-                {/* Move - green - r=21 */}
-                <circle cx="40" cy="40" r="21" fill="none" stroke="rgba(48,209,88,0.14)" strokeWidth="9"/>
-                <circle cx="40" cy="40" r="21" fill="none" stroke="#30d158" strokeWidth="9"
-                  strokeDasharray={arc(21, rings.move.pct / 100).dasharray}
-                  strokeDashoffset={arc(21, rings.move.pct / 100).dashoffset}
-                  strokeLinecap="round" transform="rotate(-90 40 40)"/>
+            <div className="flex-shrink-0 w-[72px] h-[72px]">
+              <svg width="72" height="72" viewBox="0 0 72 72">
+                <circle cx="36" cy="36" r="30" fill="none" stroke="rgba(255,55,95,0.14)" strokeWidth="8"/>
+                <circle cx="36" cy="36" r="30" fill="none" stroke="#ff375f" strokeWidth="8"
+                  strokeDasharray={arc(30, rings.train.pct/100).dasharray} strokeDashoffset={arc(30, rings.train.pct/100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 36 36)"/>
+                <circle cx="36" cy="36" r="19" fill="none" stroke="rgba(48,209,88,0.14)" strokeWidth="8"/>
+                <circle cx="36" cy="36" r="19" fill="none" stroke="#30d158" strokeWidth="8"
+                  strokeDasharray={arc(19, rings.move.pct/100).dasharray} strokeDashoffset={arc(19, rings.move.pct/100).dashoffset}
+                  strokeLinecap="round" transform="rotate(-90 36 36)"/>
               </svg>
             </div>
-            {/* Legend */}
             <div className="flex-1 flex flex-col gap-2">
               {[
                 { label: 'Train', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' },
-                { label: 'Move',  pct: rings.move.pct,  sub: rings.move.label,  color: '#30d158' },
+                { label: 'Move', pct: rings.move.pct, sub: rings.move.label, color: '#30d158' },
               ].map(({ label, pct, sub, color }) => (
                 <div key={label} className="flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
@@ -535,162 +589,253 @@ Rules:
                       <span className="text-[11px] font-medium text-white">{label}</span>
                       <span className="text-[10px] font-mono" style={{ color }}>{Math.round(pct)}%</span>
                     </div>
-                    <div className="text-[9px] text-slate-500 leading-tight truncate">{sub}</div>
+                    <div className="text-[9px] text-slate-500 truncate">{sub}</div>
                     <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
-                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100,pct)}%`, background: color }} />
                     </div>
                   </div>
                 </div>
               ))}
-              <div className="text-[9px] text-slate-600 font-mono mt-0.5">
+              <div className="text-[9px] text-slate-600 font-mono">
                 {rings.train.done < rings.train.goal
                   ? `${rings.train.goal - rings.train.done} session${rings.train.goal - rings.train.done > 1 ? 's' : ''} to close Train ring`
                   : '🎉 Train ring closed this week'}
               </div>
             </div>
           </div>
+          {/* Steps stepper */}
+          {/* Steps stepper — always shown, auto-creates habit if needed */}
+          <div className="mt-3 pt-3 border-t border-slate-800 flex items-center gap-3">
+            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider flex-shrink-0">Steps today</span>
+            <div className="flex items-center gap-2 flex-1 justify-end">
+              <button onClick={() => { const v = Math.max(0, stepsToday - 1000); setStepInput(String(v)); saveSteps(v); }}
+                className="w-7 h-7 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-sm font-bold transition-colors">−</button>
+              <input type="number" value={stepInput} onChange={e => setStepInput(e.target.value)}
+                onBlur={() => { const v = Math.max(0, parseInt(stepInput) || 0); setStepInput(String(v)); saveSteps(v); }}
+                onKeyDown={e => { if (e.key === 'Enter') { const v = Math.max(0, parseInt(stepInput) || 0); setStepInput(String(v)); saveSteps(v); (e.target as HTMLInputElement).blur(); } }}
+                className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-center text-xs font-mono text-white focus:outline-none focus:border-emerald-500" />
+              <button onClick={() => { const v = stepsToday + 1000; setStepInput(String(v)); saveSteps(v); }}
+                className="w-7 h-7 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-sm font-bold transition-colors">+</button>
+              {savingSteps
+                ? <div className="w-3 h-3 border border-emerald-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                : <span className="text-[9px] font-mono text-slate-600 flex-shrink-0">/ {stepsGoal.toLocaleString()}</span>}
+            </div>
+          </div>
         </div>
 
-        {/* ── AI PLANNER ── */}
+        {/* ── AI PLANNER — multi-turn chat ── */}
         <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-          {/* emerald top accent */}
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-emerald-500 to-transparent" />
           <div className="p-4">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-[10px] font-mono text-emerald-400 tracking-wider uppercase">AI Planner</span>
+              <span className="text-[10px] font-mono text-emerald-400 tracking-wider uppercase">AI Coach</span>
+              {chatMessages.length > 0 && (
+                <button onClick={() => setChatMessages([])} className="ml-auto text-[9px] font-mono text-slate-600 hover:text-slate-400">clear</button>
+              )}
             </div>
-            <p className="text-sm font-medium text-white mb-3">What's your workout today?</p>
 
-            {/* Input row */}
+            {/* Chat messages */}
+            {chatMessages.length > 0 && (
+              <div className="space-y-3 mb-3 max-h-80 overflow-y-auto" style={{ scrollbarWidth: 'none' }}>
+                {chatMessages.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    {msg.role === 'user' ? (
+                      <div className="bg-emerald-500/15 border border-emerald-500/20 rounded-2xl rounded-tr-sm px-3 py-2 max-w-[80%]">
+                        <p className="text-xs text-emerald-100">{msg.text}</p>
+                      </div>
+                    ) : (
+                      <div className="flex-1 space-y-2">
+                        {/* Logged badge */}
+                        {msg.logged && msg.loggedActivity && (
+                          <div className="flex items-center gap-1.5 bg-emerald-500/8 border border-emerald-500/20 rounded-lg px-3 py-1.5">
+                            <span className="text-[10px] text-emerald-400">✓ Logged:</span>
+                            <span className="text-[10px] font-medium text-white">{msg.loggedActivity}</span>
+                          </div>
+                        )}
+                        {/* AI text */}
+                        <p className="text-xs text-slate-300 leading-relaxed">{msg.text}</p>
+                        {/* Plan if present */}
+                        {msg.plan && msg.plan.length > 0 && (
+                          <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700">
+                            <div className="flex justify-between items-center px-3 py-2 border-b border-slate-700">
+                              <span className="text-[10px] font-semibold text-emerald-400">⚡ Suggested Plan</span>
+                              <span className="text-[9px] font-mono text-slate-500">{msg.plan.length} exercises</span>
+                            </div>
+                            {msg.plan.map((item, j) => (
+                              <div key={j} className="flex items-center justify-between px-3 py-2 border-b border-slate-700/50 last:border-0">
+                                <div>
+                                  <div className="text-xs font-medium text-white">{item.exercise}</div>
+                                  <div className="text-[9px] text-slate-500">{item.sets} × {item.reps} reps</div>
+                                </div>
+                                <div className="text-right font-mono">
+                                  <div className="text-xs text-emerald-400">→ {item.suggestedWeight}kg</div>
+                                  {item.lastWeight > 0 && <div className="text-[9px] text-slate-600">last: {item.lastWeight}kg</div>}
+                                </div>
+                              </div>
+                            ))}
+                            <div className="p-2.5 border-t border-slate-700">
+                              <button onClick={() => startFromAIPlan(msg.plan!)}
+                                className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2 rounded-lg transition-colors">
+                                🏋️ Start This Workout
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="flex justify-start">
+                    <div className="flex items-center gap-1.5 bg-slate-800 rounded-2xl rounded-tl-sm px-3 py-2">
+                      <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    </div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+            )}
+
+            {/* Empty state prompt */}
+            {chatMessages.length === 0 && (
+              <p className="text-sm font-medium text-white mb-3">
+                {sessions.length > 0 ? `Last session: ${sessions[0].template} on ${sessions[0].date}` : "What's your workout today?"}
+              </p>
+            )}
+
+            {/* Input */}
             <div className="flex gap-2">
               <input
                 type="text"
-                value={aiInput}
-                onChange={e => setAiInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleAISend()}
-                placeholder='e.g. "legs, 30 mins, tired today"'
-                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendChat()}
+                placeholder={chatMessages.length === 0
+                  ? '"legs 30 mins" or "I did a 20 min walk"'
+                  : 'Reply...'}
+                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
               />
               <button
-                onClick={handleAISend}
-                disabled={aiLoading || !aiInput.trim()}
-                className="w-9 h-9 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors"
+                onClick={() => sendChat()}
+                disabled={chatLoading || !chatInput.trim()}
+                className="w-9 h-9 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors"
               >
-                {aiLoading
+                {chatLoading
                   ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   : <Send className="w-4 h-4 text-white" />}
               </button>
             </div>
 
-            {/* Quick chips */}
-            <div className="flex gap-2 mt-2.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
-              {QUICK_CHIPS.map(chip => (
-                <button
-                  key={chip.label}
-                  onClick={() => handleChip(chip.prompt)}
-                  className="flex-shrink-0 text-[10px] px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors"
-                >
-                  {chip.label}
-                </button>
-              ))}
-            </div>
-
-            {/* AI Response */}
-            {aiError && (
-              <div className="mt-3 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-                {aiError}
-              </div>
-            )}
-
-            {(aiIntro || aiPlan) && !aiLoading && (
-              <div className="mt-3 space-y-3">
-                {/* Intro text */}
-                {aiIntro && (
-                  <p className="text-xs text-slate-400 leading-relaxed">{aiIntro}</p>
-                )}
-
-                {/* Plan card */}
-                {aiPlan && aiPlan.length > 0 && (
-                  <div className="bg-slate-800 rounded-xl overflow-hidden border border-slate-700">
-                    <div className="flex justify-between items-center px-3 py-2 bg-emerald-500/5 border-b border-slate-700">
-                      <span className="text-xs font-semibold text-emerald-400">⚡ Generated Plan</span>
-                      <span className="text-[10px] font-mono text-slate-500">{aiPlan.length} exercises</span>
-                    </div>
-                    {aiPlan.map((item, i) => (
-                      <div key={i} className="flex items-center justify-between px-3 py-2.5 border-b border-slate-700/50 last:border-0">
-                        <div>
-                          <div className="text-xs font-medium text-white">{item.exercise}</div>
-                          <div className="text-[10px] text-slate-500 mt-0.5">{item.sets} × {item.reps} reps</div>
-                        </div>
-                        <div className="text-right font-mono">
-                          <div className="text-xs text-emerald-400">→ {item.suggestedWeight}kg</div>
-                          {item.lastWeight > 0 && (
-                            <div className="text-[10px] text-slate-600">last: {item.lastWeight}kg</div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    {/* Action buttons */}
-                    <div className="flex gap-2 p-3 border-t border-slate-700">
-                      <button
-                        onClick={startFromAIPlan}
-                        className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2.5 rounded-lg transition-colors"
-                      >
-                        🏋️ Start This Workout
-                      </button>
-                      <button
-                        onClick={() => { setAiPlan(null); setAiIntro(''); setAiInput(''); }}
-                        className="w-9 bg-slate-700 hover:bg-slate-600 rounded-lg flex items-center justify-center transition-colors"
-                      >
-                        <X className="w-3.5 h-3.5 text-slate-400" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Refinement chips */}
-                {aiPlan && (
-                  <div className="flex gap-2 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
-                    {['Make it harder', 'Less exercises', 'Add core work'].map(ref => (
-                      <button
-                        key={ref}
-                        onClick={() => { const newPrompt = `${aiInput} — ${ref.toLowerCase()}`; setAiInput(newPrompt); sendToAI(newPrompt); }}
-                        className="flex-shrink-0 text-[10px] px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors"
-                      >
-                        {ref}
-                      </button>
-                    ))}
-                  </div>
-                )}
+            {/* Quick chips — only when no conversation yet */}
+            {chatMessages.length === 0 && (
+              <div className="flex gap-2 mt-2.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+                {[
+                  { label: '🦵 Legs · 30m', prompt: 'legs today, only 30 minutes' },
+                  { label: '💪 Push · intense', prompt: 'push day, want to go hard' },
+                  { label: '🏋️ Pull day', prompt: 'pull day' },
+                  { label: '⚡ Quick full body', prompt: 'quick full body, 20 minutes' },
+                  { label: '🏃 Running', prompt: 'going for a run today, 5km easy' },
+                ].map(chip => (
+                  <button key={chip.label} onClick={() => sendChat(chip.prompt)}
+                    className="flex-shrink-0 text-[10px] px-3 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-400 transition-colors">
+                    {chip.label}
+                  </button>
+                ))}
               </div>
             )}
           </div>
         </div>
 
-        {/* My Workouts */}
+        {/* ── TODAY'S RECOMMENDATION + WORKOUT LIBRARY ── */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+          {/* Recommendation header */}
+          <div className="p-4 border-b border-slate-800">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Today's Pick</span>
+              <button onClick={() => setLibraryExpanded(e => !e)}
+                className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                {libraryExpanded ? 'Close' : 'All workouts'}
+                {libraryExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+            </div>
+            {todayRecommendation && (
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{todayRecommendation.emoji}</span>
+                  <div>
+                    <div className="text-sm font-semibold text-white">{todayRecommendation.title}</div>
+                    <div className="text-[10px] text-slate-500">{todayRecommendation.subtitle}</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => startWorkoutFromLibrary(todayRecommendation.type)}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">
+                  Start
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Expandable library */}
+          {libraryExpanded && (
+            <div>
+              {/* Tabs */}
+              <div className="flex border-b border-slate-800">
+                {LIBRARY_TABS.map(tab => (
+                  <button key={tab.key} onClick={() => setLibraryTab(tab.key)}
+                    className={`flex-1 py-2.5 text-[10px] font-mono uppercase tracking-wider transition-colors ${
+                      libraryTab === tab.key
+                        ? 'text-emerald-400 border-b border-emerald-400'
+                        : 'text-slate-500 hover:text-slate-300'
+                    }`}>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              {/* Library items */}
+              <div className="p-3 grid grid-cols-2 gap-2">
+                {WORKOUT_LIBRARY[libraryTab].map(workout => (
+                  <button key={workout.type} onClick={() => startWorkoutFromLibrary(workout.type)}
+                    className="bg-slate-800 border border-slate-700 rounded-xl p-3 text-left hover:border-slate-600 hover:bg-slate-750 transition-colors">
+                    <div className="text-xl mb-1">{workout.emoji}</div>
+                    <div className="text-xs font-semibold text-white">{workout.title}</div>
+                    <div className="text-[9px] text-slate-500 mt-0.5">{workout.subtitle}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── MY SAVED WORKOUTS ── */}
         {customWorkouts.length > 0 && (
           <div>
-            <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">MY WORKOUTS</h2>
-            <div className="space-y-3">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">My Workouts</h2>
+              <button onClick={openCreateModal} className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                <Plus className="w-3 h-3" /> New
+              </button>
+            </div>
+            <div className="space-y-2">
               {customWorkouts.map(w => (
-                <div key={w.id} className="w-full bg-emerald-950/40 border border-emerald-800 rounded-lg p-4 flex items-center justify-between">
-                  <button className="flex items-center space-x-4 flex-1 text-left" onClick={() => startWorkout('custom', w.id)}>
-                    <div className="w-12 h-12 bg-emerald-500 rounded-lg flex items-center justify-center flex-shrink-0">
-                      <Dumbbell className="w-6 h-6 text-white" />
+                <div key={w.id} className="bg-slate-900 border border-slate-800 rounded-xl p-3 flex items-center">
+                  <button className="flex items-center gap-3 flex-1 text-left" onClick={() => startSavedWorkout('custom', w.id)}>
+                    <div className="w-10 h-10 bg-emerald-500/15 border border-emerald-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <Dumbbell className="w-5 h-5 text-emerald-400" />
                     </div>
-                    <div>
-                      <h3 className="font-semibold text-white">{w.name}</h3>
-                      <p className="text-sm text-slate-400">{w.exercises.map(e => e.name).slice(0, 3).join(' · ')}{w.exercises.length > 3 ? ` +${w.exercises.length - 3}` : ''}</p>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-white truncate">{w.name}</div>
+                      <div className="text-[9px] text-slate-500 truncate">
+                        {w.exercises.slice(0, 3).map(e => e.name).join(' · ')}{w.exercises.length > 3 ? ` +${w.exercises.length - 3}` : ''}
+                      </div>
                     </div>
                   </button>
-                  <div className="flex items-center gap-2 ml-3">
-                    <button onClick={() => openEditModal(w)} className="text-slate-400 hover:text-emerald-400 p-2">
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button onClick={() => deleteWorkout(w)} className="text-slate-400 hover:text-red-400 p-2">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                  <div className="flex gap-1 ml-2">
+                    <button onClick={() => openEditModal(w)} className="text-slate-600 hover:text-emerald-400 p-1.5"><Pencil className="w-3.5 h-3.5" /></button>
+                    <button onClick={() => deleteWorkout(w)} className="text-slate-600 hover:text-red-400 p-1.5"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 </div>
               ))}
@@ -698,141 +843,133 @@ Rules:
           </div>
         )}
 
-        {/* Quick Start */}
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">QUICK START</h2>
-            <button onClick={openCreateModal} className="bg-emerald-500 hover:bg-emerald-600 text-white text-sm px-3 py-1.5 rounded-lg flex items-center gap-1">
-              <Plus className="w-4 h-4" /> Create
-            </button>
-          </div>
-          <div className="space-y-3">
-            {DEFAULT_TEMPLATES.map(t => {
-              const Icon = t.icon;
-              return (
-                <button key={t.type} onClick={() => startWorkout(t.type)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg p-4 flex items-center justify-between hover:bg-slate-800 transition-colors">
-                  <div className="flex items-center space-x-4">
-                    <div className="w-12 h-12 bg-emerald-500 rounded-lg flex items-center justify-center">
-                      <Icon className="w-6 h-6 text-white" />
-                    </div>
-                    <div className="text-left">
-                      <h3 className="font-semibold text-white">{t.title}</h3>
-                      <p className="text-sm text-slate-400">{t.subtitle}</p>
-                    </div>
-                  </div>
-                  <ArrowUp className="w-5 h-5 text-slate-400 rotate-45" />
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        {/* Create button if no saved workouts */}
+        {customWorkouts.length === 0 && (
+          <button onClick={openCreateModal}
+            className="w-full border border-dashed border-slate-700 rounded-xl py-3 text-[10px] font-mono text-slate-600 hover:text-slate-400 hover:border-slate-600 transition-colors flex items-center justify-center gap-2">
+            <Plus className="w-3.5 h-3.5" /> Create custom workout
+          </button>
+        )}
 
-        {/* Recent Sessions */}
+        {/* ── RECENT SESSIONS ── */}
         <div>
-          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">RECENT SESSIONS</h2>
+          <h2 className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-3">Recent Sessions</h2>
           {sessions.length > 0 ? (
-            <div className="space-y-3">
-              {sessions.map(session => {
+            <div className="space-y-2">
+              {/* Always show last session expanded-ish */}
+              {sessions.slice(0, showPrevSessions ? 5 : 1).map((session, idx) => {
                 const stats = getSessionStats(session);
                 return (
-                  <div key={session.id} className="bg-slate-900 border border-slate-800 rounded-lg p-4 hover:bg-slate-800 transition-colors">
-                    <button onClick={() => setSelectedSession(session)} className="w-full text-left">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center space-x-2">
-                          {stats.isRunning ? <Activity className="w-4 h-4 text-emerald-400" /> : <Dumbbell className="w-4 h-4 text-slate-400" />}
-                          <span className="text-sm text-slate-400">{new Date(session.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                  <div key={session.id} className={`bg-slate-900 border rounded-xl overflow-hidden transition-colors ${idx === 0 ? 'border-slate-700' : 'border-slate-800'}`}>
+                    <button onClick={() => setSelectedSession(session)} className="w-full text-left p-3">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          {stats.isRunning
+                            ? <Activity className="w-4 h-4 text-green-400" />
+                            : <Dumbbell className="w-4 h-4 text-slate-500" />}
+                          <span className="text-xs font-semibold text-white capitalize">{session.template}</span>
+                          {idx === 0 && <span className="text-[8px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full">Latest</span>}
                         </div>
-                        <span className="text-emerald-400 font-medium capitalize">{session.template}</span>
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          {new Date(session.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </span>
                       </div>
-                      <div className="flex items-center space-x-4 text-sm text-slate-300">
-                        {stats.isRunning ? (() => {
-                          const p = session.paceMinPerKm!;
-                          const paceDisplay = `${Math.floor(p)}:${String(Math.round((p % 1) * 60)).padStart(2, '0')} min/km`;
-                          return <><span>{session.effortType}</span><span>•</span><span>{session.surface}</span><span>•</span><span>{session.distanceKm}km</span><span>•</span><span>{paceDisplay}</span></>;
-                        })() : (
-                          <><span>{stats.exerciseCount} exercises</span><span>•</span><span>{stats.totalSets} sets</span></>
-                        )}
-                      </div>
+                      {stats.isRunning ? (
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          {session.distanceKm ?? '--'}km · {session.durationMins ?? '--'}min
+                          {session.paceMinPerKm ? ` · ${Math.floor(session.paceMinPerKm)}:${String(Math.round((session.paceMinPerKm % 1) * 60)).padStart(2,'0')} /km` : ''}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          {stats.exerciseCount} exercises · {stats.totalSets} sets
+                          {session.notes && <span className="ml-2 text-slate-600">{session.notes.slice(0, 30)}</span>}
+                        </div>
+                      )}
                     </button>
-                    <div className="flex space-x-2 mt-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (window.confirm('Delete this session?')) {
-                            deleteDoc(doc(db, 'users', user!.uid, 'workoutSessions', session.id));
-                            setSessions(sessions.filter(s => s.id !== session.id));
-                          }
-                        }}
-                        className="text-slate-400 hover:text-red-400 p-2"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                    <div className="flex justify-end gap-1 px-2 py-1.5 border-t border-slate-800">
                       {!stats.isRunning && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            navigate('/workout-session', { state: { template: session.template, editSession: session } });
-                          }}
-                          className="text-slate-400 hover:text-blue-400 p-2"
-                        >
-                          <Pencil className="w-4 h-4" />
+                        <button onClick={e => { e.stopPropagation(); navigate('/workout-session', { state: { template: session.template, editSession: session } }); }}
+                          className="text-slate-600 hover:text-blue-400 p-2 transition-colors">
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
                       )}
+                      <button onClick={e => { e.stopPropagation(); if (window.confirm('Delete?')) { deleteDoc(doc(db, 'users', user!.uid, 'workoutSessions', session.id)); setSessions(s => s.filter(x => x.id !== session.id)); } }}
+                        className="text-slate-600 hover:text-red-400 p-2 transition-colors">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
                 );
               })}
+
+              {/* Show previous toggle */}
+              {sessions.length > 1 && (
+                <div className="flex items-center justify-between">
+                  <button onClick={() => setShowPrevSessions(e => !e)}
+                    className="text-[10px] font-mono text-slate-500 hover:text-emerald-400 flex items-center gap-1.5 transition-colors py-1">
+                    {showPrevSessions
+                      ? <><ChevronUp className="w-3 h-3" /> Hide</>
+                      : <><ChevronDown className="w-3 h-3" /> Last 5 sessions</>}
+                  </button>
+                  <button onClick={() => navigate('/activity-calendar')}
+                    className="text-[10px] font-mono text-emerald-400 hover:text-emerald-300 transition-colors py-1">
+                    Full history →
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-lg p-8 text-center">
-              <Clock className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-              <h3 className="text-lg font-semibold text-white mb-2">No workouts logged</h3>
-              <p className="text-slate-400 text-sm">Start your first workout to see history here</p>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center">
+              <Clock className="w-10 h-10 text-slate-700 mx-auto mb-3" />
+              <p className="text-sm font-semibold text-white mb-1">No sessions yet</p>
+              <p className="text-xs text-slate-500">Start your first workout above</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Session Detail Modal */}
+      {/* ── SESSION DETAIL MODAL ── */}
       {selectedSession && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-y-auto">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-6">
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto">
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-5">
                 <div>
-                  <h2 className="text-xl font-bold text-white capitalize mb-1">{selectedSession.template} Workout</h2>
-                  <div className="flex items-center space-x-2 text-sm text-slate-400">
-                    <Calendar className="w-4 h-4" />
-                    <span>{new Date(selectedSession.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}</span>
+                  <h2 className="text-base font-bold text-white capitalize">{selectedSession.template}</h2>
+                  <div className="flex items-center gap-1.5 text-xs text-slate-400 mt-0.5">
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span>{new Date(selectedSession.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</span>
                   </div>
                 </div>
-                <button onClick={() => setSelectedSession(null)} className="text-slate-400 hover:text-white"><X className="w-6 h-6" /></button>
+                <button onClick={() => setSelectedSession(null)} className="text-slate-500 hover:text-white p-1"><X className="w-5 h-5" /></button>
               </div>
-              <div className="space-y-6">
+              <div className="space-y-4">
                 {selectedSession.type === 'running' ? (
-                  <div className="bg-slate-800 rounded-lg p-4 space-y-3">
-                    <h3 className="font-semibold text-white">Running Session</h3>
-                    {[['Effort Type', selectedSession.effortType], ['Surface', selectedSession.surface], ['Distance', `${selectedSession.distanceKm} km`], ['Duration', `${selectedSession.durationMins} min`]].map(([k, v]) => (
-                      <div key={k} className="flex justify-between"><span className="text-sm text-slate-400">{k}:</span><span className="text-sm text-white capitalize">{v}</span></div>
+                  <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+                    {[['Effort', selectedSession.effortType], ['Surface', selectedSession.surface], ['Distance', `${selectedSession.distanceKm}km`], ['Duration', `${selectedSession.durationMins} min`]].map(([k, v]) => (
+                      <div key={k} className="flex justify-between text-sm">
+                        <span className="text-slate-400">{k}</span><span className="text-white capitalize">{v}</span>
+                      </div>
                     ))}
-                    <div className="flex justify-between">
-                      <span className="text-sm text-slate-400">Pace:</span>
-                      <span className="text-sm text-emerald-400">{Math.floor(selectedSession.paceMinPerKm!)}:{String(Math.round((selectedSession.paceMinPerKm! % 1) * 60)).padStart(2, '0')} min/km</span>
-                    </div>
-                    {selectedSession.notes && <p className="text-sm text-white">{selectedSession.notes}</p>}
+                    {selectedSession.paceMinPerKm && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-slate-400">Pace</span>
+                        <span className="text-emerald-400">{Math.floor(selectedSession.paceMinPerKm)}:{String(Math.round((selectedSession.paceMinPerKm % 1) * 60)).padStart(2,'0')} /km</span>
+                      </div>
+                    )}
+                    {selectedSession.notes && <p className="text-xs text-slate-300 pt-1">{selectedSession.notes}</p>}
                   </div>
                 ) : selectedSession.exercises?.map((exercise, i) => (
-                  <div key={i} className="bg-slate-800 rounded-lg p-4">
-                    <h3 className="font-semibold text-white mb-3">{exercise.name}</h3>
-                    <div className="space-y-2 mb-3">
+                  <div key={i} className="bg-slate-800 rounded-xl p-4">
+                    <h3 className="text-sm font-semibold text-white mb-3">{exercise.name}</h3>
+                    <div className="space-y-1.5 mb-3">
                       {exercise.sets.map((set, j) => (
-                        <div key={j} className="flex items-center justify-between bg-slate-700 rounded px-3 py-2">
-                          <span className="text-sm text-slate-300">Set {j + 1}</span>
-                          <div className="flex items-center space-x-3">
-                            <span className="text-sm text-white font-medium">{set.reps} reps</span>
-                            <span className="text-sm text-emerald-400 font-medium">{set.weight} kg</span>
-                            <span className="text-xs text-slate-400">(~{calculateOneRM(set.weight, set.reps).toFixed(1)} kg 1RM)</span>
+                        <div key={j} className="flex justify-between bg-slate-700 rounded-lg px-3 py-2">
+                          <span className="text-xs text-slate-400">Set {j + 1}</span>
+                          <div className="flex gap-3 text-xs">
+                            <span className="text-white">{set.reps} reps</span>
+                            <span className="text-emerald-400">{set.weight}kg</span>
+                            <span className="text-slate-500">~{calculateOneRM(set.weight, set.reps).toFixed(1)} 1RM</span>
                           </div>
                         </div>
                       ))}
@@ -846,30 +983,29 @@ Rules:
         </div>
       )}
 
-      {/* Create / Edit Workout Modal */}
+      {/* ── CREATE/EDIT WORKOUT MODAL ── */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 pb-20">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">
-              <h2 className="text-lg font-bold text-white">{editingWorkout ? 'Edit Workout' : 'Create Workout'}</h2>
+              <h2 className="text-base font-bold">{editingWorkout ? 'Edit Workout' : 'Create Workout'}</h2>
               <button onClick={closeCreateModal} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-1">Workout Name</label>
-                <input type="text" placeholder="e.g. Chest Focused, PPL Day 1..." value={workoutName}
-                  onChange={e => setWorkoutName(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
+                <label className="block text-xs font-medium text-slate-400 mb-1">Name</label>
+                <input type="text" value={workoutName} onChange={e => setWorkoutName(e.target.value)} placeholder="e.g. Chest Focus, Leg Blast..."
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
               </div>
               <div>
-                <div className="flex items-center justify-between mb-3">
-                  <label className="text-sm font-medium text-slate-400">Exercises ({selectedExercises.length})</label>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="text-xs font-medium text-slate-400">Exercises ({selectedExercises.length})</label>
                   <button onClick={() => setShowLibrary(true)} className="text-xs bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded-lg flex items-center gap-1">
-                    <Plus className="w-3 h-3" /> Add from Library
+                    <Plus className="w-3 h-3" /> Add
                   </button>
                 </div>
                 {selectedExercises.length === 0 ? (
-                  <div className="bg-slate-800 rounded-lg p-4 text-center text-slate-500 text-sm">No exercises added yet. Tap "Add from Library".</div>
+                  <div className="bg-slate-800 rounded-lg p-4 text-center text-slate-500 text-xs">No exercises yet</div>
                 ) : (
                   <div className="space-y-2">
                     {selectedExercises.map((ex, i) => (
@@ -878,19 +1014,15 @@ Rules:
                           <button onClick={() => moveExercise(i, 'up')} disabled={i === 0} className="text-slate-500 hover:text-white disabled:opacity-20"><ArrowUp className="w-3 h-3" /></button>
                           <button onClick={() => moveExercise(i, 'down')} disabled={i === selectedExercises.length - 1} className="text-slate-500 hover:text-white disabled:opacity-20"><ArrowDown className="w-3 h-3" /></button>
                         </div>
-                        <div className="flex-1">
-                          <p className="text-sm text-white">{ex.name}</p>
-                          <p className="text-xs text-slate-500 capitalize">{ex.category}</p>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs text-white">{ex.name}</p>
+                          <p className="text-[9px] text-slate-500 capitalize">{ex.category}</p>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <input type="number" min="1" max="10" value={ex.defaultSets}
-                            onChange={e => setSelectedExercises(prev => prev.map((s, idx) => idx === i ? { ...s, defaultSets: parseInt(e.target.value) || 3 } : s))}
-                            className="w-12 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-white text-xs text-center focus:outline-none focus:border-emerald-500" />
-                          <span className="text-xs text-slate-500">sets</span>
-                        </div>
-                        <button onClick={() => setSelectedExercises(prev => prev.filter((_, idx) => idx !== i))} className="text-slate-500 hover:text-red-400 p-1">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <input type="number" min="1" max="10" value={ex.defaultSets}
+                          onChange={e => setSelectedExercises(prev => prev.map((s, idx) => idx === i ? { ...s, defaultSets: parseInt(e.target.value) || 3 } : s))}
+                          className="w-10 bg-slate-700 border border-slate-600 rounded px-1.5 py-1 text-white text-xs text-center focus:outline-none" />
+                        <span className="text-[9px] text-slate-600">sets</span>
+                        <button onClick={() => setSelectedExercises(prev => prev.filter((_, idx) => idx !== i))} className="text-slate-600 hover:text-red-400 p-1"><Trash2 className="w-3.5 h-3.5" /></button>
                       </div>
                     ))}
                   </div>
@@ -899,27 +1031,27 @@ Rules:
             </div>
             <div className="px-5 py-4 border-t border-slate-800 flex-shrink-0">
               <button onClick={saveWorkout} disabled={isSavingWorkout || !workoutName.trim() || selectedExercises.length === 0}
-                className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-semibold py-3 rounded-xl">
-                {isSavingWorkout ? 'Saving...' : editingWorkout ? 'Update Workout' : 'Save Workout'}
+                className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-semibold py-3 rounded-xl text-sm">
+                {isSavingWorkout ? 'Saving...' : editingWorkout ? 'Update' : 'Save Workout'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Exercise Library Modal */}
+      {/* ── EXERCISE LIBRARY MODAL ── */}
       {showLibrary && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-[60]">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">
-              <h2 className="text-lg font-bold text-white">Exercise Library</h2>
+              <h2 className="text-base font-bold">Exercise Library</h2>
               <button onClick={() => setShowLibrary(false)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
             <div className="px-5 pt-4 space-y-3 flex-shrink-0">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                <input type="text" placeholder="Search exercises..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-emerald-500" />
+                <input type="text" placeholder="Search..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
               </div>
               <div className="flex gap-2 overflow-x-auto pb-1">
                 {['all', 'push', 'pull', 'legs', 'core', 'full body'].map(cat => (
@@ -940,7 +1072,7 @@ Rules:
                       <p className="text-sm text-white">{ex.name}</p>
                       <p className="text-xs text-slate-500 capitalize">{ex.category}</p>
                     </div>
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-sm font-bold ${isSelected ? 'bg-emerald-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${isSelected ? 'bg-emerald-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
                       {isSelected ? '✓' : '+'}
                     </div>
                   </button>
@@ -948,7 +1080,7 @@ Rules:
               })}
             </div>
             <div className="px-5 py-4 border-t border-slate-800 flex-shrink-0">
-              <button onClick={() => setShowLibrary(false)} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 rounded-xl">
+              <button onClick={() => setShowLibrary(false)} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 rounded-xl text-sm">
                 Done ({selectedExercises.length} selected)
               </button>
             </div>

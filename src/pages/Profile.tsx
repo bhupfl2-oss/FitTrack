@@ -5,6 +5,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { calculateNutritionGoals } from '@/lib/calculateNutritionGoals';
+import { ensureDefaultHabits } from '@/lib/defaultHabits';
+import { getDocs, collection, updateDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
@@ -203,6 +205,22 @@ export default function Profile() {
       await setDoc(doc(db, 'users', user.uid, 'profile', 'data'), payload);
       await bumpDataVersion(user.uid);
       calculateNutritionGoals(user.uid).catch(e => console.warn('Nutrition goals calc failed:', e));
+
+      // Sync sleep target to Sleep habit
+      if (profile.sleepTarget) {
+        const sleepHours = profile.sleepTarget === '9+' ? 9 : parseInt(profile.sleepTarget) || 8;
+        try {
+          const defaultHabits = await ensureDefaultHabits(user.uid);
+          const sleepHabit = defaultHabits['sleep'];
+          if (sleepHabit) {
+            const habitsSnap = await getDocs(collection(db, 'users', user.uid, 'habits'));
+            const sleepDoc = habitsSnap.docs.find(d => d.id === sleepHabit.id);
+            if (sleepDoc) {
+              await updateDoc(sleepDoc.ref, { targetValue: sleepHours, targetUnit: 'hrs' });
+            }
+          }
+        } catch (e) { console.warn('Sleep habit sync failed:', e); }
+      }
       navigate('/');
     } catch (e) {
       console.error('Error saving profile:', e);

@@ -18,7 +18,8 @@ export interface Habit {
   id: string;
   name: string;
   icon: string;
-  goalType: 'daily' | 'times_per_week' | 'distance_month' | 'count_month';
+  goalType: 'daily' | 'times_per_week' | 'distance_month' | 'count_month' | 'count_per_day' | 'count_per_week' | 'count_per_month' | 'count_per_year';
+  period?: 'day' | 'week' | 'month' | 'year' | null;
   targetValue: number;
   targetUnit: string;
   reminderTime: string | null;

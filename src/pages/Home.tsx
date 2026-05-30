@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
+import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { useActivityRings } from '@/hooks/useActivityRings';
 
 interface WorkoutSession {
@@ -103,6 +104,11 @@ export default function Home() {
   const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [habitsDoneToday, setHabitsDoneToday] = useState<Record<string, boolean>>({});
+  const [waterCount, setWaterCount] = useState(0);
+  const [stepsCount, setStepsCount] = useState(0);
+  const [stepsInput, setStepsInput] = useState('0');
+  const [savingWater, setSavingWater] = useState(false);
+  const [savingSteps, setSavingSteps] = useState(false);
   const todayStr = new Date().toISOString().split('T')[0];
   const [ringsKey, setRingsKey] = useState(0);
 
@@ -146,6 +152,34 @@ export default function Home() {
       console.error('Error toggling habit:', e);
     }
   }, [user, habitsDoneToday, todayStr]);
+
+  const saveWater = async (val: number) => {
+    if (!user) return;
+    setSavingWater(true);
+    try {
+      const waterH = habits.find(h => h.name?.toLowerCase().includes('water'));
+      if (waterH) {
+        await setHabitLogToday(user.uid, waterH.id, val);
+        setWaterCount(val);
+        if (val > 0) setHabitsDoneToday(prev => ({ ...prev, [waterH.id]: true }));
+      }
+    } catch (e) { console.error(e); }
+    finally { setSavingWater(false); }
+  };
+
+  const saveSteps = async (val: number) => {
+    if (!user) return;
+    setSavingSteps(true);
+    try {
+      const stepsH = habits.find(h => h.name?.toLowerCase().includes('step'));
+      if (stepsH) {
+        await setHabitLogToday(user.uid, stepsH.id, val);
+        setStepsCount(val);
+        if (val > 0) setHabitsDoneToday(prev => ({ ...prev, [stepsH.id]: true }));
+      }
+    } catch (e) { console.error(e); }
+    finally { setSavingSteps(false); }
+  };
 
   const getMuscleGroupAlert = (sessions: WorkoutSession[]) => {
     const now = new Date();
@@ -344,9 +378,24 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
         setUpcomingTests(tests.filter(t => t.nextDueDate && new Date(t.nextDueDate) <= thirtyDaysFromNow));
 
+        // Ensure Water/Sleep/Steps habits exist, then fetch all
+        await ensureDefaultHabits(user.uid);
         const habitsSnap = await getDocs(collection(db, 'users', user.uid, 'habits'));
         const habitsData = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as Habit));
         setHabits(habitsData);
+
+        // Load water + steps counts
+        const waterH = habitsData.find(h => h.name?.toLowerCase().includes('water'));
+        const stepsH = habitsData.find(h => h.name?.toLowerCase().includes('step'));
+        if (waterH) {
+          const val = await getHabitLogToday(user.uid, waterH.id);
+          setWaterCount(val);
+        }
+        if (stepsH) {
+          const val = await getHabitLogToday(user.uid, stepsH.id);
+          setStepsCount(val);
+          setStepsInput(String(val));
+        }
 
         const doneMap: Record<string, boolean> = {};
         for (const habit of habitsData) {
@@ -475,7 +524,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
   const bodyCompStats = getBodyCompStats();
   const fatLossStatus = getFatLossStatus();
   const muscleStatus = getMuscleStatus();
-  const habitsDoneCount = Object.values(habitsDoneToday).filter(Boolean).length;
+  // habitsDoneCount used inline below
   const currentTopic = insightTopics[insightIndex];
 
   // Ring arc helper
@@ -743,11 +792,13 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
                     <button
                       onClick={() => currentTopic === 'food'
                         ? navigate('/food')
+                        : currentTopic === 'workout'
+                        ? navigate('/workouts')
                         : navigate(`/ai-coach?topic=${currentTopic}`)
                       }
                       className="text-slate-500 text-xs hover:text-white transition-colors"
                     >
-                      {currentTopic === 'food' ? '· Open Food →' : '· Ask more →'}
+                      {currentTopic === 'food' ? '· Open Food →' : currentTopic === 'workout' ? '· Open Workouts →' : '· Ask more →'}
                     </button>
                   </div>
                   <div className="flex items-center">
@@ -762,47 +813,139 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
 
         <div className="border-t border-slate-800/60" />
 
-        {/* ── QUICK HABITS GRID ── */}
-        {habits.length > 0 && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-slate-500 text-[10px] uppercase tracking-wider font-mono">🔵 Track · Today</span>
-              <button onClick={() => navigate('/wellness')} className="text-[10px] font-mono text-blue-400">
-                {habitsDoneCount} / {habits.length} done
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-px bg-slate-800 rounded-xl overflow-hidden border border-slate-800">
-              {habits.slice(0, 4).map((habit) => {
-                const done = habitsDoneToday[habit.id] || false;
-                return (
-                  <button
-                    key={habit.id}
-                    onClick={() => toggleHabit(habit.id)}
-                    className={`p-3 text-left transition-colors ${done ? 'bg-slate-900/60' : 'bg-slate-900'}`}
-                  >
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="text-lg">{habit.icon || '💪'}</span>
-                      <div className={`w-4 h-4 rounded-full border flex items-center justify-center text-[8px] flex-shrink-0 transition-colors ${
-                        done ? 'bg-blue-500 border-blue-500 text-white' : 'border-slate-600'
-                      }`}>
-                        {done ? '✓' : ''}
+        <div className="border-t border-slate-800/60" />
+
+        {/* ── DAILY WELLNESS ── */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-slate-500 text-[10px] uppercase tracking-wider font-mono">🔵 Track · Today</span>
+            <button onClick={() => navigate('/wellness')} className="text-[10px] font-mono text-blue-400">
+              Wellness →
+            </button>
+          </div>
+
+          {/* Fixed defaults: Water / Sleep / Steps */}
+          <div className="space-y-2 mb-2">
+            {/* Water — glass stepper */}
+            {(() => {
+              const waterHabit = habits.find(h => h.name?.toLowerCase().includes('water'));
+              const goal = waterHabit?.targetValue || 8;
+              return (
+                <div className={`rounded-xl border px-3 py-2.5 flex items-center gap-3 ${waterCount > 0 ? 'bg-blue-500/8 border-blue-500/20' : 'bg-slate-900 border-slate-800'}`}>
+                  <span className="text-base flex-shrink-0">💧</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[11px] font-medium text-white">Water</div>
+                    <div className="text-[9px] text-slate-500">{waterCount} / {goal} glasses</div>
+                    <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                      <div className="h-full bg-blue-400 rounded-full transition-all" style={{ width: `${Math.min(100, (waterCount / goal) * 100)}%` }} />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button onClick={() => { const v = Math.max(0, waterCount - 1); saveWater(v); }}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">−</button>
+                    <span className="text-xs font-mono text-white w-4 text-center">{waterCount}</span>
+                    <button onClick={() => saveWater(waterCount + 1)}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">+</button>
+                    {savingWater && <div className="w-2.5 h-2.5 border border-blue-400 border-t-transparent rounded-full animate-spin" />}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Sleep — done toggle */}
+            {(() => {
+              const sleepHabit = habits.find(h => h.name?.toLowerCase().includes('sleep'));
+              const done = sleepHabit ? (habitsDoneToday[sleepHabit.id] || false) : false;
+              const goal = sleepHabit?.targetValue || 8;
+              return (
+                <button onClick={() => sleepHabit && toggleHabit(sleepHabit.id)}
+                  className={`w-full rounded-xl border px-3 py-2.5 flex items-center gap-3 transition-colors ${done ? 'bg-indigo-500/8 border-indigo-500/20' : 'bg-slate-900 border-slate-800'}`}>
+                  <span className="text-base flex-shrink-0">😴</span>
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="text-[11px] font-medium text-white">Sleep</div>
+                    <div className="text-[9px] text-slate-500">Target: {goal} hrs</div>
+                  </div>
+                  <div className={`w-5 h-5 rounded-full border flex items-center justify-center text-[9px] flex-shrink-0 transition-colors ${done ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-600 text-slate-600'}`}>
+                    {done ? '✓' : ''}
+                  </div>
+                </button>
+              );
+            })()}
+
+            {/* Steps — number stepper */}
+            {(() => {
+              const stepsHabit = habits.find(h => h.name?.toLowerCase().includes('step'));
+              const goal = stepsHabit?.targetValue || 8000;
+              return (
+                <div className={`rounded-xl border px-3 py-2.5 flex items-center gap-3 ${stepsCount > 0 ? 'bg-green-500/8 border-green-500/20' : 'bg-slate-900 border-slate-800'}`}>
+                  <span className="text-base flex-shrink-0">🚶</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[11px] font-medium text-white">Steps</div>
+                    <div className="text-[9px] text-slate-500">{stepsCount.toLocaleString()} / {goal.toLocaleString()}</div>
+                    <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                      <div className="h-full bg-green-400 rounded-full transition-all" style={{ width: `${Math.min(100, (stepsCount / goal) * 100)}%` }} />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button onClick={() => { const v = Math.max(0, stepsCount - 1000); setStepsInput(String(v)); saveSteps(v); }}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">−</button>
+                    <input type="number" value={stepsInput}
+                      onChange={e => setStepsInput(e.target.value)}
+                      onBlur={() => { const v = Math.max(0, parseInt(stepsInput) || 0); setStepsInput(String(v)); saveSteps(v); }}
+                      onKeyDown={e => { if (e.key === 'Enter') { const v = Math.max(0, parseInt(stepsInput) || 0); setStepsInput(String(v)); saveSteps(v); (e.target as HTMLInputElement).blur(); } }}
+                      className="w-14 bg-slate-800 border border-slate-700 rounded-lg px-1 py-0.5 text-center text-[10px] font-mono text-white focus:outline-none focus:border-green-500" />
+                    <button onClick={() => { const v = stepsCount + 1000; setStepsInput(String(v)); saveSteps(v); }}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">+</button>
+                    {savingSteps && <div className="w-2.5 h-2.5 border border-green-400 border-t-transparent rounded-full animate-spin" />}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Custom habits (excluding defaults) */}
+          {(() => {
+            const customHabits = habits.filter(h => {
+              const n = h.name?.toLowerCase() || '';
+              return !n.includes('water') && !n.includes('sleep') && !n.includes('step');
+            });
+            if (customHabits.length === 0) return null;
+            return (
+              <div className="grid grid-cols-2 gap-px bg-slate-800 rounded-xl overflow-hidden border border-slate-800">
+                {customHabits.slice(0, 4).map(habit => {
+                  const done = habitsDoneToday[habit.id] || false;
+                  return (
+                    <button key={habit.id} onClick={() => toggleHabit(habit.id)}
+                      className={`p-3 text-left transition-colors ${done ? 'bg-slate-900/60' : 'bg-slate-900'}`}>
+                      <div className="flex justify-between items-start mb-1">
+                        <span className="text-lg">{habit.icon || '💪'}</span>
+                        <div className={`w-4 h-4 rounded-full border flex items-center justify-center text-[8px] flex-shrink-0 ${done ? 'bg-blue-500 border-blue-500 text-white' : 'border-slate-600'}`}>
+                          {done ? '✓' : ''}
+                        </div>
                       </div>
-                    </div>
-                    <div className="text-[11px] font-medium text-white">{habit.name}</div>
-                    <div className={`text-[9px] mt-0.5 ${done ? 'text-blue-400' : 'text-slate-500'}`}>
-                      {done ? 'Done ✓' : `Goal: ${habit.targetValue}${habit.targetUnit ? ' ' + habit.targetUnit : ''}`}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-            {habits.length > 4 && (
-              <button onClick={() => navigate('/wellness')} className="text-[10px] text-slate-500 mt-2 font-mono">
-                +{habits.length - 4} more habits in Wellness →
+                      <div className="text-[11px] font-medium text-white">{habit.name}</div>
+                      <div className={`text-[9px] mt-0.5 ${done ? 'text-blue-400' : 'text-slate-500'}`}>
+                        {done ? 'Done ✓' : `Goal: ${habit.targetValue}${habit.targetUnit ? ' ' + habit.targetUnit : ''}`}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {/* All habits done count */}
+          <div className="flex justify-between items-center mt-2">
+            <span className="text-[9px] font-mono text-slate-600">
+              {Object.values(habitsDoneToday).filter(Boolean).length} / {habits.length} done today
+            </span>
+            {habits.length > 7 && (
+              <button onClick={() => navigate('/wellness')} className="text-[9px] font-mono text-slate-500 hover:text-blue-400">
+                +{habits.length - 7} more →
               </button>
             )}
           </div>
-        )}
+        </div>
 
         <div className="border-t border-slate-800/60" />
 
