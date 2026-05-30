@@ -26,7 +26,10 @@ interface DayData {
 }
 
 function dateStr(d: Date): string {
-  return d.toISOString().split('T')[0];
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function getMonthRange(year: number, month: number): { start: Date; end: Date } {
@@ -87,6 +90,7 @@ export default function ActivityCalendar() {
   const [monthData, setMonthData] = useState<Record<string, DayData>>({});
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState<string | null>(dateStr(now));
+  const [expandedExercises, setExpandedExercises] = useState(false);
 
   const today = dateStr(now);
 
@@ -189,6 +193,8 @@ export default function ActivityCalendar() {
       for (let i = 0; i < daysInMonth; i++) {
         const d = new Date(year, month, i + 1);
         const ds = dateStr(d);
+
+
         const workout = workoutMap[ds];
         const calories = nutritionMap[ds] || 0;
         const steps = stepsMap[ds] || 0;
@@ -318,7 +324,10 @@ export default function ActivityCalendar() {
             return (
               <button
                 key={ds}
-                onClick={() => setSelectedDate(isSelected ? null : ds)}
+                onClick={() => {
+                  setSelectedDate(isSelected ? null : ds);
+                  setExpandedExercises(false);
+                }}
                 disabled={isFuture}
                 className={`flex flex-col items-center gap-0.5 py-1.5 rounded-lg transition-colors disabled:cursor-default ${
                   isSelected
@@ -399,18 +408,25 @@ export default function ActivityCalendar() {
                 </div>
               ) : (
                 <div className="space-y-1">
-                  {(selected.workout.exercises || []).slice(0, 4).map((ex: any, i: number) => (
+                  {(selected.workout.exercises || [])
+                    .slice(0, expandedExercises ? undefined : 4)
+                    .map((ex: any, i: number) => (
                     <div key={i} className="flex justify-between text-xs">
                       <span className="text-slate-300">{ex.name}</span>
                       <span className="font-mono text-slate-500">
-                        {ex.sets?.length ?? 0} sets · {ex.sets?.[0]?.weight ?? '--'}kg
+                        {ex.sets?.length ?? 0} sets · {ex.sets?.[0]?.weight > 0 ? `${ex.sets[0].weight}kg` : '--'}
                       </span>
                     </div>
                   ))}
                   {(selected.workout.exercises?.length ?? 0) > 4 && (
-                    <div className="text-[10px] text-slate-600">
-                      +{selected.workout.exercises.length - 4} more exercises
-                    </div>
+                    <button
+                      onClick={() => setExpandedExercises(e => !e)}
+                      className="text-[10px] text-emerald-400 font-mono mt-1 hover:text-emerald-300 transition-colors"
+                    >
+                      {expandedExercises
+                        ? '↑ Show less'
+                        : `+ ${selected.workout.exercises.length - 4} more exercises`}
+                    </button>
                   )}
                 </div>
               )
