@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronLeft, Download, FileText } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { collection, query, orderBy, getDocs, limit, where } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 
@@ -49,7 +49,6 @@ export default function Export() {
   const navigate = useNavigate();
   const [range, setRange] = useState<Range>('1M');
   const [selected, setSelected] = useState<Set<string>>(new Set(['workouts', 'nutrition', 'steps', 'sleep']));
-  const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<DaySummary[] | null>(null);
   const [labData, setLabData] = useState<any[]>([]);
   const [generating, setGenerating] = useState(false);
