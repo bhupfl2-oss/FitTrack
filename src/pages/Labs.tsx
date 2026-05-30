@@ -124,12 +124,11 @@ export default function Labs() {
         );
         const testsSnapshot = await getDocs(testsQuery);
         
-        const fetchedTests: LabTestCard[] = [];
         
-        for (const testDoc of testsSnapshot.docs) {
+        // Fetch all readings in parallel instead of sequentially
+        const fetchedTests = await Promise.all(testsSnapshot.docs.map(async (testDoc) => {
           const testData = testDoc.data();
           
-          // Fetch latest reading for this test
           const readingsQuery = query(
             collection(db, 'users', user.uid, 'tests', testDoc.id, 'readings'),
             orderBy('date', 'desc'),
@@ -144,7 +143,7 @@ export default function Labs() {
               }
             : null;
           
-          fetchedTests.push({
+          return {
             id: testDoc.id,
             name: testData.name,
             unit: testData.unit,
@@ -154,8 +153,8 @@ export default function Labs() {
             nextDueDate: testData.nextDueDate ? new Date(testData.nextDueDate) : null,
             latestReading,
             pinned: testData.pinned || false
-          });
-        }
+          };
+        }));
         
         setTests(fetchedTests);
       } catch (error) {
