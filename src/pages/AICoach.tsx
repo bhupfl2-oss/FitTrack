@@ -28,18 +28,7 @@ interface ContextData {
   workoutSessions: any[];
 }
 
-const labRanges: { [key: string]: { min: number; max: number } } = {
-  tsh: { min: 0.4, max: 4.0 },
-  vitd: { min: 30, max: 100 },
-  b12: { min: 200, max: 900 },
-  hb: { min: 13.5, max: 17.5 },
-  hba1c: { min: 4, max: 5.6 },
-  totalcholesterol: { min: 0, max: 200 },
-  ldl: { min: 0, max: 100 },
-  hdl: { min: 40, max: 1000 },
-  triglycerides: { min: 0, max: 150 },
-  creatinine: { min: 0.7, max: 1.3 },
-};
+// labRanges removed — reference ranges now come from tests collection
 
 const calculateAge = (dob: string) => {
   if (!dob) return null;
@@ -55,7 +44,7 @@ const quickChips: Record<string, string[]> = {
   workout: ["Suggest today's workout", "Why is my SMM dropping?", "How many days rest?"],
   food: ["What should I eat today?", "High protein veg meals", "Best pre-workout meal"],
   labs: ["Explain my results", "What should I retest?", "What affects Vitamin D?"],
-  general: ["How am I doing overall?", "Plan my week", "What should I focus on?"],
+  general: ["How am I doing overall?", "Plan my week", "What should I focus on?", "Log something", "What should I eat today?"],
 };
 
 const renderInline = (text: string): React.ReactNode[] => {
@@ -166,21 +155,25 @@ export default function AICoach() {
       parts.push('LAST 10 WORKOUTS:\n' + last10.map((s: any) => `- ${s.date}: ${s.template}`).join('\n'));
     }
 
-    if (data.labResults.length > 0) {
-      const latest = data.labResults[0];
-      if (latest.results && Array.isArray(latest.results)) {
-        const outOfRange = latest.results.filter((test: any) => {
-          const key = test.testName.toLowerCase().replace(/\s+/g, '');
-          const range = labRanges[key];
-          if (!range) return false;
-          if (key === 'hdl') return test.value < range.min;
-          return test.value < range.min || test.value > range.max;
+    if (data.tests.length > 0) {
+      // Use tests collection (new) — includes latest reading per test
+      const testsWithReadings = data.tests.filter((t: any) => t.latestReading);
+      if (testsWithReadings.length > 0) {
+        const outOfRange = testsWithReadings.filter((t: any) => {
+          const v = t.latestReading?.value;
+          const low = t.referenceRangeLow;
+          const high = t.referenceRangeHigh;
+          if (v == null || (low == null && high == null)) return false;
+          return (low != null && v < low) || (high != null && v > high);
         });
+        const labLines = testsWithReadings.slice(0, 10).map((t: any) =>
+          `- ${t.name}: ${t.latestReading.value} ${t.unit}`
+        ).join('\n');
         if (outOfRange.length > 0) {
-          parts.push(`LABS (latest, ${outOfRange.length} out of range):\n` +
-            outOfRange.map((t: any) => `- ${t.testName}: ${t.value} ${t.unit}`).join('\n'));
+          parts.push(`LABS (${outOfRange.length} out of range):\n` +
+            outOfRange.map((t: any) => `- ${t.name}: ${t.latestReading.value} ${t.unit}`).join('\n'));
         } else {
-          parts.push('LABS: All markers in range');
+          parts.push(`LABS (all in range):\n${labLines}`);
         }
       }
     }
@@ -414,6 +407,14 @@ ${systemContext}`,
           max_tokens: 400,
           system: `You are a personal health coach for this user. Always use their actual data in responses. Be concise (max 3-4 sentences). Never give medical diagnoses. Friendly, direct tone.
 
+When the user wants to log something, suggest the right page naturally:
+- Log food / meal / calories → suggest going to Food page
+- Log workout / exercise / run → suggest going to Workouts page  
+- Log weight / body stats → suggest going to Body page
+- Upload lab report / blood test → suggest going to Labs page
+- Log water / steps / sleep → suggest going to Home page (wellness section)
+Say something like "Head to the Food page to log that — tap Food in the nav bar." Keep it brief.
+
 USER CONTEXT:
 ${systemContext}`,
           messages: conversationHistory,
@@ -460,7 +461,7 @@ ${systemContext}`,
   const contextChips: string[] = [];
   if (contextData && contextData.profile) contextChips.push('Profile');
   if (contextData && contextData.bodyStats.length > 0) contextChips.push('Body stats');
-  if (contextData && contextData.labResults.length > 0) contextChips.push(`${contextData.labResults.length} lab reports`);
+  if (contextData && contextData.tests.length > 0) contextChips.push(`${contextData.tests.length} tests tracked`);
   if (contextData && contextData.workoutSessions.length > 0) contextChips.push(`Last ${contextData.workoutSessions.length} workouts`);
 
   return (

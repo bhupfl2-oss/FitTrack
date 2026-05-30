@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Target, Download } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { useCompleteness } from '@/hooks/useCompleteness';
 import {
   collection,
@@ -99,7 +98,6 @@ export default function Home() {
   const navigate = useNavigate();
   const location = useLocation();
   const [loading, setLoading] = useState(true);
-  usePageLoadTime('Home', loading);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
@@ -111,7 +109,7 @@ export default function Home() {
   const [stepsInput, setStepsInput] = useState('0');
   const [savingWater, setSavingWater] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
   const [ringsKey, setRingsKey] = useState(0);
 
   // Re-fetch rings every time user navigates back to Home
@@ -337,7 +335,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         labs: parsed.labs || '',
       };
       setAiInsights(insights);
-      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString(), needsRefresh: false });
+      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString() });
     } catch (e) {
       console.error('AI insights error:', e);
     } finally {
@@ -894,6 +892,11 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
                       className="w-14 bg-slate-800 border border-slate-700 rounded-lg px-1 py-0.5 text-center text-[10px] font-mono text-white focus:outline-none focus:border-green-500" />
                     <button onClick={() => { const v = stepsCount + 1000; setStepsInput(String(v)); saveSteps(v); }}
                       className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">+</button>
+                    {/* Tick button — confirm manual typed value */}
+                    <button
+                      onClick={() => { const v = Math.max(0, parseInt(stepsInput) || 0); setStepsInput(String(v)); saveSteps(v); }}
+                      className="w-6 h-6 bg-green-500/15 border border-green-500/30 hover:bg-green-500/30 rounded-lg text-green-400 text-xs flex items-center justify-center transition-colors"
+                    >✓</button>
                     {savingSteps && <div className="w-2.5 h-2.5 border border-green-400 border-t-transparent rounded-full animate-spin" />}
                   </div>
                 </div>
@@ -997,7 +1000,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
 
       </div>
 
-      {/* FAB — unchanged */}
+      {/* FAB — AI Coach */}
       <button
         onClick={() => navigate('/ai-coach')}
         className="fixed bottom-24 left-6 w-14 h-14 rounded-full bg-emerald-500 shadow-lg flex items-center justify-center text-white text-xl z-40 hover:bg-emerald-600 transition-colors"

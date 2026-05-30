@@ -51,7 +51,7 @@ interface ActivityRingsState {
 }
 
 function getTodayStr(): string {
-  return new Date().toISOString().split('T')[0];
+  return (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
 }
 
 function getWeekRange(): { monday: Date; sunday: Date } {
