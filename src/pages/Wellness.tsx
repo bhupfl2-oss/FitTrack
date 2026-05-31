@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { getHabits, getWeekStatus, calculateStreak, logHabitEntry, removeHabitLog, Habit, Log, WeekStatus } from '@/lib/habits';
+import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import AddHabitModal from '@/components/AddHabitModal';
 
 export default function Wellness() {
@@ -24,6 +25,10 @@ export default function Wellness() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [valueModal, setValueModal] = useState<{ habitId: string; habitName: string } | null>(null);
   const [tempValue, setTempValue] = useState('');
+  const [waterCount, setWaterCount] = useState(0);
+  const [sleepHours, setSleepHours] = useState(0);
+  const [stepsCount, setStepsCount] = useState(0);
+  const [defaultHabitIds, setDefaultHabitIds] = useState<{water?:string, sleep?:string, steps?:string}>({});
 
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
@@ -54,11 +59,19 @@ export default function Wellness() {
   };
 
   useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' });
     if (!user) return;
     const loadData = async () => {
       try {
         const habitsData = await getHabits(user.uid);
         setHabits(habitsData);
+        
+        const dh = await ensureDefaultHabits(user.uid);
+        setDefaultHabitIds({ water: dh.water?.id, sleep: dh.sleep?.id, steps: dh.steps?.id });
+        if (dh.water?.id) setWaterCount((await getHabitLogToday(user.uid, dh.water.id)) ?? 0);
+        if (dh.sleep?.id) setSleepHours((await getHabitLogToday(user.uid, dh.sleep.id)) ?? 0);
+        if (dh.steps?.id) setStepsCount((await getHabitLogToday(user.uid, dh.steps.id)) ?? 0);
+        
         await fetchTodayLogs(habitsData);
         if (habitsData.length > 0) {
           const status = getWeekStatus([], habitsData[0].goalType, habitsData[0].targetValue);
@@ -123,8 +136,9 @@ export default function Wellness() {
     return { current, target: habit.targetValue };
   };
 
-  const remainingHabits = habits.filter(h => !isHabitDoneToday(h.id));
-  const doneHabits = habits.filter(h => isHabitDoneToday(h.id));
+  const customHabits = habits.filter(h => !(h as any).isDefault);
+  const remainingHabits = customHabits.filter(h => !isHabitDoneToday(h.id));
+  const doneHabits = customHabits.filter(h => isHabitDoneToday(h.id));
   const maxStreak = habits.length > 0 ? Math.max(...habits.map(h => getHabitStreak(h.id))) : 0;
 
   if (loading) {
@@ -216,6 +230,168 @@ export default function Wellness() {
     );
   };
 
+  const WellnessSteppers = () => {
+    if (!user) return null;
+
+    const sleepHabit = habits.find(h => h.id === defaultHabitIds.sleep);
+    const sleepTarget = sleepHabit?.targetValue ?? 8;
+    const stepsHabit = habits.find(h => h.id === defaultHabitIds.steps);
+    const stepsGoal = stepsHabit?.targetValue ?? 8000;
+    const waterGoal = 8;
+
+    const handleWaterChange = async (delta: number) => {
+      const newCount = Math.max(0, waterCount + delta);
+      setWaterCount(newCount);
+      if (defaultHabitIds.water) {
+        await setHabitLogToday(user.uid, defaultHabitIds.water, newCount);
+      }
+    };
+
+    const handleSleepChange = (delta: number) => {
+      setSleepHours(prev => Math.min(12, Math.max(0, Math.round((prev + delta * 0.5) * 2) / 2)));
+    };
+
+    const handleSleepSave = async () => {
+      if (defaultHabitIds.sleep) {
+        await setHabitLogToday(user.uid, defaultHabitIds.sleep, sleepHours);
+      }
+    };
+
+    const handleStepsChange = (delta: number) => {
+      setStepsCount(prev => Math.max(0, prev + delta * 500));
+    };
+
+    const handleStepsSave = async () => {
+      if (defaultHabitIds.steps) {
+        await setHabitLogToday(user.uid, defaultHabitIds.steps, stepsCount);
+      }
+    };
+
+    const sleepMet = sleepHours >= sleepTarget;
+
+    return (
+      <div className="px-4 py-4 space-y-3">
+        {/* Water */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="mb-3">
+            <div className="font-medium">💧 Water</div>
+            <div className="text-xs text-slate-400">glasses today</div>
+          </div>
+          <div className="flex items-center justify-center gap-4 mb-3">
+            <button
+              onClick={() => handleWaterChange(-1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              −
+            </button>
+            <span className="text-sm font-medium min-w-[7rem] text-center">
+              {waterCount} {waterCount === 1 ? 'glass' : 'glasses'}
+            </span>
+            <button
+              onClick={() => handleWaterChange(1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              +
+            </button>
+          </div>
+          <div className="w-full bg-slate-700 rounded-full h-2">
+            <div
+              className="bg-blue-500 h-2 rounded-full transition-all"
+              style={{ width: `${Math.min((waterCount / waterGoal) * 100, 100)}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Sleep */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="mb-3">
+            <div className="font-medium">🌙 Sleep</div>
+            <div className="text-xs text-slate-400">hours last night</div>
+          </div>
+          <div className="flex items-center justify-center gap-3 mb-3">
+            <button
+              onClick={() => handleSleepChange(-1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              −
+            </button>
+            <span className="text-sm font-medium min-w-[5rem] text-center">
+              {sleepHours % 1 === 0 ? sleepHours : sleepHours.toFixed(1)} hrs
+            </span>
+            <button
+              onClick={() => handleSleepChange(1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              +
+            </button>
+            <button
+              onClick={handleSleepSave}
+              className="w-8 h-8 rounded-lg bg-green-500 hover:bg-green-600 flex items-center justify-center text-white"
+              title="Save sleep"
+            >
+              ✓
+            </button>
+          </div>
+          <div className="w-full bg-slate-700 rounded-full h-2 mb-3">
+            <div
+              className={`h-2 rounded-full transition-all ${sleepMet ? 'bg-green-500' : 'bg-amber-500'}`}
+              style={{ width: `${Math.min((sleepHours / sleepTarget) * 100, 100)}%` }}
+            />
+          </div>
+          <input
+            type="text"
+            placeholder="or type hours (e.g. 7.5)"
+            value={sleepHours > 0 ? String(sleepHours) : ''}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v)) setSleepHours(Math.min(12, Math.max(0, v)));
+              else if (e.target.value === '') setSleepHours(0);
+            }}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500"
+          />
+        </div>
+
+        {/* Steps */}
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="mb-3">
+            <div className="font-medium">👣 Steps</div>
+            <div className="text-xs text-slate-400">today</div>
+          </div>
+          <div className="flex items-center justify-center gap-3 mb-3">
+            <button
+              onClick={() => handleStepsChange(-1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              −
+            </button>
+            <span className="text-sm font-medium min-w-[7rem] text-center">
+              {stepsCount.toLocaleString()} steps
+            </span>
+            <button
+              onClick={() => handleStepsChange(1)}
+              className="w-8 h-8 rounded-lg bg-slate-700 hover:bg-slate-600 flex items-center justify-center text-white"
+            >
+              +
+            </button>
+            <button
+              onClick={handleStepsSave}
+              className="w-8 h-8 rounded-lg bg-green-500 hover:bg-green-600 flex items-center justify-center text-white"
+              title="Save steps"
+            >
+              ✓
+            </button>
+          </div>
+          <div className="w-full bg-slate-700 rounded-full h-2">
+            <div
+              className="bg-green-500 h-2 rounded-full transition-all"
+              style={{ width: `${Math.min((stepsCount / stepsGoal) * 100, 100)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-20">
       {/* Header */}
@@ -258,6 +434,9 @@ export default function Wellness() {
         </div>
       </div>
 
+      {/* Wellness Steppers */}
+      <WellnessSteppers />
+
       {/* Streak Banner */}
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-4">
         <div className="flex items-center justify-between">
@@ -268,7 +447,7 @@ export default function Wellness() {
               <div className="text-xs text-slate-400">Best: {maxStreak} days</div>
             </div>
           </div>
-          <div className="text-sm font-medium">{doneHabits.length} / {habits.length} done today</div>
+          <div className="text-sm font-medium">{doneHabits.length} / {customHabits.length} done today</div>
         </div>
       </div>
 
@@ -292,7 +471,7 @@ export default function Wellness() {
           </div>
         )}
 
-        {habits.length === 0 && (
+        {customHabits.length === 0 && (
           <div className="text-center py-12">
             <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
               <AlertCircle size={24} className="text-slate-400" />

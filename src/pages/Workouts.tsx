@@ -131,6 +131,7 @@ export default function Workouts() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [pendingActivity, setPendingActivity] = useState<{ name: string; type: string; template: string; durationMins?: number } | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const rings = useActivityRings(user?.uid || '');
@@ -267,6 +268,34 @@ export default function Workouts() {
     return parts.join('\n');
   };
 
+  const fetchLastSessionByTemplate = async (template: string): Promise<WorkoutSession | null> => {
+    if (!user) return null;
+    try {
+      const match = sessions.find(s =>
+        s.type !== 'running' &&
+        s.template?.toLowerCase().includes(template.toLowerCase()) &&
+        s.exercises && s.exercises.length > 0
+      );
+      if (match) return match;
+
+      const snap = await getDocs(
+        query(
+          collection(db, 'users', user.uid, 'workoutSessions'),
+          orderBy('date', 'desc'),
+          limit(20)
+        )
+      );
+      const all = snap.docs.map(d => ({ id: d.id, ...d.data() } as WorkoutSession));
+      return all.find(s =>
+        s.type !== 'running' &&
+        s.template?.toLowerCase().includes(template) &&
+        s.exercises && s.exercises.length > 0
+      ) || null;
+    } catch {
+      return null;
+    }
+  };
+
   // ── Detect if user is logging a completed activity ─────────────────────
   const isLoggingActivity = (input: string): boolean => {
     const lower = input.toLowerCase();
@@ -274,6 +303,25 @@ export default function Workouts() {
       'just did', 'just finished', 'finished', 'done with', 'did a', 'did my',
       'went for', 'had a', 'completed'];
     return logPatterns.some(p => lower.includes(p));
+  };
+
+  const detectWorkoutTemplate = (input: string): string | null => {
+    const lower = input.toLowerCase();
+    if (lower.includes('push') || lower.includes('chest') || lower.includes('tricep') || lower.includes('shoulder')) return 'push';
+    if (lower.includes('pull') || lower.includes('back') || lower.includes('bicep') || lower.includes('lat')) return 'pull';
+    if (lower.includes('leg') || lower.includes('squat') || lower.includes('quad') || lower.includes('hamstring') || lower.includes('glute')) return 'legs';
+    if (lower.includes('upper')) return 'upper';
+    if (lower.includes('lower')) return 'lower';
+    if (lower.includes('full body') || lower.includes('fullbody')) return 'fullbody';
+    return null;
+  };
+
+  const isProvidingDetails = (input: string): boolean => {
+    const lower = input.toLowerCase();
+    return /\d+\s*(kg|lbs|reps|sets|x|\×)/.test(lower) ||
+      lower.includes('bench') || lower.includes('squat') || lower.includes('deadlift') ||
+      lower.includes('press') || lower.includes('curl') || lower.includes('row') ||
+      lower.includes('sets') || lower.includes('reps') || lower.includes('weights');
   };
 
   // ── Log a quick activity to Firestore ──────────────────────────────────
@@ -303,6 +351,71 @@ export default function Workouts() {
   const sendChat = async (inputOverride?: string) => {
     const input = (inputOverride ?? chatInput).trim();
     if (!input || !user) return;
+
+    // If user is providing details for a pending strength activity
+    if (pendingActivity && isProvidingDetails(input)) {
+      setChatInput('');
+      setChatLoading(true);
+      const userMsg: ChatMessage = { role: 'user', text: input };
+      setChatMessages(prev => [...prev, userMsg]);
+
+      try {
+        const context = await buildContext();
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 600,
+            messages: [{
+              role: 'user',
+              content: `The user just completed a ${pendingActivity.name} workout and described these exercises: "${input}"
+            
+Parse the exercises they mentioned and return a workout plan JSON. If weights aren't mentioned, use sensible defaults based on this context:
+${context}
+
+Return ONLY this JSON, no other text:
+{"plan":[{"exercise":"Name","sets":3,"reps":10,"suggestedWeight":60,"lastWeight":0}]}`
+            }],
+          }),
+        });
+
+        if (!response.ok) throw new Error('API failed');
+        const data = await response.json();
+        let plan: AIPlanExercise[] = [];
+        try {
+          const parsed = JSON.parse(data.content?.[0]?.text || '{}');
+          plan = parsed.plan || [];
+        } catch {}
+
+        if (plan.length > 0) {
+          const aiMsg: ChatMessage = {
+            role: 'ai',
+            text: `Got it! Here's your ${pendingActivity.name} session — tap "Log This Session" to save it with all the details.`,
+            plan,
+            logged: false,
+          };
+          setChatMessages(prev => [...prev, aiMsg]);
+          setPendingActivity(null);
+        } else {
+          await logQuickActivity(pendingActivity.name, pendingActivity.type, pendingActivity.durationMins);
+          setChatMessages(prev => [...prev, { role: 'ai', text: 'Logged! Keep it up 💪' }]);
+          setPendingActivity(null);
+        }
+      } catch (e) {
+        console.error(e);
+        setChatMessages(prev => [...prev, { role: 'ai', text: 'Something went wrong. Try again.' }]);
+      } finally {
+        setChatLoading(false);
+      }
+      return;
+    }
+
     setChatInput('');
     setChatLoading(true);
 
@@ -313,6 +426,44 @@ export default function Workouts() {
     try {
       const context = await buildContext();
       const isLogging = isLoggingActivity(input);
+
+      // If strength workout detected, skip normal AI flow entirely
+      const detectedTemplate = detectWorkoutTemplate(input);
+      const isCardioInput = ['run','walk','cycl','yoga','meditat','swim'].some(k => input.toLowerCase().includes(k));
+      if (isLogging && detectedTemplate && !isCardioInput) {
+        const durationMatch = input.match(/(\d+)\s*min/i);
+        const durationMins = durationMatch ? parseInt(durationMatch[1]) : undefined;
+        const lastSession = await fetchLastSessionByTemplate(detectedTemplate);
+
+        if (lastSession && lastSession.exercises && lastSession.exercises.length > 0) {
+          const plan: AIPlanExercise[] = lastSession.exercises.map(ex => {
+            const bestSet = ex.sets.reduce((b, c) => c.weight > b.weight ? c : b, ex.sets[0]);
+            return {
+              exercise: ex.name,
+              sets: ex.sets.length,
+              reps: bestSet?.reps ?? 10,
+              suggestedWeight: bestSet?.weight ?? 0,
+              lastWeight: bestSet?.weight ?? 0,
+            };
+          });
+          const lastDate = new Date(lastSession.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          setChatMessages(prev => [...prev, {
+            role: 'ai',
+            text: `Here's your last ${detectedTemplate} session from ${lastDate}. Same weights pre-filled — tap to log as-is or update anything before saving.`,
+            plan,
+            logged: false,
+            loggedActivity: input,
+          }]);
+          setPendingActivity({ name: detectedTemplate + ' day', type: 'workout', template: detectedTemplate, durationMins });
+        } else {
+          setChatMessages(prev => [...prev, {
+            role: 'ai',
+            text: `No previous ${detectedTemplate} session found. Tell me what you did and I'll log it.`,
+          }]);
+        }
+        setChatLoading(false);
+        return;
+      }
 
       // Build conversation history for multi-turn
       const history = chatMessages.map(m => ({
@@ -382,21 +533,6 @@ Rules:
         const responseText = responseMatch?.[1]?.trim() || 'Logged!';
         const shouldSuggest = suggestMatch?.[1]?.trim() === 'true';
 
-        // Actually log it
-        const activityType = input.toLowerCase().includes('run') ? 'running'
-          : input.toLowerCase().includes('walk') ? 'walk'
-          : input.toLowerCase().includes('cycl') ? 'cycling'
-          : input.toLowerCase().includes('yoga') ? 'yoga'
-          : 'workout';
-
-        // Extract duration if mentioned
-        const durationMatch = input.match(/(\d+)\s*min/i);
-        const durationMins = durationMatch ? parseInt(durationMatch[1]) : undefined;
-        const distMatch = input.match(/(\d+\.?\d*)\s*km/i);
-        const distanceKm = distMatch ? parseFloat(distMatch[1]) : undefined;
-
-        await logQuickActivity(loggedActivity, activityType, durationMins, distanceKm);
-
         let plan: AIPlanExercise[] = [];
         if (shouldSuggest && planMatch) {
           try {
@@ -405,15 +541,40 @@ Rules:
           } catch {}
         }
 
-        const aiMsg: ChatMessage = {
-          role: 'ai',
-          text: responseText,
-          logged: true,
-          loggedActivity,
-          plan: plan.length > 0 ? plan : undefined,
-          askForDetails: responseText.toLowerCase().includes('detail') || responseText.toLowerCase().includes('weight') || responseText.toLowerCase().includes('share'),
-        };
-        setChatMessages(prev => [...prev, aiMsg]);
+        const activityType = input.toLowerCase().includes('run') ? 'running'
+          : input.toLowerCase().includes('walk') ? 'walk'
+          : input.toLowerCase().includes('cycl') ? 'cycling'
+          : input.toLowerCase().includes('yoga') ? 'yoga'
+          : input.toLowerCase().includes('meditat') ? 'meditation'
+          : 'workout';
+
+        const durationMatch = input.match(/(\d+)\s*min/i);
+        const durationMins = durationMatch ? parseInt(durationMatch[1]) : undefined;
+        const distMatch = input.match(/(\d+\.?\d*)\s*km/i);
+        const distanceKm = distMatch ? parseFloat(distMatch[1]) : undefined;
+
+        const isCardio = ['running', 'walk', 'cycling', 'yoga', 'meditation'].includes(activityType);
+
+        if (isCardio) {
+          await logQuickActivity(loggedActivity, activityType, durationMins, distanceKm);
+          const aiMsg: ChatMessage = {
+            role: 'ai',
+            text: responseText,
+            logged: true,
+            loggedActivity,
+            plan: plan.length > 0 ? plan : undefined,
+          };
+          setChatMessages(prev => [...prev, aiMsg]);
+        } else {
+          setPendingActivity({ name: loggedActivity, type: activityType, durationMins });
+          const aiMsg: ChatMessage = {
+            role: 'ai',
+            text: responseText,
+            askForDetails: true,
+            logged: false,
+          };
+          setChatMessages(prev => [...prev, aiMsg]);
+        }
 
       } else {
         // Parse plan response
@@ -633,7 +794,7 @@ Rules:
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-[10px] font-mono text-emerald-400 tracking-wider uppercase">AI Coach</span>
               {chatMessages.length > 0 && (
-                <button onClick={() => setChatMessages([])} className="ml-auto text-[9px] font-mono text-slate-600 hover:text-slate-400">clear</button>
+                <button onClick={() => { setChatMessages([]); setPendingActivity(null); }} className="ml-auto text-[9px] font-mono text-slate-600 hover:text-slate-400">clear</button>
               )}
             </div>
 
@@ -677,10 +838,32 @@ Rules:
                               </div>
                             ))}
                             <div className="p-2.5 border-t border-slate-700">
-                              <button onClick={() => startFromAIPlan(msg.plan!)}
-                                className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2 rounded-lg transition-colors">
-                                🏋️ Start This Workout
-                              </button>
+                              {msg.loggedActivity !== undefined ? (
+                                <button
+                                  onClick={() => {
+                                    const exercises = msg.plan!.map(item => ({
+                                      name: item.exercise,
+                                      sets: Array.from({ length: item.sets }, () => ({ reps: item.reps, weight: item.suggestedWeight })),
+                                    }));
+                                    navigate('/workout-session', {
+                                      state: {
+                                        template: pendingActivity?.template || 'custom',
+                                        aiExercises: exercises,
+                                        customWorkout: { name: (pendingActivity?.name || 'Workout'), exercises: exercises.map(e => ({ name: e.name, category: 'custom', defaultSets: e.sets.length })) },
+                                        durationMins: pendingActivity?.durationMins,
+                                      },
+                                    });
+                                    setPendingActivity(null);
+                                  }}
+                                  className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2 rounded-lg transition-colors">
+                                  ✅ Looks right? Log it →
+                                </button>
+                              ) : (
+                                <button onClick={() => startFromAIPlan(msg.plan!)}
+                                  className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2 rounded-lg transition-colors">
+                                  🏋️ Start This Workout
+                                </button>
+                              )}
                             </div>
                           </div>
                         )}

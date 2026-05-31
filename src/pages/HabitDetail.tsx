@@ -116,7 +116,10 @@ export default function HabitDetail() {
     if (!habit) return 0;
     
     const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-    const completedDays = logs.length;
+    const isCountType = ['count_per_day','count_per_week','count_per_month','count_per_year'].includes(habit.goalType);
+    const completedDays = isCountType
+      ? logs.filter(l => (l.value ?? 0) > 0).length
+      : logs.length;
     const rate = daysInMonth > 0 ? (completedDays / daysInMonth) * 100 : 0;
     
     return Math.round(rate);
@@ -153,7 +156,10 @@ export default function HabitDetail() {
     
     if (isFuture) return 'future';
     
-    const hasLog = logs.some(log => log.date === dateStr);
+    const isCountType = ['count_per_day','count_per_week','count_per_month','count_per_year'].includes(habit?.goalType ?? '');
+    const hasLog = isCountType
+      ? logs.some(log => log.date === dateStr && (log.value ?? 0) > 0)
+      : logs.some(log => log.date === dateStr);
     return hasLog ? 'logged' : 'missed';
   };
 

@@ -107,8 +107,11 @@ export default function Home() {
   const [waterCount, setWaterCount] = useState(0);
   const [stepsCount, setStepsCount] = useState(0);
   const [stepsInput, setStepsInput] = useState('0');
+  const [sleepHours, setSleepHours] = useState(0);
+  const [sleepInput, setSleepInput] = useState('0');
   const [savingWater, setSavingWater] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
+  const [savingSleep, setSavingSleep] = useState(false);
   const todayStr = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
   const [ringsKey, setRingsKey] = useState(0);
 
@@ -179,6 +182,20 @@ export default function Home() {
       }
     } catch (e) { console.error(e); }
     finally { setSavingSteps(false); }
+  };
+
+  const saveSleep = async (val: number) => {
+    if (!user) return;
+    setSavingSleep(true);
+    try {
+      const sleepH = habits.find(h => h.name?.toLowerCase().includes('sleep'));
+      if (sleepH) {
+        await setHabitLogToday(user.uid, sleepH.id, val);
+        setSleepHours(val);
+        if (val > 0) setHabitsDoneToday(prev => ({ ...prev, [sleepH.id]: true }));
+      }
+    } catch (e) { console.error(e); }
+    finally { setSavingSleep(false); }
   };
 
   const getMuscleGroupAlert = (sessions: WorkoutSession[]) => {
@@ -382,10 +399,12 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
         // Fire all habit-related reads in parallel
         const waterH = habitsData.find(h => h.name?.toLowerCase().includes('water'));
         const stepsH = habitsData.find(h => h.name?.toLowerCase().includes('step'));
+        const sleepH = habitsData.find(h => h.name?.toLowerCase().includes('sleep'));
 
-        const [waterVal, stepsVal, ...habitLogResults] = await Promise.all([
+        const [waterVal, stepsVal, sleepVal, ...habitLogResults] = await Promise.all([
           waterH ? getHabitLogToday(user.uid, waterH.id) : Promise.resolve(0),
           stepsH ? getHabitLogToday(user.uid, stepsH.id) : Promise.resolve(0),
+          sleepH ? getHabitLogToday(user.uid, sleepH.id) : Promise.resolve(0),
           ...habitsData.map(habit =>
             getDocs(query(collection(db, 'users', user.uid, 'habits', habit.id, 'logs'), where('date', '==', todayStr)))
           ),
@@ -393,6 +412,7 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
 
         if (waterH) { setWaterCount(waterVal as number); }
         if (stepsH) { setStepsCount(stepsVal as number); setStepsInput(String(stepsVal)); }
+        if (sleepH) { setSleepHours(sleepVal as number); setSleepInput(String(sleepVal)); }
 
         const doneMap: Record<string, boolean> = {};
         habitsData.forEach((habit, i) => {
@@ -848,23 +868,42 @@ Rules: be specific, use actual numbers, under 25 words each, respect diet prefer
               );
             })()}
 
-            {/* Sleep — done toggle */}
+            {/* Sleep — hours stepper */}
             {(() => {
               const sleepHabit = habits.find(h => h.name?.toLowerCase().includes('sleep'));
-              const done = sleepHabit ? (habitsDoneToday[sleepHabit.id] || false) : false;
               const goal = sleepHabit?.targetValue || 8;
+              const pct = Math.min(100, (sleepHours / goal) * 100);
+              const isGood = sleepHours >= goal;
               return (
-                <button onClick={() => sleepHabit && toggleHabit(sleepHabit.id)}
-                  className={`w-full rounded-xl border px-3 py-2.5 flex items-center gap-3 transition-colors ${done ? 'bg-indigo-500/8 border-indigo-500/20' : 'bg-slate-900 border-slate-800'}`}>
+                <div className={`rounded-xl border px-3 py-2.5 flex items-center gap-3 ${sleepHours > 0 ? 'bg-indigo-500/8 border-indigo-500/20' : 'bg-slate-900 border-slate-800'}`}>
                   <span className="text-base flex-shrink-0">😴</span>
-                  <div className="flex-1 min-w-0 text-left">
+                  <div className="flex-1 min-w-0">
                     <div className="text-[11px] font-medium text-white">Sleep</div>
-                    <div className="text-[9px] text-slate-500">Target: {goal} hrs</div>
+                    <div className="text-[9px] text-slate-500">{sleepHours} / {goal} hrs</div>
+                    <div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{ width: `${pct}%`, backgroundColor: isGood ? '#34d399' : '#818cf8' }}
+                      />
+                    </div>
                   </div>
-                  <div className={`w-5 h-5 rounded-full border flex items-center justify-center text-[9px] flex-shrink-0 transition-colors ${done ? 'bg-indigo-500 border-indigo-500 text-white' : 'border-slate-600 text-slate-600'}`}>
-                    {done ? '✓' : ''}
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <button onClick={() => { const v = Math.max(0, parseFloat((sleepHours - 0.5).toFixed(1))); setSleepHours(v); setSleepInput(String(v)); }}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">−</button>
+                    <input type="number" value={sleepInput} step="0.5"
+                      onChange={e => setSleepInput(e.target.value)}
+                      onBlur={() => { const v = Math.max(0, Math.min(24, parseFloat(sleepInput) || 0)); setSleepInput(String(v)); saveSleep(v); }}
+                      onKeyDown={e => { if (e.key === 'Enter') { const v = Math.max(0, Math.min(24, parseFloat(sleepInput) || 0)); setSleepInput(String(v)); saveSleep(v); (e.target as HTMLInputElement).blur(); } }}
+                      className="w-12 bg-slate-800 border border-slate-700 rounded-lg px-1 py-0.5 text-center text-[10px] font-mono text-white focus:outline-none focus:border-indigo-500" />
+                    <button onClick={() => { const v = parseFloat((sleepHours + 0.5).toFixed(1)); setSleepHours(v); setSleepInput(String(v)); }}
+                      className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 text-xs font-bold flex items-center justify-center">+</button>
+                    <button
+                      onClick={() => { const v = Math.max(0, Math.min(24, parseFloat(sleepInput) || 0)); setSleepInput(String(v)); saveSleep(v); }}
+                      className="w-6 h-6 bg-indigo-500/15 border border-indigo-500/30 hover:bg-indigo-500/30 rounded-lg text-indigo-400 text-xs flex items-center justify-center transition-colors"
+                    >✓</button>
+                    {savingSleep && <div className="w-2.5 h-2.5 border border-indigo-400 border-t-transparent rounded-full animate-spin" />}
                   </div>
-                </button>
+                </div>
               );
             })()}
 

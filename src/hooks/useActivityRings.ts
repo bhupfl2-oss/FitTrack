@@ -132,7 +132,16 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           getDoc(doc(db, 'users', uid, 'habits', habit.id, 'logs', todayStr))
         )
       );
-      const habitsDoneToday = todayHabitLogs.filter(d => d.exists()).length;
+      const habitsDoneToday = todayHabitLogs.filter((d, i) => {
+        if (!d.exists()) return false;
+        const habit = habits[i] as any;
+        const val = d.data().value ?? 0;
+        const target = habit?.targetValue ?? 1;
+        const goalType = habit?.goalType ?? 'daily';
+        if (goalType === 'daily') return val >= 1;
+        if (['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType)) return val >= target;
+        return val >= 1;
+      }).length;
       const totalHabits = habits.length;
 
       // Process nutrition/calories
@@ -197,7 +206,16 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
             ? Math.min(1, (stepsDoc.data().value ?? stepsDoc.data().steps ?? 0) / stepsGoal)
             : 0;
 
-          const habitsDoneCount = habitDocs.filter(d => d?.exists()).length;
+          const habitsDoneCount = habitDocs.filter((d, i) => {
+            if (!d?.exists()) return false;
+            const habit = habits[i] as any;
+            const val = d.data().value ?? 0;
+            const target = habit?.targetValue ?? 1;
+            const goalType = habit?.goalType ?? 'daily';
+            if (goalType === 'daily') return val >= 1;
+            if (['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType)) return val >= target;
+            return val >= 1;
+          }).length;
           const trackVal = totalHabits > 0
             ? Math.min(1, habitsDoneCount / totalHabits)
             : 0;
