@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40">
+  <!-- Icon mark -->
+  <rect width="40" height="40" rx="10" fill="#10b981"/>
+  <polyline points="10,30 20,10 30,30" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="20" y1="10" x2="20" y2="30" stroke="white" stroke-width="4" stroke-linecap="round"/>
+  <!-- Wordmark -->
+  <text x="50" y="26" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="600" fill="#10b981" letter-spacing="-0.3">FitTrack</text>
+</svg>

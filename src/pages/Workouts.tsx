@@ -566,7 +566,7 @@ Rules:
           };
           setChatMessages(prev => [...prev, aiMsg]);
         } else {
-          setPendingActivity({ name: loggedActivity, type: activityType, durationMins });
+          setPendingActivity({ name: loggedActivity, type: activityType, template: activityType, durationMins });
           const aiMsg: ChatMessage = {
             role: 'ai',
             text: responseText,
