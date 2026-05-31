@@ -652,8 +652,13 @@ Rules:
 
   const getSessionStats = (session: WorkoutSession) => {
     if (session.type === 'running') return { exerciseCount: 0, totalSets: 0, isRunning: true };
-    const totalSets = session.exercises?.reduce((sum, ex) => sum + ex.sets.length, 0) || 0;
-    return { exerciseCount: session.exercises?.length || 0, totalSets, isRunning: false };
+    const validExercises = session.exercises?.filter(ex =>
+      ex.sets?.some((s: any) => (parseInt(String(s.reps)) || 0) > 0)
+    ) || [];
+    const totalSets = validExercises.reduce((sum, ex) =>
+      sum + ex.sets.filter((s: any) => (parseInt(String(s.reps)) || 0) > 0).length, 0
+    );
+    return { exerciseCount: validExercises.length, totalSets, isRunning: false };
   };
 
   const getExerciseOneRMHistory = (exerciseName: string): OneRMData[] => {

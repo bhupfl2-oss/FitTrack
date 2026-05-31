@@ -21,6 +21,7 @@ import {
 import { db } from '@/lib/firebase';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { cleanData } from '@/lib/cleanData';
+import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 
 interface Exercise {
   id: string;
@@ -131,6 +132,8 @@ export default function WorkoutSession() {
   // --- Auto-save state ---
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [draftKey, setDraftKey] = useState<string>('');
+  const [showPoster, setShowPoster] = useState(false);
+  const [savedSessionData, setSavedSessionData] = useState<{ template: string; date: string; exercises: any[]; durationMins?: number } | null>(null);
 
   // Helper: get last session placeholder value
   const getLastValue = useCallback(
@@ -459,7 +462,12 @@ export default function WorkoutSession() {
         }
       }
 
-      navigate('/workouts');
+      setSavedSessionData({
+        template,
+        date: sessionDate,
+        exercises,
+      });
+      setShowPoster(true);
     } catch (error) {
       console.error('Error saving workout:', error);
     } finally {
@@ -689,6 +697,16 @@ export default function WorkoutSession() {
           <Check className="w-5 h-5 ml-2" />
         </Button>
       </div>
+
+      {showPoster && savedSessionData && (
+        <WorkoutPosterModal
+          open={showPoster}
+          onDone={() => { setShowPoster(false); navigate('/workouts'); }}
+          template={savedSessionData.template}
+          sessionDate={savedSessionData.date}
+          exercises={savedSessionData.exercises}
+        />
+      )}
     </div>
   );
 }
