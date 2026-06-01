@@ -20,12 +20,12 @@ const MUSCLE_MAP: Record<string, string[]> = {
   shoulders: ['overhead press', 'lateral raise', 'front raise', 'arnold press', 'shoulder press'],
   triceps: ['tricep pushdown', 'skull crusher', 'overhead extension', 'close grip bench', 'tricep'],
   back: ['lat pulldown', 'pull up', 'chin up', 'row', 'deadlift', 'back extension', 'shrug', 'pulldown'],
-  biceps: ['curl', 'hammer curl', 'preacher curl'],
   quads: ['squat', 'leg press', 'leg extension', 'lunge', 'hack squat', 'walking lunge'],
   hamstrings: ['romanian deadlift', 'leg curl', 'rdl'],
   glutes: ['hip thrust', 'glute bridge', 'bulgarian'],
   calves: ['calf raise', 'calf'],
   core: ['plank', 'crunch', 'ab wheel', 'russian twist', 'leg raise', 'mountain climber'],
+  biceps: ['bicep curl', 'hammer curl', 'preacher curl', 'dumbbell curl', 'barbell curl'],
 };
 
 const computeMuscles = (exercises: WorkoutPosterModalProps['exercises'], template: string) => {
