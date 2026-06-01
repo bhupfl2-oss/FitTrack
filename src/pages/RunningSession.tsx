@@ -1,86 +1,146 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
-interface RunningSession {
-  effortType: 'recovery' | 'tempo' | 'endurance';
-  surface: 'road' | 'treadmill' | 'hill';
+type EffortType = 'recovery' | 'tempo' | 'long_run' | 'intervals';
+type Surface = 'road' | 'treadmill' | 'hill';
+
+interface IntervalRow {
+  id: string;
+  distanceM: number;       // metres
+  durationMins: number;    // whole minutes
+  durationSecs: number;    // 0–59
+  inclinePercent: number;  // only relevant when surface === treadmill
+}
+
+interface RunningSessionState {
+  effortType: EffortType;
+  surface: Surface;
+  // non-interval fields
   distanceKm: number;
   durationMins: number;
+  durationSecs: number;
+  inclinePercent: number;
   notes: string;
 }
+
+const emptyInterval = (): IntervalRow => ({
+  id: `iv-${Date.now()}-${Math.random()}`,
+  distanceM: 0,
+  durationMins: 0,
+  durationSecs: 0,
+  inclinePercent: 0,
+});
+
+const paceStr = (totalMins: number, distanceKm: number): string => {
+  if (distanceKm <= 0 || totalMins <= 0) return '0:00 min/km';
+  const pace = totalMins / distanceKm;
+  const m = Math.floor(pace);
+  const s = Math.round((pace - m) * 60);
+  return `${m}:${String(s).padStart(2, '0')} min/km`;
+};
 
 export default function RunningSession() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [isSaving, setIsSaving] = useState(false);
   const [sessionDate, setSessionDate] = useState<string>(
-    new Date().toISOString().split('T')[0]  // defaults to today in YYYY-MM-DD format
+    new Date().toISOString().split('T')[0]
   );
-  const [session, setSession] = useState<RunningSession>({
+  const [session, setSession] = useState<RunningSessionState>({
     effortType: 'recovery',
     surface: 'road',
     distanceKm: 0,
     durationMins: 0,
-    notes: ''
+    durationSecs: 0,
+    inclinePercent: 0,
+    notes: '',
   });
 
-  const effortTypes = [
-    { value: 'recovery', label: 'Recovery Run' },
-    { value: 'tempo', label: 'Tempo Run' },
-    { value: 'endurance', label: 'Endurance Run' }
+  // Interval rows — only used when effortType === 'intervals'
+  const [intervals, setIntervals] = useState<IntervalRow[]>([emptyInterval()]);
+
+  const effortTypes: { value: EffortType; label: string; emoji: string }[] = [
+    { value: 'recovery', label: 'Recovery', emoji: '🧘' },
+    { value: 'tempo',    label: 'Tempo',    emoji: '⚡' },
+    { value: 'long_run', label: 'Long Run', emoji: '🏃' },
+    { value: 'intervals',label: 'Intervals',emoji: '🔁' },
   ];
 
-  const surfaces = [
-    { value: 'road', label: 'Road' },
+  const surfaces: { value: Surface; label: string }[] = [
+    { value: 'road',      label: 'Road' },
     { value: 'treadmill', label: 'Treadmill' },
-    { value: 'hill', label: 'Hill' }
+    { value: 'hill',      label: 'Hill' },
   ];
 
-  const calculatePace = (): string => {
-    if (session.distanceKm > 0 && session.durationMins > 0) {
-      const pace = session.durationMins / session.distanceKm;
-      const minutes = Math.floor(pace);
-      const seconds = Math.round((pace - minutes) * 60);
-      return `${minutes}:${seconds.toString().padStart(2, '0')} min/km`;
-    }
-    return '0:00 min/km';
-  };
-
-  const updateSession = (field: keyof RunningSession, value: string | number) => {
+  const update = (field: keyof RunningSessionState, value: string | number) =>
     setSession(prev => ({ ...prev, [field]: value }));
-  };
 
+  // ── Interval helpers ───────────────────────────────────────────────────
+  const updateInterval = (id: string, field: keyof Omit<IntervalRow, 'id'>, value: number) =>
+    setIntervals(prev => prev.map(iv => iv.id === id ? { ...iv, [field]: value } : iv));
+
+  const addInterval = () =>
+    setIntervals(prev => [...prev, emptyInterval()]);
+
+  const removeInterval = (id: string) =>
+    setIntervals(prev => prev.length > 1 ? prev.filter(iv => iv.id !== id) : prev);
+
+  // Auto-computed totals from intervals
+  const intervalTotalDistanceKm = intervals.reduce((s, iv) => s + iv.distanceM / 1000, 0);
+  const intervalTotalMins = intervals.reduce((s, iv) => s + iv.durationMins + iv.durationSecs / 60, 0);
+  const intervalPace = paceStr(intervalTotalMins, intervalTotalDistanceKm);
+
+  // ── Pace for non-interval modes ────────────────────────────────────────
+  const regularPace = paceStr(
+    session.durationMins + session.durationSecs / 60,
+    session.distanceKm
+  );
+
+  // ── Validation ─────────────────────────────────────────────────────────
+  const isIntervals = session.effortType === 'intervals';
+  const canSave = isIntervals
+    ? intervalTotalDistanceKm > 0 && intervalTotalMins > 0
+    : session.distanceKm > 0 && (session.durationMins > 0 || session.durationSecs > 0);
+
+  // ── Save ───────────────────────────────────────────────────────────────
   const finishRun = async () => {
-    if (!user) return;
-
-    // Validation
-    if (session.distanceKm <= 0 || session.durationMins <= 0) {
-      alert('Please enter valid distance and duration');
-      return;
-    }
-
+    if (!user || !canSave) return;
     setIsSaving(true);
     try {
-      const paceMinPerKm = session.durationMins / session.distanceKm;
-      
-      await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), cleanData({
+      const saveData: any = {
         type: 'running',
         date: sessionDate,
         effortType: session.effortType,
         surface: session.surface,
-        distanceKm: session.distanceKm,
-        durationMins: session.durationMins,
-        paceMinPerKm,
         notes: session.notes,
         createdAt: serverTimestamp(),
-      }));
+      };
 
+      if (isIntervals) {
+        saveData.distanceKm = parseFloat(intervalTotalDistanceKm.toFixed(3));
+        saveData.durationMins = intervalTotalMins;
+        saveData.paceMinPerKm = intervalTotalMins / intervalTotalDistanceKm;
+        saveData.intervals = intervals.map(({ id, ...rest }) => rest);
+      } else {
+        const totalDuration = session.durationMins + session.durationSecs / 60;
+        saveData.distanceKm = session.distanceKm;
+        saveData.durationMins = totalDuration;
+        saveData.paceMinPerKm = totalDuration / session.distanceKm;
+        if (session.surface === 'treadmill') {
+          saveData.inclinePercent = session.inclinePercent;
+        }
+      }
+
+      await addDoc(
+        collection(db, 'users', user.uid, 'workoutSessions'),
+        cleanData(saveData)
+      );
       navigate('/workouts');
     } catch (error) {
       console.error('Error saving running session:', error);
@@ -90,22 +150,24 @@ export default function RunningSession() {
     }
   };
 
+  // ── Input style helpers ────────────────────────────────────────────────
+  const inputCls = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500';
+  const smallInputCls = 'bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 text-sm';
+
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
+    <div className="min-h-screen bg-slate-950 text-white pb-10">
       <div className="max-w-md mx-auto p-4">
+
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
-          <button
-            onClick={() => navigate('/workouts')}
-            className="p-2 hover:bg-slate-800 rounded-lg transition-colors"
-          >
+          <button onClick={() => navigate('/workouts')} className="p-2 hover:bg-slate-800 rounded-lg transition-colors">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <h1 className="text-xl font-semibold">Running Session</h1>
           <div className="w-9" />
         </div>
 
-        {/* Date Picker */}
+        {/* Date */}
         <div className="mb-6">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ fontSize: '13px', color: '#6b7280' }}>Date</span>
@@ -113,7 +175,7 @@ export default function RunningSession() {
               type="date"
               value={sessionDate}
               max={new Date().toISOString().split('T')[0]}
-              onChange={(e) => setSessionDate(e.target.value)}
+              onChange={e => setSessionDate(e.target.value)}
               style={{
                 background: '#1a2332',
                 border: '0.5px solid rgba(255,255,255,0.12)',
@@ -126,81 +188,226 @@ export default function RunningSession() {
           </div>
         </div>
 
-        {/* Effort Type Selector */}
+        {/* Effort type */}
         <div className="mb-6">
-          <h2 className="text-sm font-medium text-slate-300 mb-3">Effort Type</h2>
-          <div className="flex gap-2">
-            {effortTypes.map((type) => (
+          <h2 className="text-sm font-medium text-slate-300 mb-3">Run Type</h2>
+          <div className="grid grid-cols-2 gap-2">
+            {effortTypes.map(t => (
               <button
-                key={type.value}
-                onClick={() => updateSession('effortType', type.value as RunningSession['effortType'])}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-                  session.effortType === type.value
+                key={t.value}
+                onClick={() => update('effortType', t.value)}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                  session.effortType === t.value
                     ? 'bg-emerald-500 text-white'
                     : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                 }`}
               >
-                {type.label}
+                <span>{t.emoji}</span>{t.label}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Surface Selector */}
+        {/* Surface */}
         <div className="mb-6">
           <h2 className="text-sm font-medium text-slate-300 mb-3">Surface</h2>
           <div className="flex gap-2">
-            {surfaces.map((surface) => (
+            {surfaces.map(s => (
               <button
-                key={surface.value}
-                onClick={() => updateSession('surface', surface.value as RunningSession['surface'])}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
-                  session.surface === surface.value
+                key={s.value}
+                onClick={() => update('surface', s.value)}
+                className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                  session.surface === s.value
                     ? 'bg-emerald-500 text-white'
                     : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                 }`}
               >
-                {surface.label}
+                {s.label}
               </button>
             ))}
           </div>
+          {/* Global incline for non-interval treadmill */}
+          {session.surface === 'treadmill' && !isIntervals && (
+            <div className="mt-3">
+              <input
+                type="number" step="0.5" min="0" max="15"
+                placeholder="% incline"
+                value={session.inclinePercent || ''}
+                onChange={e => update('inclinePercent', parseFloat(e.target.value) || 0)}
+                className={inputCls}
+              />
+            </div>
+          )}
         </div>
 
-        {/* Distance Input */}
-        <div className="mb-6">
-          <h2 className="text-sm font-medium text-slate-300 mb-3">Distance</h2>
-          <input
-            type="number"
-            step="0.1"
-            min="0"
-            placeholder="Distance in km"
-            value={session.distanceKm || ''}
-            onChange={(e) => updateSession('distanceKm', parseFloat(e.target.value) || 0)}
-            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-          />
-        </div>
+        {/* ── INTERVALS MODE ── */}
+        {isIntervals ? (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-medium text-slate-300">Intervals</h2>
+              <span className="text-xs font-mono text-slate-500">{intervals.length} rep{intervals.length !== 1 ? 's' : ''}</span>
+            </div>
 
-        {/* Duration Input */}
-        <div className="mb-6">
-          <h2 className="text-sm font-medium text-slate-300 mb-3">Duration</h2>
-          <input
-            type="number"
-            step="1"
-            min="0"
-            placeholder="Duration in minutes"
-            value={session.durationMins || ''}
-            onChange={(e) => updateSession('durationMins', parseInt(e.target.value) || 0)}
-            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-          />
-        </div>
+            <div className="space-y-3">
+              {intervals.map((iv, idx) => (
+                <div key={iv.id} className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+                  {/* Row header */}
+                  <div className="flex items-center justify-between mb-2.5">
+                    <span className="text-xs font-mono text-emerald-400">#{idx + 1}</span>
+                    <button
+                      onClick={() => removeInterval(iv.id)}
+                      className="text-slate-600 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
 
-        {/* Auto-calculated Pace */}
-        <div className="mb-6">
-          <h2 className="text-sm font-medium text-slate-300 mb-3">Pace</h2>
-          <div className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-emerald-400 font-medium">
-            {calculatePace()}
+                  {/* Distance + Duration */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    {/* Distance */}
+                    <div>
+                      <label className="text-[10px] text-slate-500 font-mono uppercase tracking-wider block mb-1">Distance</label>
+                      <div className="relative">
+                        <input
+                          type="number" step="10" min="0"
+                          placeholder="400"
+                          value={iv.distanceM || ''}
+                          onChange={e => updateInterval(iv.id, 'distanceM', parseInt(e.target.value) || 0)}
+                          className={`${smallInputCls} w-full pr-8`}
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-500">m</span>
+                      </div>
+                    </div>
+
+                    {/* Duration MM:SS */}
+                    <div>
+                      <label className="text-[10px] text-slate-500 font-mono uppercase tracking-wider block mb-1">Time (mm:ss)</label>
+                      <div className="flex gap-1 items-center">
+                        <input
+                          type="number" step="1" min="0"
+                          placeholder="02"
+                          value={iv.durationMins || ''}
+                          onChange={e => updateInterval(iv.id, 'durationMins', parseInt(e.target.value) || 0)}
+                          className={`${smallInputCls} w-full text-center`}
+                        />
+                        <span className="text-slate-500 text-sm font-mono flex-shrink-0">:</span>
+                        <input
+                          type="number" step="1" min="0" max="59"
+                          placeholder="00"
+                          value={iv.durationSecs || ''}
+                          onChange={e => updateInterval(iv.id, 'durationSecs', Math.min(59, parseInt(e.target.value) || 0))}
+                          className={`${smallInputCls} w-full text-center`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Incline (treadmill only) */}
+                  {session.surface === 'treadmill' && (
+                    <div>
+                      <label className="text-[10px] text-slate-500 font-mono uppercase tracking-wider block mb-1">Incline</label>
+                      <div className="relative">
+                        <input
+                          type="number" step="0.5" min="0" max="15"
+                          placeholder="0"
+                          value={iv.inclinePercent || ''}
+                          onChange={e => updateInterval(iv.id, 'inclinePercent', parseFloat(e.target.value) || 0)}
+                          className={`${smallInputCls} w-full pr-8`}
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-slate-500">%</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Per-interval pace */}
+                  {iv.distanceM > 0 && (iv.durationMins > 0 || iv.durationSecs > 0) && (
+                    <div className="mt-2 text-[10px] font-mono text-emerald-400">
+                      {paceStr(iv.durationMins + iv.durationSecs / 60, iv.distanceM / 1000)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Add interval */}
+            <button
+              onClick={addInterval}
+              className="mt-3 w-full border border-dashed border-slate-700 rounded-xl py-2.5 text-xs font-mono text-slate-500 hover:text-emerald-400 hover:border-emerald-500/40 transition-colors flex items-center justify-center gap-2"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add interval
+            </button>
+
+            {/* Totals summary */}
+            {intervalTotalDistanceKm > 0 && (
+              <div className="mt-4 bg-slate-900 border border-slate-800 rounded-xl p-4 grid grid-cols-3 gap-3">
+                <div className="text-center">
+                  <div className="text-base font-bold text-white">{intervalTotalDistanceKm.toFixed(2)}</div>
+                  <div className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mt-0.5">km total</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-base font-bold text-white">
+                    {String(Math.floor(intervalTotalMins)).padStart(2, '0')}:{String(Math.round((intervalTotalMins % 1) * 60)).padStart(2, '0')}
+                  </div>
+                  <div className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mt-0.5">total time</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-base font-bold text-emerald-400">{intervalPace.replace(' min/km', '')}</div>
+                  <div className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mt-0.5">avg pace</div>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
+        ) : (
+          /* ── REGULAR MODE ── */
+          <>
+            <div className="mb-6">
+              <h2 className="text-sm font-medium text-slate-300 mb-3">Distance</h2>
+              <div className="relative">
+                <input
+                  type="number" step="0.1" min="0"
+                  placeholder="0.0"
+                  value={session.distanceKm || ''}
+                  onChange={e => update('distanceKm', parseFloat(e.target.value) || 0)}
+                  className={`${inputCls} pr-12`}
+                />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-slate-500">km</span>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <h2 className="text-sm font-medium text-slate-300 mb-3">Duration</h2>
+              <div className="flex gap-3">
+                <div className="relative flex-1">
+                  <input
+                    type="number" step="1" min="0"
+                    placeholder="0"
+                    value={session.durationMins || ''}
+                    onChange={e => update('durationMins', parseInt(e.target.value) || 0)}
+                    className={`${inputCls} pr-12`}
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-slate-500">min</span>
+                </div>
+                <div className="relative flex-1">
+                  <input
+                    type="number" step="1" min="0" max="59"
+                    placeholder="00"
+                    value={session.durationSecs || ''}
+                    onChange={e => update('durationSecs', Math.min(59, parseInt(e.target.value) || 0))}
+                    className={`${inputCls} pr-12`}
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-slate-500">sec</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <h2 className="text-sm font-medium text-slate-300 mb-3">Pace</h2>
+              <div className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-emerald-400 font-medium font-mono">
+                {regularPace}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Notes */}
         <div className="mb-8">
@@ -208,16 +415,15 @@ export default function RunningSession() {
           <textarea
             placeholder="How did the run feel? Any observations..."
             value={session.notes}
-            onChange={(e) => updateSession('notes', e.target.value)}
-            rows={4}
+            onChange={e => update('notes', e.target.value)}
+            rows={3}
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 resize-none"
           />
         </div>
 
-        {/* Finish Run Button */}
         <Button
           onClick={finishRun}
-          disabled={isSaving || session.distanceKm <= 0 || session.durationMins <= 0}
+          disabled={isSaving || !canSave}
           className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-3"
         >
           {isSaving ? 'Saving...' : 'Finish Run'}
