@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
 import { X, Pencil, Check } from 'lucide-react';
+import { doc, updateDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 
 interface WorkoutPosterModalProps {
   open: boolean;
@@ -14,6 +16,8 @@ interface WorkoutPosterModalProps {
   durationMins?: number;
   weekStreak?: number;
   totalWeeklyKm?: number;
+  sessionDocId?: string;  // Firestore doc ID for duration writeback
+  userId?: string;
 }
 
 const MUSCLE_MAP: Record<string, string[]> = {
@@ -45,7 +49,6 @@ const computeMuscles = (exercises: WorkoutPosterModalProps['exercises'], templat
 
   for (const ex of exercises) {
     const n = ex.name.toLowerCase();
-    // Only count sets where reps > 0 — no fallback to total sets
     const validSets = ex.sets.filter(s => (parseInt(String(s.reps)) || 0) > 0).length;
     if (validSets === 0) continue;
     for (const [muscle, keywords] of Object.entries(MUSCLE_MAP)) {
@@ -62,7 +65,9 @@ const computeMuscles = (exercises: WorkoutPosterModalProps['exercises'], templat
 };
 
 export default function WorkoutPosterModal({
-  open, onDone, template, sessionDate, exercises, durationMins: durationMinsProp, weekStreak, totalWeeklyKm,
+  open, onDone, template, sessionDate, exercises,
+  durationMins: durationMinsProp, weekStreak, totalWeeklyKm,
+  sessionDocId, userId,
 }: WorkoutPosterModalProps) {
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -70,6 +75,7 @@ export default function WorkoutPosterModal({
   const [editingDuration, setEditingDuration] = useState(false);
   const [durationEditMins, setDurationEditMins] = useState(String(Math.floor(durationMinsProp ?? 0)));
   const [durationEditSecs, setDurationEditSecs] = useState(String(Math.round(((durationMinsProp ?? 0) % 1) * 60)));
+  const [savingDuration, setSavingDuration] = useState(false);
 
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -85,15 +91,31 @@ export default function WorkoutPosterModal({
   );
   const maxSets = Math.max(...muscles.map(([, v]) => v), 1);
 
-  const saveDurationEdit = () => {
+  const saveDurationEdit = async () => {
     const m = parseInt(durationEditMins) || 0;
     const s = Math.min(59, parseInt(durationEditSecs) || 0);
-    setDurationMins(m + s / 60);
+    const newDuration = m + s / 60;
+    setDurationMins(newDuration);
     setEditingDuration(false);
+
+    // Write back to Firestore if we have the doc reference
+    if (sessionDocId && userId) {
+      setSavingDuration(true);
+      try {
+        await updateDoc(
+          doc(db, 'users', userId, 'workoutSessions', sessionDocId),
+          { durationMins: newDuration }
+        );
+      } catch (e) {
+        console.error('Failed to save duration:', e);
+      } finally {
+        setSavingDuration(false);
+      }
+    }
   };
 
   const durationLabel = (() => {
-    if (!durationMins) return null;
+    if (!durationMins || durationMins < 1) return null;
     const m = Math.floor(durationMins);
     const s = Math.round((durationMins % 1) * 60);
     return s > 0 ? `${m}m ${s}s` : `${m} mins`;
@@ -298,21 +320,24 @@ export default function WorkoutPosterModal({
                   fontSize: '13px', textAlign: 'center',
                 }} />
               <span style={{ fontSize: '12px', color: '#64748b' }}>sec</span>
-              <button onClick={saveDurationEdit} style={{
+              <button onClick={saveDurationEdit} disabled={savingDuration} style={{
                 marginLeft: 'auto', background: '#10b981', border: 'none',
                 borderRadius: '6px', color: 'white', padding: '4px 10px',
-                fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                fontSize: '12px', cursor: savingDuration ? 'not-allowed' : 'pointer',
+                opacity: savingDuration ? 0.6 : 1,
+                display: 'flex', alignItems: 'center', gap: '4px',
               }}>
-                <Check size={12} /> Done
+                <Check size={12} /> {savingDuration ? '…' : 'Save'}
               </button>
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <span style={{ fontSize: '11px', color: '#64748b' }}>Duration · </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', color: '#64748b' }}>Duration</span>
                 <span style={{ fontSize: '13px', color: durationLabel ? '#f1f5f9' : '#475569', fontWeight: 500 }}>
                   {durationLabel ?? 'not set'}
                 </span>
+                {savingDuration && <span style={{ fontSize: '10px', color: '#10b981' }}>saving…</span>}
               </div>
               <button onClick={() => {
                 setDurationEditMins(String(Math.floor(durationMins ?? 0)));

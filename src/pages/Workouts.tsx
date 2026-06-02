@@ -1072,6 +1072,11 @@ Rules:
                       ) : (
                         <div className="text-[10px] text-slate-400 font-mono">
                           {stats.exerciseCount} exercises · {stats.totalSets} sets
+                          {session.durationMins != null && session.durationMins > 0 && (
+                            <span className="ml-2 text-emerald-500/70">
+                              · {Math.floor(session.durationMins)}m{Math.round((session.durationMins % 1) * 60) > 0 ? ` ${Math.round((session.durationMins % 1) * 60)}s` : ''}
+                            </span>
+                          )}
                           {session.notes && <span className="ml-2 text-slate-600">{session.notes.slice(0, 30)}</span>}
                         </div>
                       )}
