@@ -174,6 +174,20 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           const isFuture = dayDate > todayMidnight;
           const trainVal = workoutDates.has(dateStr) ? 1 : 0;
 
+          // For today: reuse the already-computed values to guarantee
+          // the mini-ring is pixel-perfect in sync with the main rings.
+          if (isToday) {
+            return {
+              dateStr,
+              trainVal,
+              moveVal: Math.min(1, stepsToday / stepsGoal),
+              trackVal: totalHabits > 0 ? Math.min(1, habitsDoneToday / totalHabits) : 0,
+              fuelVal: Math.min(1, totalCalories / calorieGoal),
+              isToday: true,
+              isFuture: false,
+            };
+          }
+
           const reads: Promise<any>[] = [
             getDoc(doc(db, 'users', uid, 'nutritionLogs', dateStr)),
             ...(stepsHabit
