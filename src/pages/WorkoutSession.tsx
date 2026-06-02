@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -126,6 +126,10 @@ export default function WorkoutSession() {
   const [isAddingExercise, setIsAddingExercise] = useState(false);
   const [newExerciseName, setNewExerciseName] = useState('');
 
+  // --- Timer (seconds precision) ---
+  const startTimeRef = useRef<number>(Date.now());
+  const [elapsedSecs, setElapsedSecs] = useState(0);
+
   // --- Last session ghost values ---
   const [lastSessionExercises, setLastSessionExercises] = useState<any[]>([]);
 
@@ -134,6 +138,16 @@ export default function WorkoutSession() {
   const [draftKey, setDraftKey] = useState<string>('');
   const [showPoster, setShowPoster] = useState(false);
   const [savedSessionData, setSavedSessionData] = useState<{ template: string; date: string; exercises: any[]; durationMins?: number } | null>(null);
+
+  // --- Timer effect — 1s interval ---
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setElapsedSecs(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const timerDisplay = `${String(Math.floor(elapsedSecs / 60)).padStart(2, '0')}:${String(elapsedSecs % 60).padStart(2, '0')}`;
 
   // Helper: get last session placeholder value
   const getLastValue = useCallback(
@@ -144,7 +158,6 @@ export default function WorkoutSession() {
       );
       if (!ex?.sets?.[setIndex]) return '';
       const val = ex.sets[setIndex][field];
-      // stored as number in Firestore, display as string
       if (val === null || val === undefined || val === '') return '';
       return String(val);
     },
@@ -157,7 +170,6 @@ export default function WorkoutSession() {
     const editSession = location.state?.editSession;
 
     if (editSession) {
-      // Edit mode — no draft restore needed
       setEditingSession(editSession);
       setTemplate(editSession.template);
       setSessionDate(editSession.date || new Date().toISOString().split('T')[0]);
@@ -171,7 +183,6 @@ export default function WorkoutSession() {
         })) || []
       );
     } else if (location.state?.aiWorkout) {
-      // AI suggested workout
       loadAiSuggestedWorkout();
     } else if (templateType === 'custom' && location.state?.customWorkout) {
       const customWorkout = location.state.customWorkout;
@@ -201,7 +212,6 @@ export default function WorkoutSession() {
     }
   }, [location.state]);
 
-  // Load draft (if any) then last session ghost values
   const initWithDraftAndLastSession = async (
     initialExercises: Exercise[],
     templateName: string,
@@ -212,7 +222,6 @@ export default function WorkoutSession() {
       return;
     }
 
-    // 1. Try restoring draft
     let restoredFromDraft = false;
     try {
       const draftRef = doc(db, 'users', user.uid, 'draftSessions', key);
@@ -228,17 +237,13 @@ export default function WorkoutSession() {
           restoredFromDraft = true;
         }
       }
-    } catch (_) {
-      // silent — draft is best-effort
-    }
+    } catch (_) {}
 
     if (!restoredFromDraft) {
       setExercises(initialExercises);
     }
 
-    // 2. Fetch last completed session for ghost placeholders
     try {
-      // Try with orderBy first (requires Firestore index)
       let lastExercises: any[] = [];
       try {
         const q = query(
@@ -252,7 +257,6 @@ export default function WorkoutSession() {
           lastExercises = snap.docs[0].data().exercises || [];
         }
       } catch (_indexErr) {
-        // Fallback: no orderBy, sort client-side
         const q2 = query(
           collection(db, 'users', user.uid, 'workoutSessions'),
           where('template', '==', templateName.toLowerCase().replace(/\s+/g, '')),
@@ -271,12 +275,9 @@ export default function WorkoutSession() {
         }
       }
       setLastSessionExercises(lastExercises);
-    } catch (_) {
-      // silent — ghost values are best-effort
-    }
+    } catch (_) {}
   };
 
-  // --- Load AI suggested workout ---
   const loadAiSuggestedWorkout = async () => {
     if (!user) return;
     try {
@@ -297,15 +298,12 @@ export default function WorkoutSession() {
         );
         if (draft.sessionDate) setSessionDate(draft.sessionDate);
       }
-    } catch (_) {
-      // silent
-    }
+    } catch (_) {}
   };
 
-  // --- Auto-save draft on every exercises/sessionDate change ---
+  // --- Auto-save draft ---
   useEffect(() => {
     if (!user || !draftKey || exercises.length === 0) return;
-
     setAutoSaveStatus('saving');
     const timer = setTimeout(async () => {
       try {
@@ -320,8 +318,7 @@ export default function WorkoutSession() {
       } catch (_) {
         setAutoSaveStatus('idle');
       }
-    }, 1200); // debounce 1.2s
-
+    }, 1200);
     return () => clearTimeout(timer);
   }, [exercises, sessionDate]);
 
@@ -453,19 +450,19 @@ export default function WorkoutSession() {
 
       await bumpDataVersion(user.uid);
       await bumpDataVersion(user.uid);
-      // Clear draft on successful save
+
       if (draftKey) {
         try {
           await deleteDoc(doc(db, 'users', user.uid, 'draftSessions', draftKey));
-        } catch (_) {
-          // silent
-        }
+        } catch (_) {}
       }
 
+      const durationMins = elapsedSecs / 60;
       setSavedSessionData({
         template,
         date: sessionDate,
         exercises,
+        durationMins,
       });
       setShowPoster(true);
     } catch (error) {
@@ -491,7 +488,11 @@ export default function WorkoutSession() {
               Back
             </Button>
           </div>
-          <h1 className="text-2xl font-bold text-white">{template}</h1>
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl font-bold text-white">{template}</h1>
+            {/* Live timer */}
+            <span className="text-sm font-mono text-emerald-400">{timerDisplay}</span>
+          </div>
 
           {/* Auto-save status indicator */}
           {!editingSession && (
@@ -534,7 +535,7 @@ export default function WorkoutSession() {
           />
         </div>
 
-        {/* Last session banner — only show when ghost data is available */}
+        {/* Last session banner */}
         {lastSessionExercises.length > 0 && (
           <div
             style={{
@@ -566,24 +567,20 @@ export default function WorkoutSession() {
                     onClick={() => moveExercise(index, 'up')}
                     disabled={index === 0}
                     style={{
-                      background: 'none',
-                      border: 'none',
+                      background: 'none', border: 'none',
                       color: index === 0 ? '#374151' : '#6b7280',
                       cursor: index === 0 ? 'default' : 'pointer',
-                      padding: '2px 4px',
-                      fontSize: '12px',
+                      padding: '2px 4px', fontSize: '12px',
                     }}
                   >▲</button>
                   <button
                     onClick={() => moveExercise(index, 'down')}
                     disabled={index === exercises.length - 1}
                     style={{
-                      background: 'none',
-                      border: 'none',
+                      background: 'none', border: 'none',
                       color: index === exercises.length - 1 ? '#374151' : '#6b7280',
                       cursor: index === exercises.length - 1 ? 'default' : 'pointer',
-                      padding: '2px 4px',
-                      fontSize: '12px',
+                      padding: '2px 4px', fontSize: '12px',
                     }}
                   >▼</button>
                 </div>
@@ -612,10 +609,6 @@ export default function WorkoutSession() {
                       value={set.reps}
                       onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
                       className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
-                      style={{
-                        // ghost placeholder color: emerald-tinted grey so it's clearly "last time"
-                        color: set.reps === '' ? undefined : 'white',
-                      }}
                     />
                     {(exercise.hasWeight !== false) && (
                       <input
@@ -669,19 +662,10 @@ export default function WorkoutSession() {
                 className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
                 autoFocus
               />
-              <Button
-                onClick={addExercise}
-                size="sm"
-                className="bg-emerald-500 hover:bg-emerald-600 text-white"
-              >
+              <Button onClick={addExercise} size="sm" className="bg-emerald-500 hover:bg-emerald-600 text-white">
                 <Check className="w-4 h-4" />
               </Button>
-              <Button
-                onClick={cancelAddExercise}
-                variant="ghost"
-                size="sm"
-                className="text-slate-400 hover:text-white"
-              >
+              <Button onClick={cancelAddExercise} variant="ghost" size="sm" className="text-slate-400 hover:text-white">
                 <Trash2 className="w-4 h-4" />
               </Button>
             </div>
@@ -705,6 +689,7 @@ export default function WorkoutSession() {
           template={savedSessionData.template}
           sessionDate={savedSessionData.date}
           exercises={savedSessionData.exercises}
+          durationMins={savedSessionData.durationMins}
         />
       )}
     </div>
