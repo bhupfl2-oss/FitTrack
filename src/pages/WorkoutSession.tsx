@@ -446,7 +446,7 @@ export default function WorkoutSession() {
           ...exercise,
           sets: exercise.sets.map(set => ({
             reps: parseInt(set.reps) || 0,
-            weight: set.weight == null || set.weight.trim() === '' ? null : (parseFloat(set.weight) || null),
+            weight: set.weight == null || set.weight === '' ? null : (parseFloat(set.weight) || null),
           })),
         })),
         type: 'workout',
