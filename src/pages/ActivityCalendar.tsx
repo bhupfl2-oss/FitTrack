@@ -122,11 +122,7 @@ export default function ActivityCalendar() {
     try {
       // Fetch workouts, habits, nutrition, body in parallel
       const [workoutSnap, habitsSnap, profileSnap] = await Promise.all([
-        getDocs(query(
-          collection(db, 'users', user!.uid, 'workoutSessions'),
-          where('date', '>=', startStr),
-          where('date', '<=', endStr)
-        )),
+        getDocs(collection(db, 'users', user!.uid, 'workoutSessions')),
         getDocs(collection(db, 'users', user!.uid, 'habits')),
         getDoc(doc(db, 'users', user!.uid, 'profile', 'data')),
       ]);
@@ -138,11 +134,12 @@ export default function ActivityCalendar() {
       const stepsGoal = stepsHabit?.targetValue || stepsHabit?.target || 8000;
       const totalHabits = habits.length;
 
-      // Build workout map
+      // Build workout map — handle both 'date' and legacy 'sessionDate' fields
       const workoutMap: Record<string, any> = {};
       workoutSnap.docs.forEach(d => {
         const data = d.data() as any;
-        workoutMap[data.date] = data;
+        const key = data.date ?? (data.sessionDate ? String(data.sessionDate).split('T')[0] : null);
+        if (key && key >= startStr && key <= endStr) workoutMap[key] = data;
       });
 
       // Fetch nutrition logs for the month
@@ -170,7 +167,13 @@ export default function ActivityCalendar() {
           logSnap.docs.forEach(d => {
             const data = d.data() as any;
             const logDate = data.date || d.id;
-            habitLogsMap[habit.id][logDate] = true;
+            const val = data.value ?? 0;
+            const target = habit.targetValue ?? 1;
+            const goalType = habit.goalType ?? 'daily';
+            const done = goalType === 'daily' ? val >= 1
+              : ['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType) ? val >= target
+              : val >= 1;
+            habitLogsMap[habit.id][logDate] = done;
             if (habit.name?.toLowerCase().includes('step')) {
               stepsMap[logDate] = data.value || data.steps || 0;
             }
