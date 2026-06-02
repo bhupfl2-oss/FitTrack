@@ -137,7 +137,13 @@ export default function WorkoutSession() {
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [draftKey, setDraftKey] = useState<string>('');
   const [showPoster, setShowPoster] = useState(false);
-  const [savedSessionData, setSavedSessionData] = useState<{ template: string; date: string; exercises: any[]; durationMins?: number } | null>(null);
+  const [savedSessionData, setSavedSessionData] = useState<{
+    template: string;
+    date: string;
+    exercises: any[];
+    durationMins?: number;
+    sessionDocId?: string; // Firestore doc ID for duration writeback
+  } | null>(null);
 
   // --- Timer effect — 1s interval ---
   useEffect(() => {
@@ -173,6 +179,11 @@ export default function WorkoutSession() {
       setEditingSession(editSession);
       setTemplate(editSession.template);
       setSessionDate(editSession.date || new Date().toISOString().split('T')[0]);
+      if (editSession.durationMins) {
+        const originalSecs = Math.round(editSession.durationMins * 60);
+        startTimeRef.current = Date.now() - originalSecs * 1000;
+        setElapsedSecs(originalSecs);
+      }
       setExercises(
         editSession.exercises?.map((exercise: any, index: number) => ({
           id: `exercise-${index}`,
@@ -426,6 +437,8 @@ export default function WorkoutSession() {
     if (!user) return;
     setIsSaving(true);
     try {
+      const durationMins = elapsedSecs / 60;
+
       const workoutData = cleanData({
         date: sessionDate,
         template: template.toLowerCase().replace(/\s+/g, ''),
@@ -433,23 +446,31 @@ export default function WorkoutSession() {
           ...exercise,
           sets: exercise.sets.map(set => ({
             reps: parseInt(set.reps) || 0,
-            weight: set.weight.trim() === '' ? null : (parseFloat(set.weight) || null),
+            weight: set.weight == null || set.weight.trim() === '' ? null : (parseFloat(set.weight) || null),
           })),
         })),
         type: 'workout',
+        durationMins,  // ← stored in Firestore
       });
 
+      let sessionDocId: string;
       if (editingSession) {
         await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', editingSession.id), workoutData);
+        sessionDocId = editingSession.id;
       } else {
-        await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), {
+        const ref = await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), {
           ...workoutData,
           createdAt: serverTimestamp(),
         });
+        sessionDocId = ref.id;
       }
 
       await bumpDataVersion(user.uid);
-      await bumpDataVersion(user.uid);
+
+      if (editingSession) {
+        navigate('/workouts');
+        return;
+      }
 
       if (draftKey) {
         try {
@@ -457,16 +478,17 @@ export default function WorkoutSession() {
         } catch (_) {}
       }
 
-      const durationMins = elapsedSecs / 60;
       setSavedSessionData({
         template,
         date: sessionDate,
         exercises,
         durationMins,
+        sessionDocId,  // ← passed to poster for writeback
       });
       setShowPoster(true);
     } catch (error) {
       console.error('Error saving workout:', error);
+      alert('Save failed: ' + (error as Error)?.message);
     } finally {
       setIsSaving(false);
     }
@@ -690,6 +712,8 @@ export default function WorkoutSession() {
           sessionDate={savedSessionData.date}
           exercises={savedSessionData.exercises}
           durationMins={savedSessionData.durationMins}
+          sessionDocId={savedSessionData.sessionDocId}
+          userId={user?.uid}
         />
       )}
     </div>

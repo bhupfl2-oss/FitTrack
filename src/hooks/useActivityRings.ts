@@ -51,27 +51,23 @@ interface ActivityRingsState {
 }
 
 function getTodayStr(): string {
-  return (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-function getWeekRange(): { monday: Date; sunday: Date } {
+// Returns week date strings (YYYY-MM-DD) for Mon–Sun of the current week
+// Uses local time only — no UTC conversion
+function getWeekDateStrings(): string[] {
   const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
+  const dayOfWeek = now.getDay(); // 0=Sun
   const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-
   const monday = new Date(now);
   monday.setDate(now.getDate() - daysSinceMonday);
-  monday.setHours(0, 0, 0, 0);
-
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-  sunday.setHours(23, 59, 59, 999);
-
-  return { monday, sunday };
-}
-
-function dateToStr(date: Date): string {
-  return date.toISOString().split('T')[0];
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  });
 }
 
 export function useActivityRings(uid: string | undefined, refreshKey?: number): ActivityRingsState {
@@ -88,9 +84,10 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
 
     const fetchData = async () => {
       const todayStr = getTodayStr();
-      const { monday, sunday } = getWeekRange();
+      const weekDateStrings = getWeekDateStrings(); // ['2026-06-01', ..., '2026-06-07']
+      const mondayStr = weekDateStrings[0];
+      const sundayStr = weekDateStrings[6];
 
-      // Fetch all data in parallel
       const [
         workoutSnapshot,
         habitsSnapshot,
@@ -103,16 +100,13 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
         getDoc(doc(db, 'users', uid, 'profile', 'data')),
       ]);
 
-      // Process habits
       const habits = habitsSnapshot.docs.map(d => ({
         id: d.id,
         ...d.data(),
-      })) as Array<{ id: string; name?: string; target?: number; targetValue?: number }>;
+      })) as Array<{ id: string; name?: string; target?: number; targetValue?: number; goalType?: string }>;
 
-      // Find steps habit
       const stepsHabit = habits.find(h => h.name?.toLowerCase().includes('step'));
 
-      // Fetch steps log if steps habit exists
       let stepsToday = 0;
       let stepsGoal = 8000;
       if (stepsHabit) {
@@ -126,7 +120,6 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
         }
       }
 
-      // Fetch today's habit logs — all in parallel
       const todayHabitLogs = await Promise.all(
         habits.map((habit: any) =>
           getDoc(doc(db, 'users', uid, 'habits', habit.id, 'logs', todayStr))
@@ -144,7 +137,6 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
       }).length;
       const totalHabits = habits.length;
 
-      // Process nutrition/calories
       let totalCalories = 0;
       let calorieGoal = 2000;
       if (nutritionDoc.exists()) {
@@ -154,35 +146,34 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
         calorieGoal = profileDoc.data().calorieGoal ?? 2000;
       }
 
-      // Process workouts - count distinct dates in current week
+      // ── KEY FIX: compare date strings directly, no Date object construction ──
       const workoutDates = new Set<string>();
       workoutSnapshot.docs.forEach(d => {
         const data = d.data();
-        const sessionDate = data.sessionDate ?? data.date;
-        if (sessionDate) {
-          const date = new Date(sessionDate);
-          if (date >= monday && date <= sunday) {
-            workoutDates.add(sessionDate.split('T')[0]);
-          }
+        // Support both 'date' and 'sessionDate' fields, strip time if present
+        const raw = data.date ?? data.sessionDate;
+        if (!raw) return;
+        const dateStr = String(raw).split('T')[0]; // "2026-06-01"
+        if (dateStr >= mondayStr && dateStr <= sundayStr) {
+          workoutDates.add(dateStr);
         }
       });
       const workoutsDone = workoutDates.size;
       const workoutsGoal = 4;
 
-      // Build week days array — all reads fired in parallel
-      const weekDates = Array.from({ length: 7 }, (_, i) => {
-        const dayDate = new Date(monday);
-        dayDate.setDate(monday.getDate() + i);
-        return { dayDate, dateStr: dateToStr(dayDate) };
-      });
+      // Build week days
+      const now = new Date();
+      const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
       const weekDays: WeekDay[] = await Promise.all(
-        weekDates.map(async ({ dayDate, dateStr }) => {
+        weekDateStrings.map(async (dateStr) => {
+          // Reconstruct local date from string for future check only
+          const [y, m, day] = dateStr.split('-').map(Number);
+          const dayDate = new Date(y, m - 1, day);
           const isToday = dateStr === todayStr;
-          const isFuture = dayDate > new Date();
+          const isFuture = dayDate > todayMidnight;
           const trainVal = workoutDates.has(dateStr) ? 1 : 0;
 
-          // Fire all reads for this day in parallel
           const reads: Promise<any>[] = [
             getDoc(doc(db, 'users', uid, 'nutritionLogs', dateStr)),
             ...(stepsHabit
@@ -194,12 +185,12 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           ];
 
           const results = await Promise.all(reads);
-          const nutritionDoc = results[0];
+          const nutritionDocDay = results[0];
           const stepsDoc = results[1];
           const habitDocs = results.slice(2);
 
-          const fuelVal = nutritionDoc?.exists()
-            ? Math.min(1, (nutritionDoc.data().totalCalories ?? 0) / calorieGoal)
+          const fuelVal = nutritionDocDay?.exists()
+            ? Math.min(1, (nutritionDocDay.data().totalCalories ?? 0) / calorieGoal)
             : 0;
 
           const moveVal = stepsHabit && stepsDoc?.exists()
@@ -235,7 +226,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           pct: Math.min(100, (stepsToday / stepsGoal) * 100),
           current: stepsToday,
           goal: stepsGoal,
-          label: `${stepsToday.toLocaleString()} / ${stepsGoal.toLocaleString()} ${stepsHabit ? 'steps' : 'steps (no habit)'}`,
+          label: `${stepsToday.toLocaleString()} / ${stepsGoal.toLocaleString()} steps`,
         },
         track: {
           pct: totalHabits > 0 ? Math.min(100, (habitsDoneToday / totalHabits) * 100) : 0,
