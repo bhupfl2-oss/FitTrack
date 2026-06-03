@@ -1077,6 +1077,9 @@ Rules:
                               · {Math.floor(session.durationMins)}m{Math.round((session.durationMins % 1) * 60) > 0 ? ` ${Math.round((session.durationMins % 1) * 60)}s` : ''}
                             </span>
                           )}
+                          {(session as any).caloriesBurned > 0 && (
+                            <span className="ml-2 text-orange-400/70">· {(session as any).caloriesBurned} kcal</span>
+                          )}
                           {session.notes && <span className="ml-2 text-slate-600">{session.notes.slice(0, 30)}</span>}
                         </div>
                       )}

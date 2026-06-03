@@ -4,6 +4,12 @@ import { X, Pencil, Check } from 'lucide-react';
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
+interface AIMuscle {
+  name: string;
+  sets: number;
+  category?: string;
+}
+
 interface WorkoutPosterModalProps {
   open: boolean;
   onDone: () => void;
@@ -16,10 +22,13 @@ interface WorkoutPosterModalProps {
   durationMins?: number;
   weekStreak?: number;
   totalWeeklyKm?: number;
-  sessionDocId?: string;  // Firestore doc ID for duration writeback
+  sessionDocId?: string;
   userId?: string;
+  aiMuscles?: AIMuscle[];          // from AI analysis
+  caloriesBurned?: number;         // from AI analysis
 }
 
+// Fallback static muscle map (used only when AI hasn't returned yet)
 const MUSCLE_MAP: Record<string, string[]> = {
   chest: ['bench press', 'incline bench', 'flat bench', 'dumbbell press', 'fly', 'chest dip', 'pushup', 'cable fly', 'push up'],
   shoulders: ['overhead press', 'lateral raise', 'front raise', 'arnold press', 'shoulder press'],
@@ -33,19 +42,16 @@ const MUSCLE_MAP: Record<string, string[]> = {
   core: ['plank', 'crunch', 'ab wheel', 'russian twist', 'leg raise', 'mountain climber'],
 };
 
-const computeMuscles = (exercises: WorkoutPosterModalProps['exercises'], template: string) => {
+const computeMusclesFallback = (
+  exercises: WorkoutPosterModalProps['exercises'],
+  template: string
+): Array<[string, number]> => {
   const counts: Record<string, number> = {};
   const tl = template.toLowerCase();
-
-  if (tl.includes('push')) {
-    counts['chest'] = 0; counts['shoulders'] = 0; counts['triceps'] = 0;
-  } else if (tl.includes('pull')) {
-    counts['back'] = 0; counts['biceps'] = 0;
-  } else if (tl.includes('leg') || tl.includes('lower')) {
-    counts['quads'] = 0; counts['hamstrings'] = 0; counts['glutes'] = 0; counts['calves'] = 0;
-  } else if (tl.includes('upper')) {
-    counts['chest'] = 0; counts['back'] = 0; counts['shoulders'] = 0;
-  }
+  if (tl.includes('push')) { counts['chest'] = 0; counts['shoulders'] = 0; counts['triceps'] = 0; }
+  else if (tl.includes('pull')) { counts['back'] = 0; counts['biceps'] = 0; }
+  else if (tl.includes('leg') || tl.includes('lower')) { counts['quads'] = 0; counts['hamstrings'] = 0; counts['glutes'] = 0; counts['calves'] = 0; }
+  else if (tl.includes('upper')) { counts['chest'] = 0; counts['back'] = 0; counts['shoulders'] = 0; }
 
   for (const ex of exercises) {
     const n = ex.name.toLowerCase();
@@ -58,16 +64,13 @@ const computeMuscles = (exercises: WorkoutPosterModalProps['exercises'], templat
       }
     }
   }
-
-  return Object.entries(counts)
-    .filter(([, v]) => v > 0)
-    .sort((a, b) => b[1] - a[1]);
+  return Object.entries(counts).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
 };
 
 export default function WorkoutPosterModal({
   open, onDone, template, sessionDate, exercises,
   durationMins: durationMinsProp, weekStreak, totalWeeklyKm,
-  sessionDocId, userId,
+  sessionDocId, userId, aiMuscles, caloriesBurned,
 }: WorkoutPosterModalProps) {
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -82,14 +85,20 @@ export default function WorkoutPosterModal({
 
   if (!open) return null;
 
-  const muscles = computeMuscles(exercises, template);
+  // Use AI muscles when available, fall back to static map
+  const musclesData: Array<[string, number]> = aiMuscles && aiMuscles.length > 0
+    ? aiMuscles.map(m => [m.name, m.sets] as [string, number])
+    : computeMusclesFallback(exercises, template);
+
+  const isAIAnalyzed = !!(aiMuscles && aiMuscles.length > 0);
+
   const totalExercises = exercises.filter(ex =>
     ex.sets.some(s => (parseInt(String(s.reps)) || 0) > 0)
   ).length;
   const totalSets = exercises.reduce((sum, ex) =>
     sum + ex.sets.filter(s => (parseInt(String(s.reps)) || 0) > 0).length, 0
   );
-  const maxSets = Math.max(...muscles.map(([, v]) => v), 1);
+  const maxSets = Math.max(...musclesData.map(([, v]) => v), 1);
 
   const saveDurationEdit = async () => {
     const m = parseInt(durationEditMins) || 0;
@@ -97,20 +106,12 @@ export default function WorkoutPosterModal({
     const newDuration = m + s / 60;
     setDurationMins(newDuration);
     setEditingDuration(false);
-
-    // Write back to Firestore if we have the doc reference
     if (sessionDocId && userId) {
       setSavingDuration(true);
       try {
-        await updateDoc(
-          doc(db, 'users', userId, 'workoutSessions', sessionDocId),
-          { durationMins: newDuration }
-        );
-      } catch (e) {
-        console.error('Failed to save duration:', e);
-      } finally {
-        setSavingDuration(false);
-      }
+        await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), { durationMins: newDuration });
+      } catch (e) { console.error('Failed to save duration:', e); }
+      finally { setSavingDuration(false); }
     }
   };
 
@@ -125,9 +126,7 @@ export default function WorkoutPosterModal({
     if (!posterRef.current) return;
     setSharing(true);
     try {
-      const canvas = await html2canvas(posterRef.current, {
-        backgroundColor: '#0f172a', scale: 3, useCORS: true, logging: false,
-      });
+      const canvas = await html2canvas(posterRef.current, { backgroundColor: '#0f172a', scale: 3, useCORS: true, logging: false });
       canvas.toBlob(async (blob) => {
         if (!blob) return;
         const file = new File([blob], 'fittrack-workout.png', { type: 'image/png' });
@@ -135,86 +134,57 @@ export default function WorkoutPosterModal({
           try { await navigator.share({ files: [file], title: 'FitTrack Workout' }); } catch {}
         } else {
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = 'fittrack-workout.png'; a.click();
+          const a = document.createElement('a'); a.href = url; a.download = 'fittrack-workout.png'; a.click();
           URL.revokeObjectURL(url);
         }
         setSharing(false);
       }, 'image/png');
-    } catch (e) {
-      console.error('Share failed:', e);
-      setSharing(false);
-    }
+    } catch (e) { console.error('Share failed:', e); setSharing(false); }
   };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (ev) => setUserPhoto(ev.target?.result as string);
-      reader.readAsDataURL(file);
-    }
+    if (file) { const r = new FileReader(); r.onload = ev => setUserPhoto(ev.target?.result as string); r.readAsDataURL(file); }
   };
 
-  const formattedDate = new Date(sessionDate + 'T00:00:00')
-    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-  const shortDate = new Date(sessionDate + 'T00:00:00')
-    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const formattedDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const shortDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
+  // Stats row: Exercises | Sets | Calories (if available) or km/streak
   const statsRow = [
     { val: totalExercises, label: 'Exercises' },
     { val: totalSets, label: 'Sets' },
-    totalWeeklyKm != null && totalWeeklyKm > 0
-      ? { val: totalWeeklyKm.toFixed(1), label: 'km this week' }
-      : { val: weekStreak ?? '—', label: 'Streak' },
+    caloriesBurned && caloriesBurned > 0
+      ? { val: caloriesBurned, label: 'kcal' }
+      : totalWeeklyKm != null && totalWeeklyKm > 0
+        ? { val: totalWeeklyKm.toFixed(1), label: 'km this week' }
+        : { val: weekStreak ?? '—', label: 'Streak' },
   ];
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 9999,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '20px', overflowY: 'auto',
-    }}>
-      <button onClick={onDone} style={{
-        position: 'absolute', top: '20px', right: '20px',
-        width: '36px', height: '36px', borderRadius: '50%',
-        backgroundColor: 'rgba(255,255,255,0.08)', border: 'none',
-        color: 'white', cursor: 'pointer',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
+    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 9999, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', overflowY: 'auto' }}>
+      <button onClick={onDone} style={{ position: 'absolute', top: '20px', right: '20px', width: '36px', height: '36px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.08)', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <X size={18} />
       </button>
 
       {/* Poster */}
-      <div ref={posterRef} style={{
-        width: '300px', minHeight: '500px', backgroundColor: '#0f172a',
-        borderRadius: '20px', overflow: 'hidden', position: 'relative', flexShrink: 0,
-      }}>
+      <div ref={posterRef} style={{ width: '300px', minHeight: '500px', backgroundColor: '#0f172a', borderRadius: '20px', overflow: 'hidden', position: 'relative', flexShrink: 0 }}>
         <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
           {userPhoto ? (
             <>
               <img src={userPhoto} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              <div style={{
-                position: 'absolute', inset: 0,
-                background: 'linear-gradient(180deg, rgba(15,23,42,0.65) 0%, rgba(15,23,42,0.82) 50%, rgba(15,23,42,0.96) 100%)',
-              }} />
+              <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(15,23,42,0.65) 0%, rgba(15,23,42,0.82) 50%, rgba(15,23,42,0.96) 100%)' }} />
             </>
           ) : (
             <svg width="300" height="500" viewBox="0 0 300 500" xmlns="http://www.w3.org/2000/svg" style={{ position: 'absolute', inset: 0 }}>
-              {Array.from({ length: 20 }).map((_, i) => (
-                <line key={i} x1={-50 + i * 30} y1="0" x2={i * 30 + 200} y2="500"
-                  stroke="#10b981" strokeWidth="0.6" opacity="0.07" />
-              ))}
+              {Array.from({ length: 20 }).map((_, i) => <line key={i} x1={-50+i*30} y1="0" x2={i*30+200} y2="500" stroke="#10b981" strokeWidth="0.6" opacity="0.07" />)}
               <ellipse cx="260" cy="420" rx="120" ry="100" fill="#10b981" opacity="0.04" />
               <ellipse cx="40" cy="80" rx="80" ry="60" fill="#10b981" opacity="0.03" />
             </svg>
           )}
         </div>
 
-        <div style={{
-          position: 'relative', zIndex: 1, padding: '24px',
-          display: 'flex', flexDirection: 'column', minHeight: '500px',
-        }}>
+        <div style={{ position: 'relative', zIndex: 1, padding: '24px', display: 'flex', flexDirection: 'column', minHeight: '500px' }}>
           {/* Header */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
             <svg width="28" height="28" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
@@ -222,11 +192,7 @@ export default function WorkoutPosterModal({
               <polyline points="7,24 16,8 25,24" fill="none" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"/>
               <line x1="16" y1="8" x2="16" y2="24" stroke="white" strokeWidth="3.5" strokeLinecap="round"/>
             </svg>
-            <div style={{
-              backgroundColor: 'rgba(16,185,129,0.18)', color: '#10b981',
-              padding: '4px 12px', borderRadius: '20px',
-              fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em',
-            }}>{template}</div>
+            <div style={{ backgroundColor: 'rgba(16,185,129,0.18)', color: '#10b981', padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{template}</div>
             <div style={{ color: '#94a3b8', fontSize: '11px', fontWeight: 500 }}>{shortDate}</div>
           </div>
 
@@ -236,9 +202,7 @@ export default function WorkoutPosterModal({
               <>
                 <div style={{ fontSize: '40px', fontWeight: 700, color: '#f1f5f9', lineHeight: 1, marginBottom: '6px' }}>
                   {durationLabel.split(' ')[0]}
-                  <span style={{ fontSize: '18px', color: '#64748b', marginLeft: '4px' }}>
-                    {durationLabel.split(' ').slice(1).join(' ')}
-                  </span>
+                  <span style={{ fontSize: '18px', color: '#64748b', marginLeft: '4px' }}>{durationLabel.split(' ').slice(1).join(' ')}</span>
                 </div>
                 <div style={{ fontSize: '13px', color: '#64748b' }}>{formattedDate}</div>
               </>
@@ -248,20 +212,32 @@ export default function WorkoutPosterModal({
             <div style={{ height: '1px', background: 'linear-gradient(90deg, rgba(16,185,129,0.4), transparent)', marginTop: '14px' }} />
           </div>
 
-          {/* Muscles */}
-          {muscles.length > 0 && (
+          {/* Muscles worked */}
+          {musclesData.length > 0 && (
             <div style={{ marginBottom: '20px' }}>
-              <div style={{
-                fontSize: '10px', fontWeight: 600, color: '#475569',
-                letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '12px',
-              }}>Muscles Worked</div>
-              {muscles.slice(0, 5).map(([muscle, sets], idx) => {
-                const barColor = idx < 2 ? '#ef4444' : '#f97316';
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 600, color: '#475569', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  Muscles Worked
+                </div>
+                {isAIAnalyzed && (
+                  <div style={{ fontSize: '9px', color: '#10b981', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: '20px', padding: '1px 6px' }}>
+                    ✦ AI
+                  </div>
+                )}
+                {!isAIAnalyzed && (
+                  <div style={{ fontSize: '9px', color: '#475569', fontStyle: 'italic' }}>analyzing…</div>
+                )}
+              </div>
+              {musclesData.slice(0, 5).map(([muscle, sets], idx) => {
+                const isOther = aiMuscles?.find(m => m.name === muscle)?.category === 'Other';
+                const barColor = isOther ? '#64748b' : idx < 2 ? '#ef4444' : '#f97316';
                 const pct = (sets / maxSets) * 100;
                 return (
                   <div key={muscle} style={{ marginBottom: '12px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0', textTransform: 'capitalize' }}>{muscle}</span>
+                      <span style={{ fontSize: '13px', fontWeight: 600, color: isOther ? '#94a3b8' : '#e2e8f0' }}>
+                        {muscle}{isOther ? ' *' : ''}
+                      </span>
                       <span style={{ fontSize: '12px', color: '#94a3b8' }}>{sets} set{sets !== 1 ? 's' : ''}</span>
                     </div>
                     <div style={{ height: '6px', backgroundColor: 'rgba(30,41,59,0.9)', borderRadius: '3px', overflow: 'hidden' }}>
@@ -275,7 +251,7 @@ export default function WorkoutPosterModal({
 
           <div style={{ flex: 1 }} />
 
-          {/* Stats */}
+          {/* Stats row */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', marginBottom: '16px' }}>
             {statsRow.map(({ val, label }) => (
               <div key={label} style={{ textAlign: 'center' }}>
@@ -286,9 +262,7 @@ export default function WorkoutPosterModal({
           </div>
 
           <div style={{ paddingTop: '12px', borderTop: '1px solid rgba(255,255,255,0.06)', textAlign: 'center' }}>
-            <div style={{ fontSize: '10px', color: 'rgba(100,116,139,0.6)', letterSpacing: '0.05em' }}>
-              fittrack-nine-cyan.vercel.app
-            </div>
+            <div style={{ fontSize: '10px', color: 'rgba(100,116,139,0.6)', letterSpacing: '0.05em' }}>fittrack-nine-cyan.vercel.app</div>
           </div>
         </div>
       </div>
@@ -296,37 +270,34 @@ export default function WorkoutPosterModal({
       {/* Controls */}
       <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '300px' }}>
 
-        {/* Duration edit row */}
-        <div style={{
-          width: '100%', background: 'rgba(255,255,255,0.04)',
-          border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '10px 14px',
-        }}>
+        {/* AI analysis status */}
+        {!isAIAnalyzed && (
+          <div style={{ width: '100%', background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.15)', borderRadius: '10px', padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #10b981', borderTopColor: 'transparent', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+            <span style={{ fontSize: '11px', color: '#10b981' }}>Analyzing muscles & calories…</span>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        )}
+        {isAIAnalyzed && caloriesBurned && caloriesBurned > 0 && (
+          <div style={{ width: '100%', background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.15)', borderRadius: '10px', padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: '11px', color: '#64748b' }}>✦ AI Analysis complete</span>
+            <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600 }}>~{caloriesBurned} kcal burned</span>
+          </div>
+        )}
+
+        {/* Duration edit */}
+        <div style={{ width: '100%', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '10px 14px' }}>
           {editingDuration ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontSize: '12px', color: '#64748b', flexShrink: 0 }}>Duration</span>
-              <input type="number" min="0" value={durationEditMins}
-                onChange={e => setDurationEditMins(e.target.value)}
-                style={{
-                  width: '52px', background: '#1e293b', border: '1px solid #334155',
-                  borderRadius: '6px', color: 'white', padding: '4px 8px',
-                  fontSize: '13px', textAlign: 'center',
-                }} />
+              <input type="number" min="0" value={durationEditMins} onChange={e => setDurationEditMins(e.target.value)}
+                style={{ width: '52px', background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: 'white', padding: '4px 8px', fontSize: '13px', textAlign: 'center' }} />
               <span style={{ fontSize: '12px', color: '#64748b' }}>min</span>
-              <input type="number" min="0" max="59" value={durationEditSecs}
-                onChange={e => setDurationEditSecs(e.target.value)}
-                style={{
-                  width: '52px', background: '#1e293b', border: '1px solid #334155',
-                  borderRadius: '6px', color: 'white', padding: '4px 8px',
-                  fontSize: '13px', textAlign: 'center',
-                }} />
+              <input type="number" min="0" max="59" value={durationEditSecs} onChange={e => setDurationEditSecs(e.target.value)}
+                style={{ width: '52px', background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: 'white', padding: '4px 8px', fontSize: '13px', textAlign: 'center' }} />
               <span style={{ fontSize: '12px', color: '#64748b' }}>sec</span>
-              <button onClick={saveDurationEdit} disabled={savingDuration} style={{
-                marginLeft: 'auto', background: '#10b981', border: 'none',
-                borderRadius: '6px', color: 'white', padding: '4px 10px',
-                fontSize: '12px', cursor: savingDuration ? 'not-allowed' : 'pointer',
-                opacity: savingDuration ? 0.6 : 1,
-                display: 'flex', alignItems: 'center', gap: '4px',
-              }}>
+              <button onClick={saveDurationEdit} disabled={savingDuration}
+                style={{ marginLeft: 'auto', background: '#10b981', border: 'none', borderRadius: '6px', color: 'white', padding: '4px 10px', fontSize: '12px', cursor: savingDuration ? 'not-allowed' : 'pointer', opacity: savingDuration ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <Check size={12} /> {savingDuration ? '…' : 'Save'}
               </button>
             </div>
@@ -334,20 +305,11 @@ export default function WorkoutPosterModal({
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <span style={{ fontSize: '11px', color: '#64748b' }}>Duration</span>
-                <span style={{ fontSize: '13px', color: durationLabel ? '#f1f5f9' : '#475569', fontWeight: 500 }}>
-                  {durationLabel ?? 'not set'}
-                </span>
+                <span style={{ fontSize: '13px', color: durationLabel ? '#f1f5f9' : '#475569', fontWeight: 500 }}>{durationLabel ?? 'not set'}</span>
                 {savingDuration && <span style={{ fontSize: '10px', color: '#10b981' }}>saving…</span>}
               </div>
-              <button onClick={() => {
-                setDurationEditMins(String(Math.floor(durationMins ?? 0)));
-                setDurationEditSecs(String(Math.round(((durationMins ?? 0) % 1) * 60)));
-                setEditingDuration(true);
-              }} style={{
-                background: 'none', border: 'none', color: '#10b981',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
-                fontSize: '12px', padding: '2px 6px',
-              }}>
+              <button onClick={() => { setDurationEditMins(String(Math.floor(durationMins ?? 0))); setDurationEditSecs(String(Math.round(((durationMins ?? 0) % 1) * 60))); setEditingDuration(true); }}
+                style={{ background: 'none', border: 'none', color: '#10b981', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', padding: '2px 6px' }}>
                 <Pencil size={12} /> Edit
               </button>
             </div>
@@ -355,33 +317,19 @@ export default function WorkoutPosterModal({
         </div>
 
         {/* Photo */}
-        <button onClick={() => fileInputRef.current?.click()} style={{
-          width: '100%', padding: '10px 20px', borderRadius: '10px',
-          backgroundColor: userPhoto ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.05)',
-          border: userPhoto ? '1px solid rgba(16,185,129,0.3)' : '1px solid rgba(255,255,255,0.1)',
-          color: userPhoto ? '#10b981' : '#e2e8f0', fontSize: '13px', cursor: 'pointer',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
-        }}>
+        <button onClick={() => fileInputRef.current?.click()} style={{ width: '100%', padding: '10px 20px', borderRadius: '10px', backgroundColor: userPhoto ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.05)', border: userPhoto ? '1px solid rgba(16,185,129,0.3)' : '1px solid rgba(255,255,255,0.1)', color: userPhoto ? '#10b981' : '#e2e8f0', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
           📷 {userPhoto ? 'Change photo' : 'Add your photo'}
         </button>
         <input ref={fileInputRef} type="file" accept="image/*" onChange={handlePhotoUpload} style={{ display: 'none' }} />
 
         {/* Actions */}
         <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
-          <button onClick={handleShare} disabled={sharing} style={{
-            flex: 1, padding: '13px', borderRadius: '12px',
-            backgroundColor: '#10b981', border: 'none', color: 'white',
-            fontSize: '14px', fontWeight: 600,
-            cursor: sharing ? 'not-allowed' : 'pointer', opacity: sharing ? 0.7 : 1,
-          }}>
+          <button onClick={handleShare} disabled={sharing} style={{ flex: 1, padding: '13px', borderRadius: '12px', backgroundColor: '#10b981', border: 'none', color: 'white', fontSize: '14px', fontWeight: 600, cursor: sharing ? 'not-allowed' : 'pointer', opacity: sharing ? 0.7 : 1 }}>
             {sharing ? 'Sharing...' : 'Share poster'}
           </button>
-          <button onClick={onDone} style={{
-            padding: '13px 24px', borderRadius: '12px',
-            backgroundColor: 'rgba(255,255,255,0.05)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            color: '#e2e8f0', fontSize: '14px', cursor: 'pointer',
-          }}>Done</button>
+          <button onClick={onDone} style={{ padding: '13px 24px', borderRadius: '12px', backgroundColor: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#e2e8f0', fontSize: '14px', cursor: 'pointer' }}>
+            Done
+          </button>
         </div>
       </div>
     </div>

@@ -111,6 +111,66 @@ const workoutTemplates: Record<string, WorkoutTemplate> = {
   },
 };
 
+// ── AI workout analysis ────────────────────────────────────────────────────
+async function analyzeWorkoutWithAI(
+  exerciseList: Array<{ name: string; sets: Array<{ reps: number; weight: number | null }> }>,
+  templateName: string,
+  durationMins: number
+): Promise<{ muscles: Array<{ name: string; sets: number; category?: string }>; caloriesBurned: number } | null> {
+  try {
+    const exerciseSummary = exerciseList
+      .filter(ex => ex.sets.some(s => s.reps > 0))
+      .map(ex => {
+        const validSets = ex.sets.filter(s => s.reps > 0);
+        const avgWeight = validSets.reduce((s, v) => s + (v.weight || 0), 0) / validSets.length;
+        return `${ex.name}: ${validSets.length} sets × ~${Math.round(validSets.reduce((s,v) => s+v.reps,0)/validSets.length)} reps${avgWeight > 0 ? ` @ ${avgWeight.toFixed(1)}kg` : ''}`;
+      })
+      .join('\n');
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 600,
+        messages: [{
+          role: 'user',
+          content: `Analyze this ${templateName} workout and return muscle groups worked and calories burned.
+
+Exercises completed:
+${exerciseSummary}
+
+Duration: ${Math.round(durationMins)} minutes
+
+Rules:
+- Map every exercise to its PRIMARY muscle group(s). Use standard names: Chest, Back, Shoulders, Biceps, Triceps, Quads, Hamstrings, Glutes, Calves, Core, Cardio
+- If an exercise name is unusual or custom, make your best guess and set category to "Other"
+- Count SETS per muscle group (an exercise can contribute to multiple muscles)
+- Estimate calories burned based on exercise intensity, weights used, and duration. Typical strength training burns 200-500 kcal/hour. Be realistic.
+- Warm-ups, stretches, cool-downs: count as Cardio, low calorie contribution
+
+Return ONLY this JSON, no markdown, no other text:
+{"muscles":[{"name":"Chest","sets":9},{"name":"Triceps","sets":6},{"name":"Custom Exercise","sets":3,"category":"Other"}],"caloriesBurned":320}`
+        }],
+      }),
+    });
+
+    if (!response.ok) return null;
+    const data = await response.json();
+    const text = data.content?.[0]?.text || '';
+    const parsed = JSON.parse(text.trim());
+    return parsed;
+  } catch (e) {
+    console.error('AI workout analysis failed:', e);
+    return null;
+  }
+}
+
 export default function WorkoutSession() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -142,7 +202,9 @@ export default function WorkoutSession() {
     date: string;
     exercises: any[];
     durationMins?: number;
-    sessionDocId?: string; // Firestore doc ID for duration writeback
+    sessionDocId?: string;
+    aiMuscles?: Array<{ name: string; sets: number; category?: string }>;
+    caloriesBurned?: number;
   } | null>(null);
 
   // --- Timer effect — 1s interval ---
@@ -155,7 +217,6 @@ export default function WorkoutSession() {
 
   const timerDisplay = `${String(Math.floor(elapsedSecs / 60)).padStart(2, '0')}:${String(elapsedSecs % 60).padStart(2, '0')}`;
 
-  // Helper: get last session placeholder value
   const getLastValue = useCallback(
     (exerciseName: string, setIndex: number, field: 'reps' | 'weight'): string => {
       if (!lastSessionExercises.length) return '';
@@ -170,7 +231,6 @@ export default function WorkoutSession() {
     [lastSessionExercises]
   );
 
-  // --- Initialize workout from template ---
   useEffect(() => {
     const templateType = location.state?.template;
     const editSession = location.state?.editSession;
@@ -190,7 +250,12 @@ export default function WorkoutSession() {
           name: exercise.name,
           hasWeight: exercise.hasWeight,
           note: exercise.note,
-          sets: exercise.sets || [{ reps: '', weight: '' }],
+          sets: exercise.sets
+            ? exercise.sets.map((s: any) => ({
+                reps: s.reps != null ? String(s.reps) : '',
+                weight: s.weight != null ? String(s.weight) : '',
+              }))
+            : [{ reps: '', weight: '' }],
         })) || []
       );
     } else if (location.state?.aiWorkout) {
@@ -204,10 +269,7 @@ export default function WorkoutSession() {
         id: `exercise-${index}`,
         name: exercise.name,
         hasWeight: exercise.hasWeight !== false,
-        sets: Array.from({ length: exercise.defaultSets || 3 }, () => ({
-          reps: '',
-          weight: '',
-        })),
+        sets: Array.from({ length: exercise.defaultSets || 3 }, () => ({ reps: '', weight: '' })),
       }));
       initWithDraftAndLastSession(initialExercises, customWorkout.name, key);
     } else if (templateType && workoutTemplates[templateType]) {
@@ -228,10 +290,7 @@ export default function WorkoutSession() {
     templateName: string,
     key: string
   ) => {
-    if (!user) {
-      setExercises(initialExercises);
-      return;
-    }
+    if (!user) { setExercises(initialExercises); return; }
 
     let restoredFromDraft = false;
     try {
@@ -250,9 +309,7 @@ export default function WorkoutSession() {
       }
     } catch (_) {}
 
-    if (!restoredFromDraft) {
-      setExercises(initialExercises);
-    }
+    if (!restoredFromDraft) setExercises(initialExercises);
 
     try {
       let lastExercises: any[] = [];
@@ -264,9 +321,7 @@ export default function WorkoutSession() {
           limit(1)
         );
         const snap = await getDocs(q);
-        if (!snap.empty) {
-          lastExercises = snap.docs[0].data().exercises || [];
-        }
+        if (!snap.empty) lastExercises = snap.docs[0].data().exercises || [];
       } catch (_indexErr) {
         const q2 = query(
           collection(db, 'users', user.uid, 'workoutSessions'),
@@ -275,13 +330,7 @@ export default function WorkoutSession() {
         );
         const snap2 = await getDocs(q2);
         if (!snap2.empty) {
-          const sorted = snap2.docs
-            .map(d => d.data())
-            .sort((a, b) => {
-              const da = a.date || '';
-              const db_ = b.date || '';
-              return da < db_ ? 1 : -1;
-            });
+          const sorted = snap2.docs.map(d => d.data()).sort((a, b) => (a.date < b.date ? 1 : -1));
           lastExercises = sorted[0]?.exercises || [];
         }
       }
@@ -312,28 +361,19 @@ export default function WorkoutSession() {
     } catch (_) {}
   };
 
-  // --- Auto-save draft ---
   useEffect(() => {
     if (!user || !draftKey || exercises.length === 0) return;
     setAutoSaveStatus('saving');
     const timer = setTimeout(async () => {
       try {
         const draftRef = doc(db, 'users', user.uid, 'draftSessions', draftKey);
-        await setDoc(draftRef, {
-          type: template,
-          exercises,
-          sessionDate,
-          savedAt: new Date().toISOString(),
-        });
+        await setDoc(draftRef, { type: template, exercises, sessionDate, savedAt: new Date().toISOString() });
         setAutoSaveStatus('saved');
-      } catch (_) {
-        setAutoSaveStatus('idle');
-      }
+      } catch (_) { setAutoSaveStatus('idle'); }
     }, 1200);
     return () => clearTimeout(timer);
   }, [exercises, sessionDate]);
 
-  // --- Reorder ---
   const moveExercise = (index: number, direction: 'up' | 'down') => {
     const newExercises = [...exercises];
     const swapIndex = direction === 'up' ? index - 1 : index + 1;
@@ -342,20 +382,13 @@ export default function WorkoutSession() {
     setExercises(newExercises);
   };
 
-  // Show template selection if no template yet
   if (!template || exercises.length === 0) {
     return (
       <div className="min-h-screen bg-slate-950 text-white pb-20">
         <div className="bg-slate-900 border-b border-slate-800">
           <div className="px-6 py-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => navigate('/workouts')}
-              className="text-slate-400 hover:text-white"
-            >
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back
+            <Button variant="ghost" size="sm" onClick={() => navigate('/workouts')} className="text-slate-400 hover:text-white">
+              <ArrowLeft className="w-4 h-4 mr-2" />Back
             </Button>
             <h1 className="text-2xl font-bold text-white mt-2">Choose Workout Template</h1>
           </div>
@@ -363,24 +396,13 @@ export default function WorkoutSession() {
         <div className="p-6">
           <div className="space-y-3">
             {Object.entries(workoutTemplates).map(([key, workout]) => (
-              <button
-                key={key}
-                onClick={() => {
-                  const k = workout.name.replace(/\s+/g, '_');
-                  setTemplate(workout.name);
-                  setDraftKey(k);
-                  const initialExercises = workout.exercises.map((exercise, index) => ({
-                    ...exercise,
-                    id: `exercise-${index}`,
-                  }));
-                  initWithDraftAndLastSession(initialExercises, workout.name, k);
-                }}
-                className="w-full bg-slate-900 border border-slate-800 rounded-lg p-4 text-left hover:bg-slate-800 transition-colors"
-              >
+              <button key={key} onClick={() => {
+                const k = workout.name.replace(/\s+/g, '_');
+                setTemplate(workout.name); setDraftKey(k);
+                initWithDraftAndLastSession(workout.exercises.map((e, i) => ({ ...e, id: `exercise-${i}` })), workout.name, k);
+              }} className="w-full bg-slate-900 border border-slate-800 rounded-lg p-4 text-left hover:bg-slate-800 transition-colors">
                 <h3 className="font-semibold text-white mb-1">{workout.name}</h3>
-                <p className="text-sm text-slate-400">
-                  {workout.exercises.map(ex => ex.name).join(' • ')}
-                </p>
+                <p className="text-sm text-slate-400">{workout.exercises.map(ex => ex.name).join(' • ')}</p>
               </button>
             ))}
           </div>
@@ -389,48 +411,17 @@ export default function WorkoutSession() {
     );
   }
 
-  const addSet = (exerciseId: string) => {
-    setExercises(exercises.map(exercise =>
-      exercise.id === exerciseId
-        ? { ...exercise, sets: [...exercise.sets, { reps: '', weight: '' }] }
-        : exercise
-    ));
-  };
+  const addSet = (exerciseId: string) => setExercises(exercises.map(e => e.id === exerciseId ? { ...e, sets: [...e.sets, { reps: '', weight: '' }] } : e));
 
-  const updateSet = (exerciseId: string, setIndex: number, field: 'reps' | 'weight', value: string) => {
-    setExercises(exercises.map(exercise =>
-      exercise.id === exerciseId
-        ? {
-            ...exercise,
-            sets: exercise.sets.map((set, index) =>
-              index === setIndex ? { ...set, [field]: value } : set
-            ),
-          }
-        : exercise
-    ));
-  };
+  const updateSet = (exerciseId: string, setIndex: number, field: 'reps' | 'weight', value: string) =>
+    setExercises(exercises.map(e => e.id === exerciseId ? { ...e, sets: e.sets.map((s, i) => i === setIndex ? { ...s, [field]: value } : s) } : e));
 
-  const removeExercise = (exerciseId: string) => {
-    setExercises(exercises.filter(exercise => exercise.id !== exerciseId));
-  };
+  const removeExercise = (exerciseId: string) => setExercises(exercises.filter(e => e.id !== exerciseId));
 
   const addExercise = () => {
-    if (newExerciseName.trim()) {
-      const newExercise: Exercise = {
-        id: `exercise-${Date.now()}`,
-        name: newExerciseName.trim(),
-        hasWeight: true,
-        sets: Array.from({ length: 3 }, () => ({ reps: '', weight: '' })),
-      };
-      setExercises([...exercises, newExercise]);
-      setNewExerciseName('');
-      setIsAddingExercise(false);
-    }
-  };
-
-  const cancelAddExercise = () => {
-    setNewExerciseName('');
-    setIsAddingExercise(false);
+    if (!newExerciseName.trim()) return;
+    setExercises([...exercises, { id: `exercise-${Date.now()}`, name: newExerciseName.trim(), hasWeight: true, sets: [{ reps: '', weight: '' }, { reps: '', weight: '' }, { reps: '', weight: '' }] }]);
+    setNewExerciseName(''); setIsAddingExercise(false);
   };
 
   const finishWorkout = async () => {
@@ -439,24 +430,34 @@ export default function WorkoutSession() {
     try {
       const durationMins = elapsedSecs / 60;
 
+      const cleanedExercises = exercises.map(({ id, ...exercise }) => ({
+        ...exercise,
+        sets: exercise.sets.map(set => ({
+          reps: parseInt(set.reps) || 0,
+          weight: set.weight == null || set.weight === '' ? null : (parseFloat(set.weight) || null),
+        })),
+      }));
+
       const workoutData = cleanData({
         date: sessionDate,
         template: template.toLowerCase().replace(/\s+/g, ''),
-        exercises: exercises.map(({ id, ...exercise }) => ({
-          ...exercise,
-          sets: exercise.sets.map(set => ({
-            reps: parseInt(set.reps) || 0,
-            weight: set.weight == null || set.weight === '' ? null : (parseFloat(set.weight) || null),
-          })),
-        })),
+        exercises: cleanedExercises,
         type: 'workout',
-        durationMins,  // ← stored in Firestore
+        durationMins,
       });
 
       let sessionDocId: string;
       if (editingSession) {
+        if (!editingSession.id) {
+          alert('Cannot save: session ID missing');
+          setIsSaving(false);
+          return;
+        }
         await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', editingSession.id), workoutData);
         sessionDocId = editingSession.id;
+        await bumpDataVersion(user.uid);
+        navigate('/workouts');
+        return;
       } else {
         const ref = await addDoc(collection(db, 'users', user.uid, 'workoutSessions'), {
           ...workoutData,
@@ -467,25 +468,28 @@ export default function WorkoutSession() {
 
       await bumpDataVersion(user.uid);
 
-      if (editingSession) {
-        navigate('/workouts');
-        return;
-      }
-
       if (draftKey) {
-        try {
-          await deleteDoc(doc(db, 'users', user.uid, 'draftSessions', draftKey));
-        } catch (_) {}
+        try { await deleteDoc(doc(db, 'users', user.uid, 'draftSessions', draftKey)); } catch (_) {}
       }
 
-      setSavedSessionData({
-        template,
-        date: sessionDate,
-        exercises,
-        durationMins,
-        sessionDocId,  // ← passed to poster for writeback
-      });
+      // Show poster immediately with fallback data
+      setSavedSessionData({ template, date: sessionDate, exercises, durationMins, sessionDocId });
       setShowPoster(true);
+
+      // Fire AI analysis in background — non-blocking
+      analyzeWorkoutWithAI(cleanedExercises, template, durationMins).then(async (result) => {
+        if (!result) return;
+        // Update poster state live
+        setSavedSessionData(prev => prev ? { ...prev, aiMuscles: result.muscles, caloriesBurned: result.caloriesBurned } : prev);
+        // Persist to Firestore
+        try {
+          await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', sessionDocId), {
+            aiMuscles: result.muscles,
+            caloriesBurned: result.caloriesBurned,
+          });
+        } catch (e) { console.error('Failed to save AI analysis:', e); }
+      });
+
     } catch (error) {
       console.error('Error saving workout:', error);
       alert('Save failed: ' + (error as Error)?.message);
@@ -496,127 +500,65 @@ export default function WorkoutSession() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-20">
-      {/* Header */}
       <div className="bg-slate-900 border-b border-slate-800">
         <div className="px-6 py-4">
           <div className="flex items-center justify-between mb-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => navigate('/workouts')}
-              className="text-slate-400 hover:text-white"
-            >
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back
+            <Button variant="ghost" size="sm" onClick={() => navigate('/workouts')} className="text-slate-400 hover:text-white">
+              <ArrowLeft className="w-4 h-4 mr-2" />Back
             </Button>
           </div>
           <div className="flex items-center justify-between">
             <h1 className="text-2xl font-bold text-white">{template}</h1>
-            {/* Live timer */}
             <span className="text-sm font-mono text-emerald-400">{timerDisplay}</span>
           </div>
-
-          {/* Auto-save status indicator */}
           {!editingSession && (
             <div className="mt-1 h-4">
-              {autoSaveStatus === 'saving' && (
-                <span className="text-xs text-slate-500">Saving…</span>
-              )}
-              {autoSaveStatus === 'saved' && (
-                <span className="text-xs text-slate-500">✓ Auto-saved</span>
-              )}
+              {autoSaveStatus === 'saving' && <span className="text-xs text-slate-500">Saving…</span>}
+              {autoSaveStatus === 'saved' && <span className="text-xs text-slate-500">✓ Auto-saved</span>}
             </div>
           )}
         </div>
       </div>
 
       <div className="p-6 space-y-6">
-        {/* AI suggested banner */}
         {location.state?.aiWorkout && (
           <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-4 py-2 text-emerald-400 text-sm">
             ✦ AI suggested · edit as needed
           </div>
         )}
 
-        {/* Date picker */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
           <span style={{ fontSize: '13px', color: '#6b7280' }}>Date</span>
-          <input
-            type="date"
-            value={sessionDate}
-            max={new Date().toISOString().split('T')[0]}
+          <input type="date" value={sessionDate} max={new Date().toISOString().split('T')[0]}
             onChange={(e) => setSessionDate(e.target.value)}
-            style={{
-              background: '#1a2332',
-              border: '0.5px solid rgba(255,255,255,0.12)',
-              borderRadius: '8px',
-              color: '#e2e8f0',
-              padding: '6px 10px',
-              fontSize: '13px',
-            }}
-          />
+            style={{ background: '#1a2332', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: '8px', color: '#e2e8f0', padding: '6px 10px', fontSize: '13px' }} />
         </div>
 
-        {/* Last session banner */}
         {lastSessionExercises.length > 0 && (
-          <div
-            style={{
-              background: 'rgba(16, 185, 129, 0.07)',
-              border: '0.5px solid rgba(16, 185, 129, 0.2)',
-              borderRadius: '8px',
-              padding: '8px 12px',
-              fontSize: '12px',
-              color: '#6ee7b7',
-            }}
-          >
+          <div style={{ background: 'rgba(16,185,129,0.07)', border: '0.5px solid rgba(16,185,129,0.2)', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#6ee7b7' }}>
             💡 Greyed-out numbers show your last session — enter new values to override
           </div>
         )}
 
-        {/* Exercise cards */}
         {exercises.map((exercise, index) => (
           <div key={exercise.id} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
-                {exercise.note && (
-                  <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>
-                )}
+                {exercise.note && <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>}
               </div>
               <div className="flex items-center gap-2">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                  <button
-                    onClick={() => moveExercise(index, 'up')}
-                    disabled={index === 0}
-                    style={{
-                      background: 'none', border: 'none',
-                      color: index === 0 ? '#374151' : '#6b7280',
-                      cursor: index === 0 ? 'default' : 'pointer',
-                      padding: '2px 4px', fontSize: '12px',
-                    }}
-                  >▲</button>
-                  <button
-                    onClick={() => moveExercise(index, 'down')}
-                    disabled={index === exercises.length - 1}
-                    style={{
-                      background: 'none', border: 'none',
-                      color: index === exercises.length - 1 ? '#374151' : '#6b7280',
-                      cursor: index === exercises.length - 1 ? 'default' : 'pointer',
-                      padding: '2px 4px', fontSize: '12px',
-                    }}
-                  >▼</button>
+                  <button onClick={() => moveExercise(index, 'up')} disabled={index === 0}
+                    style={{ background: 'none', border: 'none', color: index === 0 ? '#374151' : '#6b7280', cursor: index === 0 ? 'default' : 'pointer', padding: '2px 4px', fontSize: '12px' }}>▲</button>
+                  <button onClick={() => moveExercise(index, 'down')} disabled={index === exercises.length - 1}
+                    style={{ background: 'none', border: 'none', color: index === exercises.length - 1 ? '#374151' : '#6b7280', cursor: index === exercises.length - 1 ? 'default' : 'pointer', padding: '2px 4px', fontSize: '12px' }}>▼</button>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => removeExercise(exercise.id)}
-                  className="text-slate-400 hover:text-red-400"
-                >
+                <Button variant="ghost" size="sm" onClick={() => removeExercise(exercise.id)} className="text-slate-400 hover:text-red-400">
                   <Trash2 className="w-4 h-4" />
                 </Button>
               </div>
             </div>
-
             <div className="space-y-3">
               {exercise.sets.map((set, setIndex) => {
                 const ghostReps = getLastValue(exercise.name, setIndex, 'reps');
@@ -624,81 +566,44 @@ export default function WorkoutSession() {
                 return (
                   <div key={setIndex} className="flex items-center space-x-3">
                     <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      placeholder={ghostReps || 'Reps'}
-                      value={set.reps}
+                    <input type="text" inputMode="numeric" placeholder={ghostReps || 'Reps'} value={set.reps}
                       onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
-                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
-                    />
-                    {(exercise.hasWeight !== false) && (
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        placeholder={ghostWeight ? `${ghostWeight} kg` : 'kg'}
-                        value={set.weight}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" />
+                    {exercise.hasWeight !== false && (
+                      <input type="text" inputMode="decimal" placeholder={ghostWeight ? `${ghostWeight} kg` : 'kg'} value={set.weight}
                         onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
-                        className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
-                      />
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" />
                     )}
                   </div>
                 );
               })}
             </div>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => addSet(exercise.id)}
-              className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Set
+            <Button variant="outline" size="sm" onClick={() => addSet(exercise.id)} className="mt-4 border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white">
+              <Plus className="w-4 h-4 mr-2" />Add Set
             </Button>
           </div>
         ))}
 
-        {/* Add Exercise Button */}
         {!isAddingExercise && (
-          <Button
-            variant="outline"
-            onClick={() => setIsAddingExercise(true)}
-            className="w-full border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            Add Exercise
+          <Button variant="outline" onClick={() => setIsAddingExercise(true)} className="w-full border-emerald-500 text-emerald-500 hover:bg-emerald-500 hover:text-white">
+            <Plus className="w-4 h-4 mr-2" />Add Exercise
           </Button>
         )}
 
-        {/* Add Exercise Input Row */}
         {isAddingExercise && (
           <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
             <div className="flex items-center space-x-3">
-              <input
-                type="text"
-                placeholder="Exercise name"
-                value={newExerciseName}
+              <input type="text" placeholder="Exercise name" value={newExerciseName}
                 onChange={(e) => setNewExerciseName(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && addExercise()}
-                className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                autoFocus
-              />
-              <Button onClick={addExercise} size="sm" className="bg-emerald-500 hover:bg-emerald-600 text-white">
-                <Check className="w-4 h-4" />
-              </Button>
-              <Button onClick={cancelAddExercise} variant="ghost" size="sm" className="text-slate-400 hover:text-white">
-                <Trash2 className="w-4 h-4" />
-              </Button>
+                className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" autoFocus />
+              <Button onClick={addExercise} size="sm" className="bg-emerald-500 hover:bg-emerald-600 text-white"><Check className="w-4 h-4" /></Button>
+              <Button onClick={() => { setNewExerciseName(''); setIsAddingExercise(false); }} variant="ghost" size="sm" className="text-slate-400 hover:text-white"><Trash2 className="w-4 h-4" /></Button>
             </div>
           </div>
         )}
 
-        <Button
-          onClick={finishWorkout}
-          disabled={isSaving}
-          className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3"
-        >
+        <Button onClick={finishWorkout} disabled={isSaving} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3">
           {isSaving ? 'Saving...' : 'Finish Workout'}
           <Check className="w-5 h-5 ml-2" />
         </Button>
@@ -714,6 +619,8 @@ export default function WorkoutSession() {
           durationMins={savedSessionData.durationMins}
           sessionDocId={savedSessionData.sessionDocId}
           userId={user?.uid}
+          aiMuscles={savedSessionData.aiMuscles}
+          caloriesBurned={savedSessionData.caloriesBurned}
         />
       )}
     </div>

@@ -179,7 +179,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           if (isToday) {
             return {
               dateStr,
-              trainVal,
+              trainVal: Math.min(1, workoutsDone / workoutsGoal),
               moveVal: Math.min(1, stepsToday / stepsGoal),
               trackVal: totalHabits > 0 ? Math.min(1, habitsDoneToday / totalHabits) : 0,
               fuelVal: Math.min(1, totalCalories / calorieGoal),
