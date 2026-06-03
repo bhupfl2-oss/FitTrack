@@ -113,22 +113,32 @@ export default function Food() {
       const profile = profileSnap.exists() ? profileSnap.data() : {};
       setFoodPreference(((profile as any).foodPreference || '').toLowerCase());
 
-      // Use same AI insight as Home page
+      // Use same AI insight as Home page — discard if protein goal has drifted >10g
       if (insightSnap.exists()) {
         const cached = insightSnap.data() as any;
-        setAiInsightText(cached.insights?.food || '');
+        const cachedProtein: number | null = cached.proteinGoal ?? null;
+        const currentProtein: number = (profile as any).proteinGoal ?? 0;
+        const stale = cachedProtein !== null && Math.abs(cachedProtein - currentProtein) > 10;
+        if (!stale) setAiInsightText(cached.insights?.food || '');
       }
 
       if (snap.exists()) {
-        setDayLog(snap.data() as DayLog);
+        const stored = snap.data() as DayLog;
+        setDayLog({
+          ...stored,
+          calorieGoal: (profile as any).calorieGoal ?? (profile as any).ringGoals?.caloriesIn ?? stored.calorieGoal ?? DEFAULT_GOALS.calorieGoal,
+          proteinGoal: (profile as any).proteinGoal ?? stored.proteinGoal ?? DEFAULT_GOALS.proteinGoal,
+          carbGoal:    (profile as any).carbGoal    ?? stored.carbGoal    ?? DEFAULT_GOALS.carbGoal,
+          fatGoal:     (profile as any).fatGoal     ?? stored.fatGoal     ?? DEFAULT_GOALS.fatGoal,
+        });
       } else {
         setDayLog({
           date: d,
           items: [],
-          calorieGoal: (profile as any).calorieGoal || DEFAULT_GOALS.calorieGoal,
-          proteinGoal: (profile as any).proteinGoal || DEFAULT_GOALS.proteinGoal,
-          carbGoal: (profile as any).carbGoal || DEFAULT_GOALS.carbGoal,
-          fatGoal: (profile as any).fatGoal || DEFAULT_GOALS.fatGoal,
+          calorieGoal: (profile as any).calorieGoal ?? (profile as any).ringGoals?.caloriesIn ?? DEFAULT_GOALS.calorieGoal,
+          proteinGoal: (profile as any).proteinGoal ?? DEFAULT_GOALS.proteinGoal,
+          carbGoal:    (profile as any).carbGoal    ?? DEFAULT_GOALS.carbGoal,
+          fatGoal:     (profile as any).fatGoal     ?? DEFAULT_GOALS.fatGoal,
         });
       }
     } catch (e) {

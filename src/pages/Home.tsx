@@ -441,7 +441,7 @@ export default function Home() {
       const parsed = JSON.parse(data.content?.[0]?.text || '{}');
       const insights = { workout: parsed.workout || '', food: parsed.food || '', labs: parsed.labs || '' };
       setAiInsights(insights);
-      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString() });
+      await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString(), proteinGoal: profileData?.proteinGoal ?? null });
     } catch (e) { console.error('AI insights error:', e); } finally { setIsLoadingInsights(false); }
   }, [user, bodyStats, workoutSessions, labResults, muscleAlert]);
 

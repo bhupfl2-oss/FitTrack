@@ -11,6 +11,7 @@ import {
   getDoc,
   doc,
   setDoc,
+  updateDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -431,6 +432,42 @@ ${systemContext}`,
         content: aiText,
         showWorkoutLoad: !!workoutExercises,
       }]);
+
+      // Silent goal extraction — write any recommended nutrition goals back to profile
+      if (user) {
+        try {
+          const extractRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true',
+            },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5',
+              max_tokens: 100,
+              system: 'Extract any specific numeric nutrition goals from this text. Return JSON only: { "proteinGoal": number|null, "calorieGoal": number|null, "carbGoal": number|null, "fatGoal": number|null }. Return null for any goal not mentioned.',
+              messages: [{ role: 'user', content: aiText }],
+            }),
+          });
+          if (extractRes.ok) {
+            const extractData = await extractRes.json();
+            const rawText = extractData.content?.[0]?.text?.trim() || '{}';
+            const extracted = JSON.parse(rawText.replace(/```json|```/g, '').trim());
+            const goalUpdate: Record<string, number> = {};
+            for (const field of ['proteinGoal', 'calorieGoal', 'carbGoal', 'fatGoal'] as const) {
+              if (typeof extracted[field] === 'number' && extracted[field] !== null) {
+                goalUpdate[field] = extracted[field];
+              }
+            }
+            if (Object.keys(goalUpdate).length > 0) {
+              await updateDoc(doc(db, 'users', user.uid, 'profile', 'data'), goalUpdate);
+              await updateDoc(doc(db, 'users', user.uid, 'aiInsights', 'daily'), { 'insights.food': '' });
+            }
+          }
+        } catch (_) { /* silent — goal extraction is best-effort */ }
+      }
 
       // increment count on successful response
       const newCount = messageCount + 1;

@@ -201,7 +201,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
             if (!newGoals) return;
             await setDoc(
               doc(db, 'users', uid, 'profile', 'data'),
-              { ringGoals: newGoals },
+              { ringGoals: newGoals, calorieGoal: newGoals.caloriesIn },
               { merge: true }
             );
           });
@@ -212,7 +212,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           if (!newGoals) return;
           await setDoc(
             doc(db, 'users', uid, 'profile', 'data'),
-            { ringGoals: newGoals },
+            { ringGoals: newGoals, calorieGoal: newGoals.caloriesIn },
             { merge: true }
           );
           // Re-trigger a refresh by updating state with new goals
@@ -225,6 +225,8 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
           }));
         });
       }
+      // Single source of truth: profile.calorieGoal overrides ringGoals.caloriesIn
+      if (profile.calorieGoal) goals.caloriesIn = profile.calorieGoal;
 
       // ── Habits ──
       const habits = habitsSnapshot.docs.map(d => ({ id: d.id, ...d.data() })) as any[];

@@ -1085,6 +1085,9 @@ Rules:
                         <div className="text-[10px] text-slate-400 font-mono">
                           {session.distanceKm ?? '--'}km · {session.durationMins ?? '--'}min
                           {session.paceMinPerKm ? ` · ${Math.floor(session.paceMinPerKm)}:${String(Math.round((session.paceMinPerKm % 1) * 60)).padStart(2,'0')} /km` : ''}
+                          {(session as any).caloriesBurned > 0 && (
+                            <span className="ml-2 text-orange-400/70">· {(session as any).caloriesBurned} kcal</span>
+                          )}
                         </div>
                       ) : (
                         <div className="text-[10px] text-slate-400 font-mono">
