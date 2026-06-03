@@ -639,7 +639,7 @@ export default function Home() {
               </svg>
             </div>
             <div className="flex-1 flex flex-col gap-1.5">
-              {[{ label: 'Train', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' }, { label: 'Move', pct: rings.move.pct, sub: rings.move.label, color: '#30d158' }, { label: 'Track', pct: rings.track.pct, sub: rings.track.label, color: '#32ade6' }, { label: 'Fuel', pct: rings.fuel.pct, sub: rings.fuel.label, color: '#f97316' }].map(({ label, pct, sub, color }) => (
+              {[{ label: 'Steps', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' }, { label: 'Burned', pct: rings.move.pct, sub: rings.move.label, color: '#30d158' }, { label: 'Calories', pct: rings.track.pct, sub: rings.track.label, color: '#32ade6' }, { label: 'Sleep', pct: rings.fuel.pct, sub: rings.fuel.label, color: '#f97316' }].map(({ label, pct, sub, color }) => (
                 <div key={label} className="flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} /><div className="flex-1 min-w-0"><div className="flex justify-between items-center"><span className="text-[11px] font-medium text-white">{label}</span><span className="text-[10px] font-mono" style={{ color }}>{Math.round(pct)}%</span></div><div className="text-[9px] text-slate-500 leading-tight truncate">{sub}</div><div className="h-0.5 bg-slate-800 rounded-full mt-1 overflow-hidden"><div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%`, background: color }} /></div></div></div>
               ))}
             </div>

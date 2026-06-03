@@ -11,18 +11,19 @@ import { db } from '@/lib/firebase';
 
 interface DayData {
   date: string;
-  trainVal: number;   // 0 or 1
-  moveVal: number;    // 0-1
-  trackVal: number;   // 0-1
-  fuelVal: number;    // 0-1
-  workout?: { template: string; exercises: any[]; type?: string; distanceKm?: number; durationMins?: number };
+  trainVal: number;   // steps pct 0-1
+  moveVal: number;    // cal burned pct 0-1
+  trackVal: number;   // cal in pct 0-1
+  fuelVal: number;    // sleep pct 0-1
+  workout?: { template: string; exercises: any[]; type?: string; distanceKm?: number; durationMins?: number; caloriesBurned?: number };
   steps?: number;
   stepsGoal?: number;
-  habitsDone?: number;
-  habitsTotal?: number;
-  habitDetails?: { name: string; icon: string; done: boolean }[];
-  calories?: number;
-  calorieGoal?: number;
+  calBurned?: number;
+  calBurnedGoal?: number;
+  calIn?: number;
+  calInGoal?: number;
+  sleepHrs?: number;
+  sleepGoal?: number;
   bodyStats?: { weightKg?: number; pbf?: number; smm?: number; loggedDate?: string };
 }
 
@@ -34,15 +35,12 @@ function dateStr(d: Date): string {
 }
 
 function getMonthRange(year: number, month: number): { start: Date; end: Date } {
-  const start = new Date(year, month, 1);
-  const end = new Date(year, month + 1, 0);
-  return { start, end };
+  return { start: new Date(year, month, 1), end: new Date(year, month + 1, 0) };
 }
 
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const DAY_LABELS = ['M','T','W','T','F','S','S'];
 
-// SVG ring helper
 function MiniRings({ train, move, track, fuel, size = 24, future = false }: {
   train: number; move: number; track: number; fuel: number;
   size?: number; future?: boolean;
@@ -120,7 +118,6 @@ export default function ActivityCalendar() {
     const endStr = dateStr(end);
 
     try {
-      // Fetch workouts, habits, nutrition, body in parallel
       const [workoutSnap, habitsSnap, profileSnap] = await Promise.all([
         getDocs(collection(db, 'users', user!.uid, 'workoutSessions')),
         getDocs(collection(db, 'users', user!.uid, 'habits')),
@@ -128,60 +125,82 @@ export default function ActivityCalendar() {
       ]);
 
       const profile = profileSnap.exists() ? profileSnap.data() as any : {};
-      const calorieGoal = profile.calorieGoal || 2000;
+      const ringGoals = profile.ringGoals || {};
+      const stepsGoal   = ringGoals.steps          || 8000;
+      const burnedGoal  = ringGoals.caloriesBurned || 400;
+      const calInGoal   = ringGoals.caloriesIn      || 2000;
+      const sleepGoal   = ringGoals.sleep           || 8;
+
       const habits = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
       const stepsHabit = habits.find((h: any) => h.name?.toLowerCase().includes('step'));
-      const stepsGoal = stepsHabit?.targetValue || stepsHabit?.target || 8000;
-      const totalHabits = habits.length;
+      const sleepHabit = habits.find((h: any) => h.name?.toLowerCase().includes('sleep'));
 
-      // Build workout map — handle both 'date' and legacy 'sessionDate' fields
+      // Build workout map — keyed by date string
       const workoutMap: Record<string, any> = {};
       workoutSnap.docs.forEach(d => {
         const data = d.data() as any;
-        const key = data.date ?? (data.sessionDate ? String(data.sessionDate).split('T')[0] : null);
-        if (key && key >= startStr && key <= endStr) workoutMap[key] = data;
+        const key = String(data.date ?? data.sessionDate ?? '').split('T')[0];
+        if (key && key >= startStr && key <= endStr) {
+          // If multiple workouts on same day, keep the one with caloriesBurned or latest
+          if (!workoutMap[key] || data.caloriesBurned) workoutMap[key] = data;
+        }
+      });
+
+      // Sum calories burned per day (multiple sessions possible)
+      const calBurnedMap: Record<string, number> = {};
+      workoutSnap.docs.forEach(d => {
+        const data = d.data() as any;
+        const key = String(data.date ?? data.sessionDate ?? '').split('T')[0];
+        if (key && key >= startStr && key <= endStr && data.caloriesBurned) {
+          calBurnedMap[key] = (calBurnedMap[key] || 0) + data.caloriesBurned;
+        }
       });
 
       // Fetch nutrition logs for the month
       const nutritionMap: Record<string, number> = {};
       const daysInMonth = end.getDate();
       const nutritionFetches = Array.from({ length: daysInMonth }, (_, i) => {
-        const d = new Date(year, month, i + 1);
-        const ds = dateStr(d);
+        const ds = dateStr(new Date(year, month, i + 1));
         return getDoc(doc(db, 'users', user!.uid, 'nutritionLogs', ds))
           .then(snap => { if (snap.exists()) nutritionMap[ds] = snap.data().totalCalories || 0; })
           .catch(() => {});
       });
 
-      // Fetch habit logs for the month (batch per habit)
-      const habitLogsMap: Record<string, Record<string, boolean>> = {};
+      // Fetch steps and sleep logs for the month
       const stepsMap: Record<string, number> = {};
+      const sleepMap: Record<string, number> = {};
 
-      const habitLogFetches = habits.map(async (habit: any) => {
-        habitLogsMap[habit.id] = {};
-        try {
-          const logSnap = await getDocs(
-            query(collection(db, 'users', user!.uid, 'habits', habit.id, 'logs'),
-              where('date', '>=', startStr), where('date', '<=', endStr))
-          );
-          logSnap.docs.forEach(d => {
-            const data = d.data() as any;
-            const logDate = data.date || d.id;
-            const val = data.value ?? 0;
-            const target = habit.targetValue ?? 1;
-            const goalType = habit.goalType ?? 'daily';
-            const done = goalType === 'daily' ? val >= 1
-              : ['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType) ? val >= target
-              : val >= 1;
-            habitLogsMap[habit.id][logDate] = done;
-            if (habit.name?.toLowerCase().includes('step')) {
-              stepsMap[logDate] = data.value || data.steps || 0;
-            }
-          });
-        } catch {}
-      });
+      const habitLogFetches: Promise<void>[] = [];
 
-      // Fetch body stats for the month
+      if (stepsHabit) {
+        habitLogFetches.push(
+          getDocs(query(
+            collection(db, 'users', user!.uid, 'habits', stepsHabit.id, 'logs'),
+            where('date', '>=', startStr), where('date', '<=', endStr)
+          )).then(snap => {
+            snap.docs.forEach(d => {
+              const data = d.data() as any;
+              stepsMap[data.date || d.id] = data.value ?? data.steps ?? 0;
+            });
+          }).catch(() => {})
+        );
+      }
+
+      if (sleepHabit) {
+        habitLogFetches.push(
+          getDocs(query(
+            collection(db, 'users', user!.uid, 'habits', sleepHabit.id, 'logs'),
+            where('date', '>=', startStr), where('date', '<=', endStr)
+          )).then(snap => {
+            snap.docs.forEach(d => {
+              const data = d.data() as any;
+              sleepMap[data.date || d.id] = data.value ?? 0;
+            });
+          }).catch(() => {})
+        );
+      }
+
+      // Fetch body stats
       let bodyStats: any[] = [];
       try {
         const bodySnap = await getDocs(query(
@@ -196,40 +215,25 @@ export default function ActivityCalendar() {
       // Build day data map
       const data: Record<string, DayData> = {};
       for (let i = 0; i < daysInMonth; i++) {
-        const d = new Date(year, month, i + 1);
-        const ds = dateStr(d);
-
-
-        const workout = workoutMap[ds];
-        const calories = nutritionMap[ds] || 0;
-        const steps = stepsMap[ds] || 0;
-
-        // Count habits done this day
-        let habitsDone = 0;
-        const habitDetails: { name: string; icon: string; done: boolean }[] = [];
-        habits.forEach((habit: any) => {
-          const done = !!habitLogsMap[habit.id]?.[ds];
-          if (done) habitsDone++;
-          habitDetails.push({ name: habit.name, icon: habit.icon || '💪', done });
-        });
-
-        // Find closest body stats (same day or most recent before)
+        const ds = dateStr(new Date(year, month, i + 1));
+        const steps    = stepsMap[ds] || 0;
+        const sleep    = sleepMap[ds] || 0;
+        const calIn    = nutritionMap[ds] || 0;
+        const calBurned = calBurnedMap[ds] || 0;
+        const workout  = workoutMap[ds];
         const closestBody = bodyStats.find(b => b.date <= ds);
 
         data[ds] = {
           date: ds,
-          trainVal: workout ? 1 : 0,
-          moveVal: stepsHabit ? Math.min(1, steps / stepsGoal) : 0,
-          trackVal: totalHabits > 0 ? Math.min(1, habitsDone / totalHabits) : 0,
-          fuelVal: calories > 0 ? Math.min(1, calories / calorieGoal) : 0,
+          trainVal: Math.min(1, steps / stepsGoal),
+          moveVal:  Math.min(1, calBurned / burnedGoal),
+          trackVal: Math.min(1, calIn / calInGoal),
+          fuelVal:  Math.min(1, sleep / sleepGoal),
           workout,
-          steps,
-          stepsGoal,
-          habitsDone,
-          habitsTotal: totalHabits,
-          habitDetails,
-          calories,
-          calorieGoal,
+          steps, stepsGoal,
+          calBurned, calBurnedGoal: burnedGoal,
+          calIn, calInGoal,
+          sleepHrs: sleep, sleepGoal,
           bodyStats: closestBody ? {
             weightKg: closestBody.weightKg,
             pbf: closestBody.pbf,
@@ -247,14 +251,10 @@ export default function ActivityCalendar() {
     }
   };
 
-  // Build calendar grid
   const { start } = getMonthRange(viewYear, viewMonth);
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-  // Monday-first offset
   const firstDayOfWeek = start.getDay() === 0 ? 6 : start.getDay() - 1;
-
   const selected = selectedDate ? monthData[selectedDate] : null;
-
   const fmt = (v: number | undefined, d = 1) =>
     v != null && !isNaN(v) ? Number(v).toFixed(d) : '--';
 
@@ -275,11 +275,9 @@ export default function ActivityCalendar() {
           <ChevronLeft className="w-4 h-4 text-slate-400" />
         </button>
         <span className="text-sm font-semibold">{MONTH_NAMES[viewMonth]} {viewYear}</span>
-        <button
-          onClick={nextMonth}
+        <button onClick={nextMonth}
           disabled={viewYear === now.getFullYear() && viewMonth >= now.getMonth()}
-          className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-30"
-        >
+          className="p-1.5 hover:bg-slate-800 rounded-lg transition-colors disabled:opacity-30">
           <ChevronRight className="w-4 h-4 text-slate-400" />
         </button>
       </div>
@@ -287,10 +285,10 @@ export default function ActivityCalendar() {
       {/* Ring legend */}
       <div className="flex justify-center gap-4 px-4 py-2 border-b border-slate-800/50">
         {[
-          { color: '#ff375f', label: 'Train' },
-          { color: '#30d158', label: 'Move' },
-          { color: '#32ade6', label: 'Track' },
-          { color: '#f97316', label: 'Fuel' },
+          { color: '#ff375f', label: 'Steps' },
+          { color: '#30d158', label: 'Burned' },
+          { color: '#32ade6', label: 'Calories' },
+          { color: '#f97316', label: 'Sleep' },
         ].map(({ color, label }) => (
           <div key={label} className="flex items-center gap-1">
             <div className="w-2 h-2 rounded-full" style={{ background: color }} />
@@ -313,11 +311,7 @@ export default function ActivityCalendar() {
         </div>
       ) : (
         <div className="grid grid-cols-7 px-2 pb-2 gap-y-1">
-          {/* Empty cells for offset */}
-          {Array.from({ length: firstDayOfWeek }).map((_, i) => (
-            <div key={`empty-${i}`} />
-          ))}
-          {/* Day cells */}
+          {Array.from({ length: firstDayOfWeek }).map((_, i) => <div key={`empty-${i}`} />)}
           {Array.from({ length: daysInMonth }).map((_, i) => {
             const d = new Date(viewYear, viewMonth, i + 1);
             const ds = dateStr(d);
@@ -325,38 +319,25 @@ export default function ActivityCalendar() {
             const isToday = ds === today;
             const isSelected = ds === selectedDate;
             const dayData = monthData[ds];
-
             return (
-              <button
-                key={ds}
-                onClick={() => {
-                  setSelectedDate(isSelected ? null : ds);
-                  setExpandedExercises(false);
-                }}
+              <button key={ds}
+                onClick={() => { setSelectedDate(isSelected ? null : ds); setExpandedExercises(false); }}
                 disabled={isFuture}
                 className={`flex flex-col items-center gap-0.5 py-1.5 rounded-lg transition-colors disabled:cursor-default ${
-                  isSelected
-                    ? 'bg-emerald-500/10 ring-1 ring-emerald-500/40'
-                    : isToday
-                    ? 'bg-slate-800/50'
-                    : 'hover:bg-slate-800/30'
-                }`}
-              >
+                  isSelected ? 'bg-emerald-500/10 ring-1 ring-emerald-500/40'
+                  : isToday ? 'bg-slate-800/50'
+                  : 'hover:bg-slate-800/30'
+                }`}>
                 <MiniRings
                   train={dayData?.trainVal || 0}
                   move={dayData?.moveVal || 0}
                   track={dayData?.trackVal || 0}
                   fuel={dayData?.fuelVal || 0}
-                  size={34}
-                  future={isFuture}
+                  size={34} future={isFuture}
                 />
                 <span className={`text-[9px] font-mono ${
-                  isToday ? 'text-emerald-400 font-bold'
-                  : isFuture ? 'text-slate-700'
-                  : 'text-slate-500'
-                }`}>
-                  {i + 1}
-                </span>
+                  isToday ? 'text-emerald-400 font-bold' : isFuture ? 'text-slate-700' : 'text-slate-500'
+                }`}>{i + 1}</span>
                 {isToday && <div className="w-1 h-1 rounded-full bg-emerald-400" />}
               </button>
             );
@@ -367,17 +348,12 @@ export default function ActivityCalendar() {
       {/* Day detail panel */}
       {selected && (
         <div className="mx-4 mb-4 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-          {/* Detail header */}
+          {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 bg-slate-800/50 border-b border-slate-800">
-            <div>
-              <div className="text-sm font-semibold">
-                {new Date(selected.date + 'T00:00:00').toLocaleDateString('en-US', {
-                  weekday: 'long', month: 'short', day: 'numeric'
-                })}
-                {selected.date === today && <span className="ml-2 text-[10px] font-mono text-emerald-400">Today</span>}
-              </div>
+            <div className="text-sm font-semibold">
+              {new Date(selected.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+              {selected.date === today && <span className="ml-2 text-[10px] font-mono text-emerald-400">Today</span>}
             </div>
-            {/* Ring summary badges */}
             <div className="flex items-center gap-2">
               {[
                 { pct: Math.round(selected.trainVal * 100), color: '#ff375f' },
@@ -385,9 +361,7 @@ export default function ActivityCalendar() {
                 { pct: Math.round(selected.trackVal * 100), color: '#32ade6' },
                 { pct: Math.round(selected.fuelVal * 100), color: '#f97316' },
               ].map(({ pct, color }, i) => (
-                <span key={i} className="text-[10px] font-mono font-semibold" style={{ color }}>
-                  {pct}%
-                </span>
+                <span key={i} className="text-[10px] font-mono font-semibold" style={{ color }}>{pct}%</span>
               ))}
               <button onClick={() => setSelectedDate(null)} className="ml-1 text-slate-600 hover:text-slate-400">
                 <X className="w-4 h-4" />
@@ -395,122 +369,117 @@ export default function ActivityCalendar() {
             </div>
           </div>
 
-          {/* TRAIN */}
-          <div className="px-4 py-3 border-b border-slate-800">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">🏋️</span>
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Train</span>
-              {selected.workout && (
-                <span className="ml-auto text-[10px] font-mono text-emerald-400 capitalize">
-                  {selected.workout.template}
-                </span>
-              )}
-            </div>
-            {selected.workout ? (
-              selected.workout.type === 'running' ? (
-                <div className="text-xs text-slate-400">
-                  🏃 Running · {selected.workout.distanceKm ?? '--'}km · {selected.workout.durationMins ?? '--'} min
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  {(selected.workout.exercises || [])
-                    .slice(0, expandedExercises ? undefined : 4)
-                    .map((ex: any, i: number) => (
-                    <div key={i} className="flex justify-between text-xs">
-                      <span className="text-slate-300">{ex.name}</span>
-                      <span className="font-mono text-slate-500">
-                        {ex.sets?.length ?? 0} sets · {ex.sets?.[0]?.weight > 0 ? `${ex.sets[0].weight}kg` : '--'}
-                      </span>
-                    </div>
-                  ))}
-                  {(selected.workout.exercises?.length ?? 0) > 4 && (
-                    <button
-                      onClick={() => setExpandedExercises(e => !e)}
-                      className="text-[10px] text-emerald-400 font-mono mt-1 hover:text-emerald-300 transition-colors"
-                    >
-                      {expandedExercises
-                        ? '↑ Show less'
-                        : `+ ${selected.workout.exercises.length - 4} more exercises`}
-                    </button>
-                  )}
-                </div>
-              )
-            ) : (
-              <div className="text-xs text-slate-600">Rest day</div>
-            )}
-          </div>
-
-          {/* MOVE */}
+          {/* STEPS (outer/red) */}
           <div className="px-4 py-3 border-b border-slate-800">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-sm">🚶</span>
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Move</span>
-              <span className="ml-auto text-[10px] font-mono text-green-400">
-                {selected.steps ? `${selected.steps.toLocaleString()} steps` : '—'}
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Steps</span>
+              <span className="ml-auto text-[10px] font-mono text-red-400">
+                {selected.steps ? selected.steps.toLocaleString() : '—'}
               </span>
             </div>
-            {selected.steps && selected.stepsGoal ? (
+            {selected.steps && selected.steps > 0 ? (
               <div>
                 <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-green-500 rounded-full"
-                    style={{ width: `${Math.min(100, (selected.steps / selected.stepsGoal) * 100)}%` }} />
+                  <div className="h-full bg-red-500 rounded-full"
+                    style={{ width: `${Math.min(100, (selected.steps / (selected.stepsGoal || 8000)) * 100)}%` }} />
                 </div>
-                <div className="text-[9px] text-slate-600 mt-1 font-mono">
-                  Goal: {selected.stepsGoal.toLocaleString()}
-                </div>
+                <div className="text-[9px] text-slate-600 mt-1 font-mono">Goal: {(selected.stepsGoal || 8000).toLocaleString()}</div>
               </div>
             ) : (
               <div className="text-xs text-slate-600">No steps logged</div>
             )}
           </div>
 
-          {/* TRACK — habits */}
+          {/* CALORIES BURNED (2nd/green) */}
           <div className="px-4 py-3 border-b border-slate-800">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">🔵</span>
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Track · Habits</span>
-              <span className="ml-auto text-[10px] font-mono text-blue-400">
-                {selected.habitsDone ?? 0} / {selected.habitsTotal ?? 0}
+              <span className="text-sm">🔥</span>
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Calories Burned</span>
+              <span className="ml-auto text-[10px] font-mono text-green-400">
+                {selected.calBurned ? `${selected.calBurned} kcal` : '—'}
               </span>
             </div>
-            {selected.habitDetails && selected.habitDetails.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {selected.habitDetails.map((h, i) => (
-                  <span key={i} className={`text-[9px] font-mono px-2 py-0.5 rounded-full ${
-                    h.done
-                      ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
-                      : 'bg-slate-800 text-slate-600 border border-slate-700 line-through'
-                  }`}>
-                    {h.icon} {h.name}
-                  </span>
-                ))}
+            {selected.calBurned && selected.calBurned > 0 ? (
+              <div>
+                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div className="h-full bg-green-500 rounded-full"
+                    style={{ width: `${Math.min(100, (selected.calBurned / (selected.calBurnedGoal || 400)) * 100)}%` }} />
+                </div>
+                <div className="text-[9px] text-slate-600 mt-1 font-mono">Goal: {selected.calBurnedGoal || 400} kcal</div>
               </div>
             ) : (
-              <div className="text-xs text-slate-600">No habits set up</div>
+              <div className="text-xs text-slate-600">
+                {selected.workout ? 'Workout logged — AI analysis pending' : 'No workout logged'}
+              </div>
+            )}
+            {/* Workout summary below */}
+            {selected.workout && (
+              <div className="mt-2 pt-2 border-t border-slate-800/50">
+                <div className="text-[10px] font-mono text-slate-500 capitalize mb-1">{selected.workout.template}</div>
+                {selected.workout.type === 'running' ? (
+                  <div className="text-xs text-slate-400">🏃 {selected.workout.distanceKm ?? '--'}km · {selected.workout.durationMins ?? '--'} min</div>
+                ) : (
+                  <div className="space-y-1">
+                    {(selected.workout.exercises || []).slice(0, expandedExercises ? undefined : 3).map((ex: any, i: number) => (
+                      <div key={i} className="flex justify-between text-xs">
+                        <span className="text-slate-300">{ex.name}</span>
+                        <span className="font-mono text-slate-500">{ex.sets?.length ?? 0} sets</span>
+                      </div>
+                    ))}
+                    {(selected.workout.exercises?.length ?? 0) > 3 && (
+                      <button onClick={() => setExpandedExercises(e => !e)}
+                        className="text-[10px] text-emerald-400 font-mono mt-1 hover:text-emerald-300">
+                        {expandedExercises ? '↑ Show less' : `+ ${selected.workout.exercises.length - 3} more`}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
-          {/* FUEL */}
+          {/* CALORIES IN (3rd/blue) */}
           <div className="px-4 py-3 border-b border-slate-800">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-sm">🟠</span>
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Fuel</span>
-              <span className="ml-auto text-[10px] font-mono text-orange-400">
-                {selected.calories ? `${selected.calories} kcal` : '—'}
+              <span className="text-sm">🍽️</span>
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Calories In</span>
+              <span className="ml-auto text-[10px] font-mono text-blue-400">
+                {selected.calIn ? `${selected.calIn} kcal` : '—'}
               </span>
             </div>
-            {selected.calories && selected.calories > 0 ? (
+            {selected.calIn && selected.calIn > 0 ? (
               <div>
                 <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-orange-500 rounded-full"
-                    style={{ width: `${Math.min(100, ((selected.calories || 0) / (selected.calorieGoal || 2000)) * 100)}%` }} />
+                  <div className="h-full bg-blue-500 rounded-full"
+                    style={{ width: `${Math.min(100, (selected.calIn / (selected.calInGoal || 2000)) * 100)}%` }} />
                 </div>
-                <div className="text-[9px] text-slate-600 mt-1 font-mono">
-                  Goal: {selected.calorieGoal?.toLocaleString()} kcal
-                </div>
+                <div className="text-[9px] text-slate-600 mt-1 font-mono">Goal: {(selected.calInGoal || 2000).toLocaleString()} kcal</div>
               </div>
             ) : (
               <div className="text-xs text-slate-600">No food logged</div>
+            )}
+          </div>
+
+          {/* SLEEP (inner/orange) */}
+          <div className="px-4 py-3 border-b border-slate-800">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-sm">😴</span>
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Sleep</span>
+              <span className="ml-auto text-[10px] font-mono text-orange-400">
+                {selected.sleepHrs ? `${selected.sleepHrs} hrs` : '—'}
+              </span>
+            </div>
+            {selected.sleepHrs && selected.sleepHrs > 0 ? (
+              <div>
+                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div className="h-full bg-orange-500 rounded-full"
+                    style={{ width: `${Math.min(100, (selected.sleepHrs / (selected.sleepGoal || 8)) * 100)}%` }} />
+                </div>
+                <div className="text-[9px] text-slate-600 mt-1 font-mono">Goal: {selected.sleepGoal || 8} hrs</div>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-600">No sleep logged</div>
             )}
           </div>
 

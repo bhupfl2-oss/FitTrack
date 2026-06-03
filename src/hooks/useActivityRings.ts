@@ -4,62 +4,55 @@ import {
   getDocs,
   doc,
   getDoc,
+  setDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+
+// ── Types ──────────────────────────────────────────────────────────────────
 
 interface ActivityRing {
   pct: number;
   label: string;
-}
-
-interface TrainRing extends ActivityRing {
-  done: number;
-  goal: number;
-}
-
-interface MoveRing extends ActivityRing {
-  current: number;
-  goal: number;
-}
-
-interface TrackRing extends ActivityRing {
-  done: number;
-  total: number;
-}
-
-interface FuelRing extends ActivityRing {
   current: number;
   goal: number;
 }
 
 interface WeekDay {
   dateStr: string;
-  trainVal: number;
-  moveVal: number;
-  trackVal: number;
-  fuelVal: number;
+  trainVal: number;  // steps pct
+  moveVal: number;   // cal burned pct
+  trackVal: number;  // cal in pct
+  fuelVal: number;   // sleep pct
   isToday: boolean;
   isFuture: boolean;
 }
 
 interface ActivityRingsState {
-  train: TrainRing;
-  move: MoveRing;
-  track: TrackRing;
-  fuel: FuelRing;
+  train: ActivityRing;   // outer  — steps
+  move: ActivityRing;    // 2nd    — calories burned
+  track: ActivityRing;   // 3rd    — calories in
+  fuel: ActivityRing;    // inner  — sleep
   weekDays: WeekDay[];
 }
+
+interface RingGoals {
+  steps: number;
+  caloriesBurned: number;
+  caloriesIn: number;
+  sleep: number;
+  generatedAt?: string;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function getTodayStr(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-// Returns week date strings (YYYY-MM-DD) for Mon–Sun of the current week
-// Uses local time only — no UTC conversion
 function getWeekDateStrings(): string[] {
   const now = new Date();
-  const dayOfWeek = now.getDay(); // 0=Sun
+  const dayOfWeek = now.getDay();
   const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   const monday = new Date(now);
   monday.setDate(now.getDate() - daysSinceMonday);
@@ -70,12 +63,110 @@ function getWeekDateStrings(): string[] {
   });
 }
 
+const DEFAULT_GOALS: RingGoals = {
+  steps: 8000,
+  caloriesBurned: 400,
+  caloriesIn: 2000,
+  sleep: 8,
+};
+
+// ── AI goal suggestion ─────────────────────────────────────────────────────
+
+async function suggestGoalsWithAI(uid: string): Promise<RingGoals | null> {
+  try {
+    const [profileSnap, bodySnap, labSnap] = await Promise.all([
+      getDoc(doc(db, 'users', uid, 'profile', 'data')),
+      getDocs(collection(db, 'users', uid, 'bodyComp')),
+      getDocs(collection(db, 'users', uid, 'labs')),
+    ]);
+
+    const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+    const latestBody = bodySnap.docs.sort((a, b) =>
+      (b.data().date || '').localeCompare(a.data().date || '')
+    )[0]?.data() ?? {};
+    const latestLab = labSnap.docs.sort((a, b) =>
+      (b.data().date || '').localeCompare(a.data().date || '')
+    )[0]?.data() ?? {};
+
+    // Build context
+    const ctx: string[] = [];
+    if (profile.primaryGoal) ctx.push(`Goal: ${profile.primaryGoal}`);
+    if (profile.activityLevel) ctx.push(`Activity level: ${profile.activityLevel}`);
+    if (profile.fitnessFocus?.length) ctx.push(`Focus: ${profile.fitnessFocus.join(', ')}`);
+    if (profile.dob) {
+      const age = new Date().getFullYear() - new Date(profile.dob).getFullYear();
+      ctx.push(`Age: ${age}`);
+    }
+    if (profile.gender) ctx.push(`Gender: ${profile.gender}`);
+    if (latestBody.weightKg) ctx.push(`Weight: ${latestBody.weightKg}kg`);
+    if (latestBody.pbf) ctx.push(`Body fat: ${latestBody.pbf}%`);
+    if (latestBody.smm) ctx.push(`Muscle mass: ${latestBody.smm}kg`);
+    if (latestLab.results?.length) {
+      const flagged = latestLab.results.filter((r: any) => r.flag === 'high' || r.flag === 'low');
+      if (flagged.length) ctx.push(`Lab flags: ${flagged.map((r: any) => r.testName).join(', ')}`);
+    }
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 300,
+        messages: [{
+          role: 'user',
+          content: `Based on this user profile, suggest personalized daily health ring goals.
+
+${ctx.join('\n')}
+
+Return ONLY this JSON, no markdown, no other text:
+{
+  "steps": <number 6000-15000>,
+  "caloriesBurned": <number 250-800>,
+  "caloriesIn": <number 1400-3500>,
+  "sleep": <number 6-9>
+}
+
+Rules:
+- steps: based on activity level and fitness goal. Sedentary=6000, moderate=8000, active=10000-12000
+- caloriesBurned: based on fitness goal. Weight loss=500-600, maintain=350-450, muscle gain=300-400
+- caloriesIn: TDEE-based. Use weight, age, gender, activity level. Adjust for goal (deficit for loss, surplus for gain)
+- sleep: 7 for most adults, 8-9 for high activity, 7 for older adults
+- Be specific — use their actual data, not defaults`
+        }],
+      }),
+    });
+
+    if (!response.ok) return null;
+    const data = await response.json();
+    const parsed = JSON.parse(data.content?.[0]?.text?.trim() || '{}');
+    if (!parsed.steps || !parsed.caloriesBurned) return null;
+
+    return {
+      steps: Math.round(parsed.steps),
+      caloriesBurned: Math.round(parsed.caloriesBurned),
+      caloriesIn: Math.round(parsed.caloriesIn),
+      sleep: parseFloat(parsed.sleep),
+      generatedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    console.error('AI goal suggestion failed:', e);
+    return null;
+  }
+}
+
+// ── Main hook ──────────────────────────────────────────────────────────────
+
 export function useActivityRings(uid: string | undefined, refreshKey?: number): ActivityRingsState {
   const [state, setState] = useState<ActivityRingsState>({
-    train: { pct: 0, done: 0, goal: 4, label: '0 of 4 workouts' },
-    move: { pct: 0, current: 0, goal: 8000, label: '0 / 8,000 steps' },
-    track: { pct: 0, done: 0, total: 0, label: '0 of 0 habits' },
-    fuel: { pct: 0, current: 0, goal: 2000, label: '0 / 2,000 kcal' },
+    train: { pct: 0, current: 0, goal: DEFAULT_GOALS.steps, label: '0 / 8,000 steps' },
+    move:  { pct: 0, current: 0, goal: DEFAULT_GOALS.caloriesBurned, label: '0 / 400 kcal burned' },
+    track: { pct: 0, current: 0, goal: DEFAULT_GOALS.caloriesIn, label: '0 / 2,000 kcal' },
+    fuel:  { pct: 0, current: 0, goal: DEFAULT_GOALS.sleep, label: '0 / 8 hrs sleep' },
     weekDays: [],
   });
 
@@ -84,175 +175,178 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
 
     const fetchData = async () => {
       const todayStr = getTodayStr();
-      const weekDateStrings = getWeekDateStrings(); // ['2026-06-01', ..., '2026-06-07']
-      const mondayStr = weekDateStrings[0];
-      const sundayStr = weekDateStrings[6];
+      const weekDateStrings = getWeekDateStrings();
 
-      const [
-        workoutSnapshot,
-        habitsSnapshot,
-        nutritionDoc,
-        profileDoc,
-      ] = await Promise.all([
+      // ── Fetch all base data in parallel ──
+      const [workoutSnapshot, habitsSnapshot, nutritionDoc, profileDoc] = await Promise.all([
         getDocs(collection(db, 'users', uid, 'workoutSessions')),
         getDocs(collection(db, 'users', uid, 'habits')),
         getDoc(doc(db, 'users', uid, 'nutritionLogs', todayStr)),
         getDoc(doc(db, 'users', uid, 'profile', 'data')),
       ]);
 
-      const habits = habitsSnapshot.docs.map(d => ({
-        id: d.id,
-        ...d.data(),
-      })) as Array<{ id: string; name?: string; target?: number; targetValue?: number; goalType?: string }>;
+      const profile = profileDoc.exists() ? profileDoc.data() as any : {};
 
-      const stepsHabit = habits.find(h => h.name?.toLowerCase().includes('step'));
-
-      let stepsToday = 0;
-      let stepsGoal = 8000;
-      if (stepsHabit) {
-        stepsGoal = stepsHabit.target ?? stepsHabit.targetValue ?? 8000;
-        const stepsLog = await getDoc(
-          doc(db, 'users', uid, 'habits', stepsHabit.id, 'logs', todayStr)
-        );
-        if (stepsLog.exists()) {
-          const data = stepsLog.data();
-          stepsToday = data.value ?? data.steps ?? 0;
+      // ── Load or generate ring goals ──
+      let goals: RingGoals = { ...DEFAULT_GOALS };
+      if (profile.ringGoals) {
+        goals = { ...DEFAULT_GOALS, ...profile.ringGoals };
+        // Re-suggest if older than 7 days
+        const generatedAt = profile.ringGoals.generatedAt;
+        const agedays = generatedAt
+          ? (Date.now() - new Date(generatedAt).getTime()) / 86400000
+          : 999;
+        if (agedays > 7) {
+          suggestGoalsWithAI(uid).then(async (newGoals) => {
+            if (!newGoals) return;
+            await setDoc(
+              doc(db, 'users', uid, 'profile', 'data'),
+              { ringGoals: newGoals },
+              { merge: true }
+            );
+          });
         }
+      } else {
+        // First time — generate in background, use defaults for now
+        suggestGoalsWithAI(uid).then(async (newGoals) => {
+          if (!newGoals) return;
+          await setDoc(
+            doc(db, 'users', uid, 'profile', 'data'),
+            { ringGoals: newGoals },
+            { merge: true }
+          );
+          // Re-trigger a refresh by updating state with new goals
+          setState(prev => ({
+            ...prev,
+            train: { ...prev.train, goal: newGoals.steps },
+            move:  { ...prev.move,  goal: newGoals.caloriesBurned },
+            track: { ...prev.track, goal: newGoals.caloriesIn },
+            fuel:  { ...prev.fuel,  goal: newGoals.sleep },
+          }));
+        });
       }
 
-      const todayHabitLogs = await Promise.all(
-        habits.map((habit: any) =>
-          getDoc(doc(db, 'users', uid, 'habits', habit.id, 'logs', todayStr))
-        )
-      );
-      const habitsDoneToday = todayHabitLogs.filter((d, i) => {
-        if (!d.exists()) return false;
-        const habit = habits[i] as any;
-        const val = d.data().value ?? 0;
-        const target = habit?.targetValue ?? 1;
-        const goalType = habit?.goalType ?? 'daily';
-        if (goalType === 'daily') return val >= 1;
-        if (['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType)) return val >= target;
-        return val >= 1;
-      }).length;
-      const totalHabits = habits.length;
+      // ── Habits ──
+      const habits = habitsSnapshot.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
+      const stepsHabit = habits.find((h: any) => h.name?.toLowerCase().includes('step'));
+      const sleepHabit = habits.find((h: any) => h.name?.toLowerCase().includes('sleep'));
 
-      let totalCalories = 0;
-      let calorieGoal = 2000;
-      if (nutritionDoc.exists()) {
-        totalCalories = nutritionDoc.data().totalCalories ?? 0;
-      }
-      if (profileDoc.exists()) {
-        calorieGoal = profileDoc.data().calorieGoal ?? 2000;
+      // ── Today: steps ──
+      let stepsToday = 0;
+      if (stepsHabit) {
+        const log = await getDoc(doc(db, 'users', uid, 'habits', stepsHabit.id, 'logs', todayStr));
+        if (log.exists()) stepsToday = log.data().value ?? log.data().steps ?? 0;
       }
 
-      // ── KEY FIX: compare date strings directly, no Date object construction ──
-      const workoutDates = new Set<string>();
+      // ── Today: sleep ──
+      let sleepToday = 0;
+      if (sleepHabit) {
+        const log = await getDoc(doc(db, 'users', uid, 'habits', sleepHabit.id, 'logs', todayStr));
+        if (log.exists()) sleepToday = log.data().value ?? 0;
+      }
+
+      // ── Today: calories in ──
+      let calIn = 0;
+      if (nutritionDoc.exists()) calIn = nutritionDoc.data().totalCalories ?? 0;
+
+      // ── Today: calories burned — sum from today's workout sessions + manual ──
+      let calBurned = 0;
       workoutSnapshot.docs.forEach(d => {
         const data = d.data();
-        // Support both 'date' and 'sessionDate' fields, strip time if present
-        const raw = data.date ?? data.sessionDate;
-        if (!raw) return;
-        const dateStr = String(raw).split('T')[0]; // "2026-06-01"
-        if (dateStr >= mondayStr && dateStr <= sundayStr) {
-          workoutDates.add(dateStr);
+        const dateStr = String(data.date ?? data.sessionDate ?? '').split('T')[0];
+        if (dateStr === todayStr && data.caloriesBurned) {
+          calBurned += data.caloriesBurned;
         }
       });
-      const workoutsDone = workoutDates.size;
-      const workoutsGoal = 4;
+      // Manual top-up from profile or a dedicated field
+      const manualCalBurned = profile.manualCalBurnedToday?.date === todayStr
+        ? (profile.manualCalBurnedToday?.value ?? 0)
+        : 0;
+      calBurned += manualCalBurned;
 
-      // Build week days
+      // ── Week days ──
       const now = new Date();
       const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
       const weekDays: WeekDay[] = await Promise.all(
         weekDateStrings.map(async (dateStr) => {
-          // Reconstruct local date from string for future check only
           const [y, m, day] = dateStr.split('-').map(Number);
           const dayDate = new Date(y, m - 1, day);
           const isToday = dateStr === todayStr;
           const isFuture = dayDate > todayMidnight;
-          const trainVal = workoutDates.has(dateStr) ? 1 : 0;
 
-          // For today: reuse the already-computed values to guarantee
-          // the mini-ring is pixel-perfect in sync with the main rings.
           if (isToday) {
             return {
               dateStr,
-              trainVal: Math.min(1, workoutsDone / workoutsGoal),
-              moveVal: Math.min(1, stepsToday / stepsGoal),
-              trackVal: totalHabits > 0 ? Math.min(1, habitsDoneToday / totalHabits) : 0,
-              fuelVal: Math.min(1, totalCalories / calorieGoal),
+              trainVal: Math.min(1, stepsToday / goals.steps),
+              moveVal:  Math.min(1, calBurned / goals.caloriesBurned),
+              trackVal: Math.min(1, calIn / goals.caloriesIn),
+              fuelVal:  Math.min(1, sleepToday / goals.sleep),
               isToday: true,
               isFuture: false,
             };
           }
 
+          if (isFuture) {
+            return { dateStr, trainVal: 0, moveVal: 0, trackVal: 0, fuelVal: 0, isToday: false, isFuture: true };
+          }
+
+          // Past days — fetch from Firestore
           const reads: Promise<any>[] = [
             getDoc(doc(db, 'users', uid, 'nutritionLogs', dateStr)),
-            ...(stepsHabit
-              ? [getDoc(doc(db, 'users', uid, 'habits', stepsHabit.id, 'logs', dateStr))]
-              : [Promise.resolve(null)]),
-            ...habits.map((h: any) =>
-              getDoc(doc(db, 'users', uid, 'habits', h.id, 'logs', dateStr))
-            ),
+            stepsHabit ? getDoc(doc(db, 'users', uid, 'habits', stepsHabit.id, 'logs', dateStr)) : Promise.resolve(null),
+            sleepHabit ? getDoc(doc(db, 'users', uid, 'habits', sleepHabit.id, 'logs', dateStr)) : Promise.resolve(null),
           ];
+          const [nutDoc, stepsDoc, sleepDoc] = await Promise.all(reads);
 
-          const results = await Promise.all(reads);
-          const nutritionDocDay = results[0];
-          const stepsDoc = results[1];
-          const habitDocs = results.slice(2);
+          const pastSteps = stepsDoc?.exists() ? (stepsDoc.data().value ?? stepsDoc.data().steps ?? 0) : 0;
+          const pastSleep = sleepDoc?.exists() ? (sleepDoc.data().value ?? 0) : 0;
+          const pastCalIn = nutDoc?.exists() ? (nutDoc.data().totalCalories ?? 0) : 0;
 
-          const fuelVal = nutritionDocDay?.exists()
-            ? Math.min(1, (nutritionDocDay.data().totalCalories ?? 0) / calorieGoal)
-            : 0;
+          // Calories burned — sum sessions on this date
+          let pastCalBurned = 0;
+          workoutSnapshot.docs.forEach(d => {
+            const data = d.data();
+            const ds = String(data.date ?? data.sessionDate ?? '').split('T')[0];
+            if (ds === dateStr && data.caloriesBurned) pastCalBurned += data.caloriesBurned;
+          });
 
-          const moveVal = stepsHabit && stepsDoc?.exists()
-            ? Math.min(1, (stepsDoc.data().value ?? stepsDoc.data().steps ?? 0) / stepsGoal)
-            : 0;
-
-          const habitsDoneCount = habitDocs.filter((d, i) => {
-            if (!d?.exists()) return false;
-            const habit = habits[i] as any;
-            const val = d.data().value ?? 0;
-            const target = habit?.targetValue ?? 1;
-            const goalType = habit?.goalType ?? 'daily';
-            if (goalType === 'daily') return val >= 1;
-            if (['count_per_day','count_per_week','count_per_month','count_per_year','times_per_week','distance_month','count_month'].includes(goalType)) return val >= target;
-            return val >= 1;
-          }).length;
-          const trackVal = totalHabits > 0
-            ? Math.min(1, habitsDoneCount / totalHabits)
-            : 0;
-
-          return { dateStr, trainVal, moveVal, trackVal, fuelVal, isToday, isFuture };
+          return {
+            dateStr,
+            trainVal:  Math.min(1, pastSteps / goals.steps),
+            moveVal:   Math.min(1, pastCalBurned / goals.caloriesBurned),
+            trackVal:  Math.min(1, pastCalIn / goals.caloriesIn),
+            fuelVal:   Math.min(1, pastSleep / goals.sleep),
+            isToday: false,
+            isFuture: false,
+          };
         })
       );
 
       setState({
         train: {
-          pct: Math.min(100, (workoutsDone / workoutsGoal) * 100),
-          done: workoutsDone,
-          goal: workoutsGoal,
-          label: `${workoutsDone} of ${workoutsGoal} workouts`,
+          pct: Math.min(100, (stepsToday / goals.steps) * 100),
+          current: stepsToday,
+          goal: goals.steps,
+          label: `${stepsToday.toLocaleString()} / ${goals.steps.toLocaleString()} steps`,
         },
         move: {
-          pct: Math.min(100, (stepsToday / stepsGoal) * 100),
-          current: stepsToday,
-          goal: stepsGoal,
-          label: `${stepsToday.toLocaleString()} / ${stepsGoal.toLocaleString()} steps`,
+          pct: Math.min(100, (calBurned / goals.caloriesBurned) * 100),
+          current: calBurned,
+          goal: goals.caloriesBurned,
+          label: `${calBurned} / ${goals.caloriesBurned} kcal burned`,
         },
         track: {
-          pct: totalHabits > 0 ? Math.min(100, (habitsDoneToday / totalHabits) * 100) : 0,
-          done: habitsDoneToday,
-          total: totalHabits,
-          label: `${habitsDoneToday} of ${totalHabits} habits`,
+          pct: Math.min(100, (calIn / goals.caloriesIn) * 100),
+          current: calIn,
+          goal: goals.caloriesIn,
+          label: `${calIn.toLocaleString()} / ${goals.caloriesIn.toLocaleString()} kcal`,
         },
         fuel: {
-          pct: Math.min(100, (totalCalories / calorieGoal) * 100),
-          current: totalCalories,
-          goal: calorieGoal,
-          label: `${totalCalories.toLocaleString()} / ${calorieGoal.toLocaleString()} kcal`,
+          pct: Math.min(100, (sleepToday / goals.sleep) * 100),
+          current: sleepToday,
+          goal: goals.sleep,
+          label: `${sleepToday} / ${goals.sleep} hrs sleep`,
         },
         weekDays,
       });

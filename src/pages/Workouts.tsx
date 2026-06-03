@@ -747,8 +747,8 @@ Rules:
             </div>
             <div className="flex-1 flex flex-col gap-2">
               {[
-                { label: 'Train', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' },
-                { label: 'Move', pct: rings.move.pct, sub: rings.move.label, color: '#30d158' },
+                { label: 'Steps', pct: rings.train.pct, sub: rings.train.label, color: '#ff375f' },
+                { label: 'Burned', pct: rings.move.pct, sub: rings.move.label, color: '#30d158' },
               ].map(({ label, pct, sub, color }) => (
                 <div key={label} className="flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
@@ -765,9 +765,9 @@ Rules:
                 </div>
               ))}
               <div className="text-[9px] text-slate-600 font-mono">
-                {rings.train.done < rings.train.goal
-                  ? `${rings.train.goal - rings.train.done} session${rings.train.goal - rings.train.done > 1 ? 's' : ''} to close Train ring`
-                  : '🎉 Train ring closed this week'}
+                {rings.train.pct < 100
+                  ? `${rings.train.current.toLocaleString()} / ${rings.train.goal.toLocaleString()} steps today`
+                  : '🎉 Step goal hit today'}
               </div>
             </div>
           </div>
