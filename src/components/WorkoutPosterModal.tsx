@@ -24,11 +24,10 @@ interface WorkoutPosterModalProps {
   totalWeeklyKm?: number;
   sessionDocId?: string;
   userId?: string;
-  aiMuscles?: AIMuscle[];          // from AI analysis
-  caloriesBurned?: number;         // from AI analysis
+  aiMuscles?: AIMuscle[];
+  caloriesBurned?: number;
 }
 
-// Fallback static muscle map (used only when AI hasn't returned yet)
 const MUSCLE_MAP: Record<string, string[]> = {
   chest: ['bench press', 'incline bench', 'flat bench', 'dumbbell press', 'fly', 'chest dip', 'pushup', 'cable fly', 'push up'],
   shoulders: ['overhead press', 'lateral raise', 'front raise', 'arnold press', 'shoulder press'],
@@ -70,22 +69,29 @@ const computeMusclesFallback = (
 export default function WorkoutPosterModal({
   open, onDone, template, sessionDate, exercises,
   durationMins: durationMinsProp, weekStreak, totalWeeklyKm,
-  sessionDocId, userId, aiMuscles, caloriesBurned,
+  sessionDocId, userId, aiMuscles, caloriesBurned: caloriesBurnedProp,
 }: WorkoutPosterModalProps) {
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
+
+  // Duration edit state
   const [durationMins, setDurationMins] = useState<number | undefined>(durationMinsProp);
   const [editingDuration, setEditingDuration] = useState(false);
   const [durationEditMins, setDurationEditMins] = useState(String(Math.floor(durationMinsProp ?? 0)));
   const [durationEditSecs, setDurationEditSecs] = useState(String(Math.round(((durationMinsProp ?? 0) % 1) * 60)));
   const [savingDuration, setSavingDuration] = useState(false);
 
+  // Calories edit state
+  const [caloriesBurned, setCaloriesBurned] = useState<number | undefined>(caloriesBurnedProp);
+  const [editingCalories, setEditingCalories] = useState(false);
+  const [caloriesInput, setCaloriesInput] = useState(String(caloriesBurnedProp ?? ''));
+  const [savingCalories, setSavingCalories] = useState(false);
+
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!open) return null;
 
-  // Use AI muscles when available, fall back to static map
   const musclesData: Array<[string, number]> = aiMuscles && aiMuscles.length > 0
     ? aiMuscles.map(m => [m.name, m.sets] as [string, number])
     : computeMusclesFallback(exercises, template);
@@ -112,6 +118,19 @@ export default function WorkoutPosterModal({
         await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), { durationMins: newDuration });
       } catch (e) { console.error('Failed to save duration:', e); }
       finally { setSavingDuration(false); }
+    }
+  };
+
+  const saveCaloriesEdit = async () => {
+    const newVal = parseInt(caloriesInput) || 0;
+    setCaloriesBurned(newVal);
+    setEditingCalories(false);
+    if (sessionDocId && userId) {
+      setSavingCalories(true);
+      try {
+        await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), { caloriesBurned: newVal });
+      } catch (e) { console.error('Failed to save calories:', e); }
+      finally { setSavingCalories(false); }
     }
   };
 
@@ -150,7 +169,6 @@ export default function WorkoutPosterModal({
   const formattedDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const shortDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-  // Stats row: Exercises | Sets | Calories (if available) or km/streak
   const statsRow = [
     { val: totalExercises, label: 'Exercises' },
     { val: totalSets, label: 'Sets' },
@@ -212,21 +230,13 @@ export default function WorkoutPosterModal({
             <div style={{ height: '1px', background: 'linear-gradient(90deg, rgba(16,185,129,0.4), transparent)', marginTop: '14px' }} />
           </div>
 
-          {/* Muscles worked */}
+          {/* Muscles */}
           {musclesData.length > 0 && (
             <div style={{ marginBottom: '20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
-                <div style={{ fontSize: '10px', fontWeight: 600, color: '#475569', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                  Muscles Worked
-                </div>
-                {isAIAnalyzed && (
-                  <div style={{ fontSize: '9px', color: '#10b981', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: '20px', padding: '1px 6px' }}>
-                    ✦ AI
-                  </div>
-                )}
-                {!isAIAnalyzed && (
-                  <div style={{ fontSize: '9px', color: '#475569', fontStyle: 'italic' }}>analyzing…</div>
-                )}
+                <div style={{ fontSize: '10px', fontWeight: 600, color: '#475569', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Muscles Worked</div>
+                {isAIAnalyzed && <div style={{ fontSize: '9px', color: '#10b981', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: '20px', padding: '1px 6px' }}>✦ AI</div>}
+                {!isAIAnalyzed && <div style={{ fontSize: '9px', color: '#475569', fontStyle: 'italic' }}>analyzing…</div>}
               </div>
               {musclesData.slice(0, 5).map(([muscle, sets], idx) => {
                 const isOther = aiMuscles?.find(m => m.name === muscle)?.category === 'Other';
@@ -235,9 +245,7 @@ export default function WorkoutPosterModal({
                 return (
                   <div key={muscle} style={{ marginBottom: '12px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
-                      <span style={{ fontSize: '13px', fontWeight: 600, color: isOther ? '#94a3b8' : '#e2e8f0' }}>
-                        {muscle}{isOther ? ' *' : ''}
-                      </span>
+                      <span style={{ fontSize: '13px', fontWeight: 600, color: isOther ? '#94a3b8' : '#e2e8f0' }}>{muscle}{isOther ? ' *' : ''}</span>
                       <span style={{ fontSize: '12px', color: '#94a3b8' }}>{sets} set{sets !== 1 ? 's' : ''}</span>
                     </div>
                     <div style={{ height: '6px', backgroundColor: 'rgba(30,41,59,0.9)', borderRadius: '3px', overflow: 'hidden' }}>
@@ -251,7 +259,7 @@ export default function WorkoutPosterModal({
 
           <div style={{ flex: 1 }} />
 
-          {/* Stats row */}
+          {/* Stats */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', marginBottom: '16px' }}>
             {statsRow.map(({ val, label }) => (
               <div key={label} style={{ textAlign: 'center' }}>
@@ -296,8 +304,7 @@ export default function WorkoutPosterModal({
               <input type="number" min="0" max="59" value={durationEditSecs} onChange={e => setDurationEditSecs(e.target.value)}
                 style={{ width: '52px', background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: 'white', padding: '4px 8px', fontSize: '13px', textAlign: 'center' }} />
               <span style={{ fontSize: '12px', color: '#64748b' }}>sec</span>
-              <button onClick={saveDurationEdit} disabled={savingDuration}
-                style={{ marginLeft: 'auto', background: '#10b981', border: 'none', borderRadius: '6px', color: 'white', padding: '4px 10px', fontSize: '12px', cursor: savingDuration ? 'not-allowed' : 'pointer', opacity: savingDuration ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <button onClick={saveDurationEdit} disabled={savingDuration} style={{ marginLeft: 'auto', background: '#10b981', border: 'none', borderRadius: '6px', color: 'white', padding: '4px 10px', fontSize: '12px', cursor: savingDuration ? 'not-allowed' : 'pointer', opacity: savingDuration ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <Check size={12} /> {savingDuration ? '…' : 'Save'}
               </button>
             </div>
@@ -310,6 +317,35 @@ export default function WorkoutPosterModal({
               </div>
               <button onClick={() => { setDurationEditMins(String(Math.floor(durationMins ?? 0))); setDurationEditSecs(String(Math.round(((durationMins ?? 0) % 1) * 60))); setEditingDuration(true); }}
                 style={{ background: 'none', border: 'none', color: '#10b981', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', padding: '2px 6px' }}>
+                <Pencil size={12} /> Edit
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Calories edit */}
+        <div style={{ width: '100%', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '10px 14px' }}>
+          {editingCalories ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '12px', color: '#64748b', flexShrink: 0 }}>Kcal Burned</span>
+              <input type="number" min="0" value={caloriesInput} onChange={e => setCaloriesInput(e.target.value)}
+                placeholder="kcal"
+                style={{ flex: 1, background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: 'white', padding: '4px 8px', fontSize: '13px', textAlign: 'center' }} />
+              <button onClick={saveCaloriesEdit} disabled={savingCalories} style={{ marginLeft: 'auto', background: '#f97316', border: 'none', borderRadius: '6px', color: 'white', padding: '4px 10px', fontSize: '12px', cursor: savingCalories ? 'not-allowed' : 'pointer', opacity: savingCalories ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Check size={12} /> {savingCalories ? '…' : 'Save'}
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', color: '#64748b' }}>Kcal Burned</span>
+                <span style={{ fontSize: '13px', color: caloriesBurned && caloriesBurned > 0 ? '#fb923c' : '#475569', fontWeight: 500 }}>
+                  {caloriesBurned && caloriesBurned > 0 ? `${caloriesBurned} kcal` : 'not set'}
+                </span>
+                {savingCalories && <span style={{ fontSize: '10px', color: '#f97316' }}>saving…</span>}
+              </div>
+              <button onClick={() => { setCaloriesInput(String(caloriesBurned ?? '')); setEditingCalories(true); }}
+                style={{ background: 'none', border: 'none', color: '#f97316', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', padding: '2px 6px' }}>
                 <Pencil size={12} /> Edit
               </button>
             </div>

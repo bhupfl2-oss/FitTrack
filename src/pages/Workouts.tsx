@@ -108,6 +108,12 @@ export default function Workouts() {
   const { user } = useAuth();
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
+  const [editingCalories, setEditingCalories] = useState(false);
+  const [caloriesInput, setCaloriesInput] = useState('');
+  const [editingDuration, setEditingDuration] = useState(false);
+  const [durationMinsInput, setDurationMinsInput] = useState('');
+  const [durationSecsInput, setDurationSecsInput] = useState('');
+  const [savingSessionField, setSavingSessionField] = useState(false);
   const [loading, setLoading] = useState(true);
   usePageLoadTime('Workouts', loading);
   const [showPrevSessions, setShowPrevSessions] = useState(false);
@@ -661,6 +667,17 @@ Rules:
     return { exerciseCount: validExercises.length, totalSets, isRunning: false };
   };
 
+  const saveSessionField = async (field: string, value: any) => {
+    if (!user || !selectedSession) return;
+    setSavingSessionField(true);
+    try {
+      await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', selectedSession.id), { [field]: value });
+      setSessions(prev => prev.map(s => s.id === selectedSession.id ? { ...s, [field]: value } : s));
+      setSelectedSession(prev => prev ? { ...prev, [field]: value } : prev);
+    } catch (e) { console.error('Failed to save:', e); }
+    finally { setSavingSessionField(false); }
+  };
+
   const getExerciseOneRMHistory = (exerciseName: string): OneRMData[] => {
     return sessions.filter(s => s.type !== 'running').map(s => {
       const ex = s.exercises?.find(e => e.name === exerciseName);
@@ -1139,8 +1156,93 @@ Rules:
                     <span>{new Date(selectedSession.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</span>
                   </div>
                 </div>
-                <button onClick={() => setSelectedSession(null)} className="text-slate-500 hover:text-white p-1"><X className="w-5 h-5" /></button>
+                <button onClick={() => { setSelectedSession(null); setEditingCalories(false); setEditingDuration(false); }} className="text-slate-500 hover:text-white p-1"><X className="w-5 h-5" /></button>
               </div>
+
+              {/* Duration + Calories editable row */}
+              {selectedSession.type !== 'running' && (
+                <div className="flex gap-2 mb-4">
+                  {/* Duration */}
+                  <div className="flex-1 bg-slate-800 rounded-xl p-3">
+                    <div className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mb-1">Duration</div>
+                    {editingDuration ? (
+                      <div className="flex items-center gap-1">
+                        <input type="number" min="0" value={durationMinsInput}
+                          onChange={e => setDurationMinsInput(e.target.value)}
+                          className="w-12 bg-slate-700 border border-slate-600 rounded px-1.5 py-1 text-white text-xs text-center focus:outline-none focus:border-emerald-500" />
+                        <span className="text-[10px] text-slate-500">m</span>
+                        <input type="number" min="0" max="59" value={durationSecsInput}
+                          onChange={e => setDurationSecsInput(e.target.value)}
+                          className="w-12 bg-slate-700 border border-slate-600 rounded px-1.5 py-1 text-white text-xs text-center focus:outline-none focus:border-emerald-500" />
+                        <span className="text-[10px] text-slate-500">s</span>
+                        <button
+                          onClick={async () => {
+                            const val = (parseInt(durationMinsInput) || 0) + (parseInt(durationSecsInput) || 0) / 60;
+                            await saveSessionField('durationMins', val);
+                            setEditingDuration(false);
+                          }}
+                          disabled={savingSessionField}
+                          className="ml-1 text-emerald-400 hover:text-emerald-300 text-xs font-mono disabled:opacity-50">
+                          {savingSessionField ? '…' : '✓'}
+                        </button>
+                        <button onClick={() => setEditingDuration(false)} className="text-slate-500 hover:text-white text-xs">✕</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-white font-mono">
+                          {(selectedSession as any).durationMins > 0
+                            ? `${Math.floor((selectedSession as any).durationMins)}m ${Math.round(((selectedSession as any).durationMins % 1) * 60)}s`
+                            : '—'}
+                        </span>
+                        <button onClick={() => {
+                          const d = (selectedSession as any).durationMins || 0;
+                          setDurationMinsInput(String(Math.floor(d)));
+                          setDurationSecsInput(String(Math.round((d % 1) * 60)));
+                          setEditingDuration(true);
+                        }} className="text-slate-500 hover:text-emerald-400 transition-colors">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Calories */}
+                  <div className="flex-1 bg-slate-800 rounded-xl p-3">
+                    <div className="text-[9px] font-mono text-slate-500 uppercase tracking-wider mb-1">Kcal Burned</div>
+                    {editingCalories ? (
+                      <div className="flex items-center gap-1">
+                        <input type="number" min="0" value={caloriesInput}
+                          onChange={e => setCaloriesInput(e.target.value)}
+                          placeholder="kcal"
+                          className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-emerald-500" />
+                        <button
+                          onClick={async () => {
+                            await saveSessionField('caloriesBurned', parseInt(caloriesInput) || 0);
+                            setEditingCalories(false);
+                          }}
+                          disabled={savingSessionField}
+                          className="text-emerald-400 hover:text-emerald-300 text-xs font-mono disabled:opacity-50">
+                          {savingSessionField ? '…' : '✓'}
+                        </button>
+                        <button onClick={() => setEditingCalories(false)} className="text-slate-500 hover:text-white text-xs">✕</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-orange-400 font-mono">
+                          {(selectedSession as any).caloriesBurned > 0 ? `${(selectedSession as any).caloriesBurned}` : '—'}
+                        </span>
+                        <button onClick={() => {
+                          setCaloriesInput(String((selectedSession as any).caloriesBurned || ''));
+                          setEditingCalories(true);
+                        }} className="text-slate-500 hover:text-orange-400 transition-colors">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-4">
                 {selectedSession.type === 'running' ? (
                   <div className="bg-slate-800 rounded-xl p-4 space-y-2">
