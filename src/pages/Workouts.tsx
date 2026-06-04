@@ -10,6 +10,7 @@ import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
+import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 import { useGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ export default function Workouts() {
   const { goals: userGoals } = useGoals(user?.uid);
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
+  const [showRunningPoster, setShowRunningPoster] = useState(false);
   const [editingCalories, setEditingCalories] = useState(false);
   const [caloriesInput, setCaloriesInput] = useState('');
   const [editingDuration, setEditingDuration] = useState(false);
@@ -1260,20 +1262,39 @@ Rules:
 
               <div className="space-y-4">
                 {selectedSession.type === 'running' ? (
-                  <div className="bg-slate-800 rounded-xl p-4 space-y-2">
-                    {[['Effort', selectedSession.effortType], ['Surface', selectedSession.surface], ['Distance', `${selectedSession.distanceKm}km`], ['Duration', `${selectedSession.durationMins} min`]].map(([k, v]) => (
-                      <div key={k} className="flex justify-between text-sm">
-                        <span className="text-slate-400">{k}</span><span className="text-white capitalize">{v}</span>
-                      </div>
-                    ))}
-                    {selectedSession.paceMinPerKm && (
-                      <div className="flex justify-between text-sm">
-                        <span className="text-slate-400">Pace</span>
-                        <span className="text-emerald-400">{Math.floor(selectedSession.paceMinPerKm)}:{String(Math.round((selectedSession.paceMinPerKm % 1) * 60)).padStart(2,'0')} /km</span>
-                      </div>
-                    )}
-                    {selectedSession.notes && <p className="text-xs text-slate-300 pt-1">{selectedSession.notes}</p>}
-                  </div>
+                  <>
+                    <div className="bg-slate-800 rounded-xl p-4 space-y-2">
+                      {(() => {
+                        const dm = selectedSession.durationMins ?? 0;
+                        const m = Math.floor(dm);
+                        const s = Math.round((dm % 1) * 60);
+                        const durationLabel = dm > 0 ? (s > 0 ? `${m}m ${s}s` : `${m} mins`) : '--';
+                        return [
+                          ['Effort', selectedSession.effortType],
+                          ['Surface', selectedSession.surface],
+                          ['Distance', `${selectedSession.distanceKm}km`],
+                          ['Duration', durationLabel],
+                        ].map(([k, v]) => (
+                          <div key={k} className="flex justify-between text-sm">
+                            <span className="text-slate-400">{k}</span>
+                            <span className="text-white capitalize">{v}</span>
+                          </div>
+                        ));
+                      })()}
+                      {selectedSession.paceMinPerKm && (
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-400">Pace</span>
+                          <span className="text-emerald-400">{Math.floor(selectedSession.paceMinPerKm)}:{String(Math.round((selectedSession.paceMinPerKm % 1) * 60)).padStart(2,'0')} /km</span>
+                        </div>
+                      )}
+                      {selectedSession.notes && <p className="text-xs text-slate-300 pt-1">{selectedSession.notes}</p>}
+                    </div>
+                    <button
+                      onClick={() => setShowRunningPoster(true)}
+                      className="w-full mt-3 bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors flex items-center justify-center gap-2">
+                      🏅 Share Poster
+                    </button>
+                  </>
                 ) : selectedSession.exercises?.map((exercise, i) => (
                   <div key={i} className="bg-slate-800 rounded-xl p-4">
                     <h3 className="text-sm font-semibold text-white mb-3">{exercise.name}</h3>
@@ -1296,6 +1317,27 @@ Rules:
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── RUNNING SESSION POSTER ── */}
+      {showRunningPoster && selectedSession && (
+        <WorkoutPosterModal
+          open={showRunningPoster}
+          onDone={() => setShowRunningPoster(false)}
+          template={selectedSession.template}
+          sessionDate={selectedSession.date}
+          exercises={[]}
+          durationMins={selectedSession.durationMins}
+          caloriesBurned={(selectedSession as any).caloriesBurned}
+          sessionDocId={selectedSession.id}
+          userId={user?.uid}
+          aiMuscles={[]}
+          sessionType="running"
+          distanceKm={selectedSession.distanceKm}
+          paceMinPerKm={selectedSession.paceMinPerKm}
+          effortType={(selectedSession as any).effortType}
+          intervals={(selectedSession as any).intervals}
+        />
       )}
 
       {/* ── CREATE/EDIT WORKOUT MODAL ── */}

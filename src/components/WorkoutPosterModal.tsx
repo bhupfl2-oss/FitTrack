@@ -26,6 +26,17 @@ interface WorkoutPosterModalProps {
   userId?: string;
   aiMuscles?: AIMuscle[];
   caloriesBurned?: number;
+  // Running-specific props
+  sessionType?: 'running' | 'strength';
+  distanceKm?: number;
+  paceMinPerKm?: number;
+  effortType?: string;
+  intervals?: Array<{
+    distanceM: number;
+    durationMins: number;
+    durationSecs: number;
+    inclinePercent: number;
+  }>;
 }
 
 const MUSCLE_MAP: Record<string, string[]> = {
@@ -43,10 +54,10 @@ const MUSCLE_MAP: Record<string, string[]> = {
 
 const computeMusclesFallback = (
   exercises: WorkoutPosterModalProps['exercises'],
-  template: string
+  template: string = ''
 ): Array<[string, number]> => {
   const counts: Record<string, number> = {};
-  const tl = template.toLowerCase();
+  const tl = (template || '').toLowerCase();
   if (tl.includes('push')) { counts['chest'] = 0; counts['shoulders'] = 0; counts['triceps'] = 0; }
   else if (tl.includes('pull')) { counts['back'] = 0; counts['biceps'] = 0; }
   else if (tl.includes('leg') || tl.includes('lower')) { counts['quads'] = 0; counts['hamstrings'] = 0; counts['glutes'] = 0; counts['calves'] = 0; }
@@ -70,6 +81,7 @@ export default function WorkoutPosterModal({
   open, onDone, template, sessionDate, exercises,
   durationMins: durationMinsProp, weekStreak, totalWeeklyKm,
   sessionDocId, userId, aiMuscles, caloriesBurned: caloriesBurnedProp,
+  sessionType, distanceKm, paceMinPerKm, effortType, intervals,
 }: WorkoutPosterModalProps) {
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -95,6 +107,19 @@ export default function WorkoutPosterModal({
     }
   }, [caloriesBurnedProp]);
 
+  // Guard: determine if this session needs AI analysis at all
+  const isRunningSession = exercises.length === 0 || (template || '').toLowerCase().includes('run');
+  const alreadyAnalyzed = !!(caloriesBurnedProp != null && caloriesBurnedProp > 0 && aiMuscles && aiMuscles.length > 0);
+
+  // 15-second timeout safety net — hides the spinner if AI never responds
+  const [analysisTimedOut, setAnalysisTimedOut] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    if (isRunningSession || alreadyAnalyzed) return; // no spinner needed
+    const timer = setTimeout(() => setAnalysisTimedOut(true), 15000);
+    return () => clearTimeout(timer);
+  }, [open]);
+
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -104,7 +129,11 @@ export default function WorkoutPosterModal({
     ? aiMuscles.map(m => [m.name, m.sets] as [string, number])
     : computeMusclesFallback(exercises, template);
 
-  const isAIAnalyzed = !!(aiMuscles && aiMuscles.length > 0);
+  // isAIAnalyzed: true when analysis is done, not needed, or timed out
+  const isAIAnalyzed = !!(aiMuscles && aiMuscles.length > 0)
+    || isRunningSession
+    || alreadyAnalyzed
+    || analysisTimedOut;
 
   const totalExercises = exercises.filter(ex =>
     ex.sets.some(s => (parseInt(String(s.reps)) || 0) > 0)
@@ -177,15 +206,39 @@ export default function WorkoutPosterModal({
   const formattedDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   const shortDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-  const statsRow = [
-    { val: totalExercises, label: 'Exercises' },
-    { val: totalSets, label: 'Sets' },
-    caloriesBurned && caloriesBurned > 0
-      ? { val: caloriesBurned, label: 'kcal' }
-      : totalWeeklyKm != null && totalWeeklyKm > 0
-        ? { val: totalWeeklyKm.toFixed(1), label: 'km this week' }
-        : { val: weekStreak ?? '—', label: 'Streak' },
-  ];
+  const isRunning = sessionType === 'running' || exercises.length === 0;
+
+  // Pace formatter: decimal minutes → "M:SS"
+  const fmtPace = (minPerKm: number): string => {
+    const m = Math.floor(minPerKm);
+    const s = Math.round((minPerKm % 1) * 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  };
+
+  // Interval pace from durationMins + durationSecs over distanceM
+  const intervalPace = (i: { distanceM: number; durationMins: number; durationSecs: number }): string => {
+    const totalMins = i.durationMins + i.durationSecs / 60;
+    const km = i.distanceM / 1000;
+    return km > 0 ? fmtPace(totalMins / km) : '—';
+  };
+
+  const statsRow = isRunning
+    ? [
+        { val: durationLabel ?? '—', label: 'Time' },
+        caloriesBurned && caloriesBurned > 0
+          ? { val: caloriesBurned, label: 'kcal' }
+          : { val: '—', label: 'kcal' },
+        { val: distanceKm != null ? `${distanceKm.toFixed(1)}` : '—', label: 'km' },
+      ]
+    : [
+        { val: totalExercises, label: 'Exercises' },
+        { val: totalSets, label: 'Sets' },
+        caloriesBurned && caloriesBurned > 0
+          ? { val: caloriesBurned, label: 'kcal' }
+          : totalWeeklyKm != null && totalWeeklyKm > 0
+            ? { val: totalWeeklyKm.toFixed(1), label: 'km this week' }
+            : { val: weekStreak ?? '—', label: 'Streak' },
+      ];
 
   return (
     <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 9999, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', overflowY: 'auto' }}>
@@ -238,8 +291,64 @@ export default function WorkoutPosterModal({
             <div style={{ height: '1px', background: 'linear-gradient(90deg, rgba(16,185,129,0.4), transparent)', marginTop: '14px' }} />
           </div>
 
-          {/* Muscles */}
-          {musclesData.length > 0 && (
+          {/* Muscles (strength) / Running stats */}
+          {isRunning ? (
+            <div style={{ marginBottom: '20px' }}>
+              {/* Running stats block */}
+              <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.15)', borderRadius: '12px', padding: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
+                  {distanceKm != null && (
+                    <div>
+                      <span style={{ fontSize: '28px', fontWeight: 700, color: '#10b981', lineHeight: 1 }}>{distanceKm.toFixed(2)}</span>
+                      <span style={{ fontSize: '13px', color: '#64748b', marginLeft: '4px' }}>km</span>
+                    </div>
+                  )}
+                  {paceMinPerKm != null && (
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: '18px', fontWeight: 600, color: '#e2e8f0' }}>{fmtPace(paceMinPerKm)}</div>
+                      <div style={{ fontSize: '10px', color: '#64748b' }}>/km</div>
+                    </div>
+                  )}
+                </div>
+                {effortType && (
+                  <div style={{ display: 'inline-block', backgroundColor: 'rgba(16,185,129,0.18)', color: '#10b981', padding: '2px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {effortType}
+                  </div>
+                )}
+              </div>
+
+              {/* Interval breakdown */}
+              {intervals && intervals.length > 0 && (() => {
+                const allSameDist = intervals.every(iv => iv.distanceM === intervals[0].distanceM);
+                if (allSameDist) {
+                  const avgPaceRaw = intervals.reduce((sum, iv) => sum + (iv.durationMins + iv.durationSecs / 60) / (iv.distanceM / 1000), 0) / intervals.length;
+                  return (
+                    <div style={{ marginTop: '10px' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 600, color: '#10b981', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '6px' }}>🔁 Intervals</div>
+                      <div style={{ fontSize: '12px', color: '#94a3b8' }}>
+                        {intervals.length} × {intervals[0].distanceM}m · avg {fmtPace(avgPaceRaw)}/km
+                      </div>
+                    </div>
+                  );
+                }
+                const shown = intervals.slice(0, 5);
+                const rest = intervals.length - shown.length;
+                return (
+                  <div style={{ marginTop: '10px' }}>
+                    <div style={{ fontSize: '10px', fontWeight: 600, color: '#10b981', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '6px' }}>🔁 Intervals</div>
+                    {shown.map((iv, n) => (
+                      <div key={n} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#cbd5e1', padding: '4px 0', borderBottom: n < shown.length - 1 ? '1px solid #1e293b' : 'none' }}>
+                        <span style={{ color: '#64748b' }}>#{n + 1}</span>
+                        <span>{iv.distanceM}m</span>
+                        <span>{intervalPace(iv)}/km</span>
+                      </div>
+                    ))}
+                    {rest > 0 && <div style={{ fontSize: '10px', color: '#475569', marginTop: '4px' }}>{rest} more…</div>}
+                  </div>
+                );
+              })()}
+            </div>
+          ) : musclesData.length > 0 && (
             <div style={{ marginBottom: '20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 600, color: '#475569', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Muscles Worked</div>
