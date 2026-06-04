@@ -4,9 +4,9 @@ import {
   getDocs,
   doc,
   getDoc,
-  setDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { getGoals, calculateGoalsWithAI, DEFAULT_GOALS as SERVICE_DEFAULTS } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -64,100 +64,11 @@ function getWeekDateStrings(): string[] {
 }
 
 const DEFAULT_GOALS: RingGoals = {
-  steps: 8000,
-  caloriesBurned: 400,
-  caloriesIn: 2000,
-  sleep: 8,
+  steps: SERVICE_DEFAULTS.stepsGoal,
+  caloriesBurned: SERVICE_DEFAULTS.caloriesBurnGoal,
+  caloriesIn: SERVICE_DEFAULTS.calorieGoal,
+  sleep: SERVICE_DEFAULTS.sleepGoal,
 };
-
-// ── AI goal suggestion ─────────────────────────────────────────────────────
-
-async function suggestGoalsWithAI(uid: string): Promise<RingGoals | null> {
-  try {
-    const [profileSnap, bodySnap, labSnap] = await Promise.all([
-      getDoc(doc(db, 'users', uid, 'profile', 'data')),
-      getDocs(collection(db, 'users', uid, 'bodyComp')),
-      getDocs(collection(db, 'users', uid, 'labs')),
-    ]);
-
-    const profile = profileSnap.exists() ? profileSnap.data() as any : {};
-    const latestBody = bodySnap.docs.sort((a, b) =>
-      (b.data().date || '').localeCompare(a.data().date || '')
-    )[0]?.data() ?? {};
-    const latestLab = labSnap.docs.sort((a, b) =>
-      (b.data().date || '').localeCompare(a.data().date || '')
-    )[0]?.data() ?? {};
-
-    // Build context
-    const ctx: string[] = [];
-    if (profile.primaryGoal) ctx.push(`Goal: ${profile.primaryGoal}`);
-    if (profile.activityLevel) ctx.push(`Activity level: ${profile.activityLevel}`);
-    if (profile.fitnessFocus?.length) ctx.push(`Focus: ${profile.fitnessFocus.join(', ')}`);
-    if (profile.dob) {
-      const age = new Date().getFullYear() - new Date(profile.dob).getFullYear();
-      ctx.push(`Age: ${age}`);
-    }
-    if (profile.gender) ctx.push(`Gender: ${profile.gender}`);
-    if (latestBody.weightKg) ctx.push(`Weight: ${latestBody.weightKg}kg`);
-    if (latestBody.pbf) ctx.push(`Body fat: ${latestBody.pbf}%`);
-    if (latestBody.smm) ctx.push(`Muscle mass: ${latestBody.smm}kg`);
-    if (latestLab.results?.length) {
-      const flagged = latestLab.results.filter((r: any) => r.flag === 'high' || r.flag === 'low');
-      if (flagged.length) ctx.push(`Lab flags: ${flagged.map((r: any) => r.testName).join(', ')}`);
-    }
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 300,
-        messages: [{
-          role: 'user',
-          content: `Based on this user profile, suggest personalized daily health ring goals.
-
-${ctx.join('\n')}
-
-Return ONLY this JSON, no markdown, no other text:
-{
-  "steps": <number 6000-15000>,
-  "caloriesBurned": <number 250-800>,
-  "caloriesIn": <number 1400-3500>,
-  "sleep": <number 6-9>
-}
-
-Rules:
-- steps: based on activity level and fitness goal. Sedentary=6000, moderate=8000, active=10000-12000
-- caloriesBurned: based on fitness goal. Weight loss=500-600, maintain=350-450, muscle gain=300-400
-- caloriesIn: TDEE-based. Use weight, age, gender, activity level. Adjust for goal (deficit for loss, surplus for gain)
-- sleep: 7 for most adults, 8-9 for high activity, 7 for older adults
-- Be specific — use their actual data, not defaults`
-        }],
-      }),
-    });
-
-    if (!response.ok) return null;
-    const data = await response.json();
-    const parsed = JSON.parse(data.content?.[0]?.text?.trim() || '{}');
-    if (!parsed.steps || !parsed.caloriesBurned) return null;
-
-    return {
-      steps: Math.round(parsed.steps),
-      caloriesBurned: Math.round(parsed.caloriesBurned),
-      caloriesIn: Math.round(parsed.caloriesIn),
-      sleep: parseFloat(parsed.sleep),
-      generatedAt: new Date().toISOString(),
-    };
-  } catch (e) {
-    console.error('AI goal suggestion failed:', e);
-    return null;
-  }
-}
 
 // ── Main hook ──────────────────────────────────────────────────────────────
 
@@ -184,49 +95,32 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
         getDoc(doc(db, 'users', uid, 'nutritionLogs', todayStr)),
         getDoc(doc(db, 'users', uid, 'profile', 'data')),
       ]);
-
       const profile = profileDoc.exists() ? profileDoc.data() as any : {};
 
-      // ── Load or generate ring goals ──
-      let goals: RingGoals = { ...DEFAULT_GOALS };
-      if (profile.ringGoals) {
-        goals = { ...DEFAULT_GOALS, ...profile.ringGoals };
-        // Re-suggest if older than 7 days
-        const generatedAt = profile.ringGoals.generatedAt;
-        const agedays = generatedAt
-          ? (Date.now() - new Date(generatedAt).getTime()) / 86400000
-          : 999;
-        if (agedays > 7) {
-          suggestGoalsWithAI(uid).then(async (newGoals) => {
-            if (!newGoals) return;
-            await setDoc(
-              doc(db, 'users', uid, 'profile', 'data'),
-              { ringGoals: newGoals, calorieGoal: newGoals.caloriesIn },
-              { merge: true }
-            );
-          });
-        }
-      } else {
-        // First time — generate in background, use defaults for now
-        suggestGoalsWithAI(uid).then(async (newGoals) => {
-          if (!newGoals) return;
-          await setDoc(
-            doc(db, 'users', uid, 'profile', 'data'),
-            { ringGoals: newGoals, calorieGoal: newGoals.caloriesIn },
-            { merge: true }
-          );
-          // Re-trigger a refresh by updating state with new goals
+      // ── Load goals from goals/current (single source of truth) ──
+      const userGoals = await getGoals(uid);
+      const goals: RingGoals = {
+        steps:          userGoals.stepsGoal        ?? DEFAULT_GOALS.steps,
+        caloriesBurned: userGoals.caloriesBurnGoal ?? DEFAULT_GOALS.caloriesBurned,
+        caloriesIn:     userGoals.calorieGoal      ?? DEFAULT_GOALS.caloriesIn,
+        sleep:          userGoals.sleepGoal         ?? DEFAULT_GOALS.sleep,
+      };
+
+      // Recalculate if goals have never been set or are older than 7 days
+      const agedays = userGoals.updatedAt
+        ? (Date.now() - new Date(userGoals.updatedAt).getTime()) / 86400000
+        : 999;
+      if (agedays > 7) {
+        calculateGoalsWithAI(uid, { trigger: 'manual_refresh' }).then(newGoals => {
           setState(prev => ({
             ...prev,
-            train: { ...prev.train, goal: newGoals.steps },
-            move:  { ...prev.move,  goal: newGoals.caloriesBurned },
-            track: { ...prev.track, goal: newGoals.caloriesIn },
-            fuel:  { ...prev.fuel,  goal: newGoals.sleep },
+            train: { ...prev.train, goal: newGoals.stepsGoal        ?? prev.train.goal },
+            move:  { ...prev.move,  goal: newGoals.caloriesBurnGoal ?? prev.move.goal  },
+            track: { ...prev.track, goal: newGoals.calorieGoal      ?? prev.track.goal },
+            fuel:  { ...prev.fuel,  goal: newGoals.sleepGoal        ?? prev.fuel.goal  },
           }));
         });
       }
-      // Single source of truth: profile.calorieGoal overrides ringGoals.caloriesIn
-      if (profile.calorieGoal) goals.caloriesIn = profile.calorieGoal;
 
       // ── Habits ──
       const habits = habitsSnapshot.docs.map(d => ({ id: d.id, ...d.data() })) as any[];

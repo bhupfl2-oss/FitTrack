@@ -12,11 +12,13 @@ import {
 import { db } from '@/lib/firebase';
 import { getHabits, getWeekStatus, calculateStreak, logHabitEntry, removeHabitLog, Habit, Log, WeekStatus } from '@/lib/habits';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
+import { useGoals } from '@/services/goalsService';
 import AddHabitModal from '@/components/AddHabitModal';
 
 export default function Wellness() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { goals: userGoals } = useGoals(user?.uid);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [habitLogsToday, setHabitLogsToday] = useState<Record<string, Log[]>>({});
   const [weekStatus, setWeekStatus] = useState<WeekStatus[]>([]);
@@ -233,11 +235,9 @@ export default function Wellness() {
   const WellnessSteppers = () => {
     if (!user) return null;
 
-    const sleepHabit = habits.find(h => h.id === defaultHabitIds.sleep);
-    const sleepTarget = sleepHabit?.targetValue ?? 8;
-    const stepsHabit = habits.find(h => h.id === defaultHabitIds.steps);
-    const stepsGoal = stepsHabit?.targetValue ?? 8000;
-    const waterGoal = 8;
+    const sleepTarget = userGoals.sleepGoal ?? 7.5;
+    const stepsGoal   = userGoals.stepsGoal ?? 8000;
+    const waterGoal   = 8; // displayed in glasses; goals service stores litres separately
 
     const handleWaterChange = async (delta: number) => {
       const newCount = Math.max(0, waterCount + delta);

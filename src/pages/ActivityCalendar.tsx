@@ -5,9 +5,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   collection, query, orderBy, getDocs,
-  doc, getDoc, where, setDoc
+  doc, where, setDoc, getDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { getGoals } from '@/services/goalsService';
 
 interface DayData {
   date: string;
@@ -159,18 +160,16 @@ export default function ActivityCalendar() {
     const endStr = dateStr(end);
 
     try {
-      const [workoutSnap, habitsSnap, profileSnap] = await Promise.all([
+      const [workoutSnap, habitsSnap, userGoals] = await Promise.all([
         getDocs(collection(db, 'users', user!.uid, 'workoutSessions')),
         getDocs(collection(db, 'users', user!.uid, 'habits')),
-        getDoc(doc(db, 'users', user!.uid, 'profile', 'data')),
+        getGoals(user!.uid),
       ]);
 
-      const profile = profileSnap.exists() ? profileSnap.data() as any : {};
-      const ringGoals = profile.ringGoals || {};
-      const stepsGoal   = ringGoals.steps          || 8000;
-      const burnedGoal  = ringGoals.caloriesBurned || 400;
-      const calInGoal   = ringGoals.caloriesIn      || 2000;
-      const sleepGoal   = ringGoals.sleep           || 8;
+      const stepsGoal   = userGoals.stepsGoal        ?? 8000;
+      const burnedGoal  = userGoals.caloriesBurnGoal ?? 400;
+      const calInGoal   = userGoals.calorieGoal      ?? 2000;
+      const sleepGoal   = userGoals.sleepGoal        ?? 7.5;
 
       const habits = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
       const stepsHabit = habits.find((h: any) => h.name?.toLowerCase().includes('step'));

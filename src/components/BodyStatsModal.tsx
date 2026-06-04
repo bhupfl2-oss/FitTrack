@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Plus, ChevronLeft } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-import { collection, addDoc, updateDoc, doc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, doc, serverTimestamp, setDoc, getDoc } from 'firebase/firestore';
 import { bumpDataVersion } from '@/lib/dataVersion';
-import { calculateNutritionGoals } from '@/lib/calculateNutritionGoals';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { calculateGoalsWithAI } from '@/services/goalsService';
 
 interface BodyStatsModalProps {
   isOpen: boolean;
@@ -141,6 +141,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
     return fatMass.toFixed(1);
   };
 
+
   const handleSave = async () => {
     if (!user) return;
     setIsSaving(true);
@@ -188,7 +189,14 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
       }
 
       await bumpDataVersion(user.uid);
-      calculateNutritionGoals(user.uid).catch(e => console.warn("Nutrition goals calc failed:", e));
+
+      // Silently recalculate all goals via full AI context if weightKg + pbf are present
+      if (parseFloat(stats.weightKg) && parseFloat(stats.pbf)) {
+        calculateGoalsWithAI(user.uid, { trigger: 'body_stats_saved' }).catch(e =>
+          console.warn('Goal recalculation skipped:', e)
+        );
+      }
+
       onSave();
       onClose();
     } catch (error) {

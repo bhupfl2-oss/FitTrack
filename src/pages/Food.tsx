@@ -6,8 +6,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   doc, getDoc, setDoc,
-
 } from 'firebase/firestore';
+import { useGoals, calculateGoalsWithAI } from '@/services/goalsService';
 import { db } from '@/lib/firebase';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -29,10 +29,6 @@ interface FoodItem extends MacroInfo {
 interface DayLog {
   date: string;
   items: FoodItem[];
-  calorieGoal: number;
-  proteinGoal: number;
-  carbGoal: number;
-  fatGoal: number;
 }
 
 interface ParsedFoodItem extends MacroInfo {
@@ -60,14 +56,13 @@ const MEAL_LABELS: Record<string, string> = {
   snack: '☕ Snack',
 };
 
-const DEFAULT_GOALS = { calorieGoal: 2000, proteinGoal: 120, carbGoal: 220, fatGoal: 65 };
-
 // ── Component ──────────────────────────────────────────────────────────────
 export default function Food() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
 
+  const { goals } = useGoals(user?.uid);
   const [date, setDate] = useState(todayStr());
   const [dayLog, setDayLog] = useState<DayLog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -104,7 +99,6 @@ export default function Food() {
     if (!user) return;
     setLoading(true);
     try {
-      // Always fetch profile — so food preference + goals stay current
       const [snap, profileSnap, insightSnap] = await Promise.all([
         getDoc(doc(db, 'users', user.uid, 'nutritionLogs', d)),
         getDoc(doc(db, 'users', user.uid, 'profile', 'data')),
@@ -113,33 +107,22 @@ export default function Food() {
       const profile = profileSnap.exists() ? profileSnap.data() : {};
       setFoodPreference(((profile as any).foodPreference || '').toLowerCase());
 
-      // Use same AI insight as Home page — discard if protein goal has drifted >10g
+      // Silently recalculate goals via full AI context if goals/current is stale or missing
+      calculateGoalsWithAI(user.uid, { trigger: 'manual_refresh' }).catch(() => {});
+
+      // AI insight — discard if protein goal has drifted >10g vs goals/current
       if (insightSnap.exists()) {
         const cached = insightSnap.data() as any;
         const cachedProtein: number | null = cached.proteinGoal ?? null;
-        const currentProtein: number = (profile as any).proteinGoal ?? 0;
+        const currentProtein: number = goals.proteinGoal ?? 0;
         const stale = cachedProtein !== null && Math.abs(cachedProtein - currentProtein) > 10;
         if (!stale) setAiInsightText(cached.insights?.food || '');
       }
 
       if (snap.exists()) {
-        const stored = snap.data() as DayLog;
-        setDayLog({
-          ...stored,
-          calorieGoal: (profile as any).calorieGoal ?? (profile as any).ringGoals?.caloriesIn ?? stored.calorieGoal ?? DEFAULT_GOALS.calorieGoal,
-          proteinGoal: (profile as any).proteinGoal ?? stored.proteinGoal ?? DEFAULT_GOALS.proteinGoal,
-          carbGoal:    (profile as any).carbGoal    ?? stored.carbGoal    ?? DEFAULT_GOALS.carbGoal,
-          fatGoal:     (profile as any).fatGoal     ?? stored.fatGoal     ?? DEFAULT_GOALS.fatGoal,
-        });
+        setDayLog(snap.data() as DayLog);
       } else {
-        setDayLog({
-          date: d,
-          items: [],
-          calorieGoal: (profile as any).calorieGoal ?? (profile as any).ringGoals?.caloriesIn ?? DEFAULT_GOALS.calorieGoal,
-          proteinGoal: (profile as any).proteinGoal ?? DEFAULT_GOALS.proteinGoal,
-          carbGoal:    (profile as any).carbGoal    ?? DEFAULT_GOALS.carbGoal,
-          fatGoal:     (profile as any).fatGoal     ?? DEFAULT_GOALS.fatGoal,
-        });
+        setDayLog({ date: d, items: [] });
       }
     } catch (e) {
       console.error('Error loading food log:', e);
@@ -362,14 +345,14 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
     { calories: 0, protein: 0, carbs: 0, fat: 0 }
   ) ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
 
-  const goals = {
-    calories: dayLog?.calorieGoal ?? DEFAULT_GOALS.calorieGoal,
-    protein: dayLog?.proteinGoal ?? DEFAULT_GOALS.proteinGoal,
-    carbs: dayLog?.carbGoal ?? DEFAULT_GOALS.carbGoal,
-    fat: dayLog?.fatGoal ?? DEFAULT_GOALS.fatGoal,
+  const foodGoals = {
+    calories: goals.calorieGoal ?? 2000,
+    protein:  goals.proteinGoal ?? 120,
+    carbs:    goals.carbGoal    ?? 220,
+    fat:      goals.fatGoal     ?? 65,
   };
 
-  const calPct = Math.min(100, (totals.calories / goals.calories) * 100);
+  const calPct = Math.min(100, (totals.calories / foodGoals.calories) * 100);
 
   // Items grouped by meal slot
   const bySlot = MEAL_SLOTS.reduce((acc, slot) => {
@@ -453,16 +436,16 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
                 <span className="text-base font-bold font-mono text-orange-400 leading-none">{totals.calories}</span>
-                <span className="text-[9px] text-slate-500 font-mono">/ {goals.calories}</span>
+                <span className="text-[9px] text-slate-500 font-mono">/ {foodGoals.calories}</span>
               </div>
             </div>
 
             {/* Macro bars */}
             <div className="flex-1 space-y-2">
               {[
-                { label: 'Protein', val: totals.protein, goal: goals.protein, color: '#6366f1', textColor: 'text-indigo-400' },
-                { label: 'Carbs',   val: totals.carbs,   goal: goals.carbs,   color: '#f59e0b', textColor: 'text-amber-400' },
-                { label: 'Fat',     val: totals.fat,     goal: goals.fat,     color: '#ec4899', textColor: 'text-pink-400' },
+                { label: 'Protein', val: totals.protein, goal: foodGoals.protein, color: '#6366f1', textColor: 'text-indigo-400' },
+                { label: 'Carbs',   val: totals.carbs,   goal: foodGoals.carbs,   color: '#f59e0b', textColor: 'text-amber-400' },
+                { label: 'Fat',     val: totals.fat,     goal: foodGoals.fat,     color: '#ec4899', textColor: 'text-pink-400' },
               ].map(({ label, val, goal, color, textColor }) => (
                 <div key={label}>
                   <div className="flex justify-between items-center mb-0.5">
@@ -506,8 +489,8 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
 
         {/* Nutrition Insight — AI text (same as Home) + live gaps + suggestions */}
         {(() => {
-          const proteinGap = goals.protein - totals.protein;
-          const remaining = goals.calories - totals.calories;
+          const proteinGap = foodGoals.protein - totals.protein;
+          const remaining = foodGoals.calories - totals.calories;
           const isProteinLow = proteinGap > 20;
           const allSuggestions = [
             ...(!foodPreference.includes('veg') || foodPreference.includes('non') ? [
@@ -563,7 +546,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                     <p className="text-[9px] text-slate-600">kcal left</p>
                   </div>
                   <div className="flex-1 text-center rounded-lg py-1.5 px-2 bg-amber-500/8 border border-amber-500/20">
-                    <p className="text-xs font-bold font-mono text-amber-400">{Math.max(0, Math.round(goals.carbs - totals.carbs))}g</p>
+                    <p className="text-xs font-bold font-mono text-amber-400">{Math.max(0, Math.round(foodGoals.carbs - totals.carbs))}g</p>
                     <p className="text-[9px] text-slate-600">carbs left</p>
                   </div>
                 </div>

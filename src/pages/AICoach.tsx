@@ -11,9 +11,9 @@ import {
   getDoc,
   doc,
   setDoc,
-  updateDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -433,40 +433,38 @@ ${systemContext}`,
         showWorkoutLoad: !!workoutExercises,
       }]);
 
-      // Silent goal extraction — write any recommended nutrition goals back to profile
+      // Silent goal update — parse explicit targets from AI response, or trigger full recalc
       if (user) {
         try {
-          const extractRes = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-              'anthropic-version': '2023-06-01',
-              'anthropic-dangerous-direct-browser-access': 'true',
-            },
-            body: JSON.stringify({
-              model: 'claude-haiku-4-5',
-              max_tokens: 100,
-              system: 'Extract any specific numeric nutrition goals from this text. Return JSON only: { "proteinGoal": number|null, "calorieGoal": number|null, "carbGoal": number|null, "fatGoal": number|null }. Return null for any goal not mentioned.',
-              messages: [{ role: 'user', content: aiText }],
-            }),
-          });
-          if (extractRes.ok) {
-            const extractData = await extractRes.json();
-            const rawText = extractData.content?.[0]?.text?.trim() || '{}';
-            const extracted = JSON.parse(rawText.replace(/```json|```/g, '').trim());
-            const goalUpdate: Record<string, number> = {};
-            for (const field of ['proteinGoal', 'calorieGoal', 'carbGoal', 'fatGoal'] as const) {
-              if (typeof extracted[field] === 'number' && extracted[field] !== null) {
-                goalUpdate[field] = extracted[field];
-              }
-            }
-            if (Object.keys(goalUpdate).length > 0) {
-              await updateDoc(doc(db, 'users', user.uid, 'profile', 'data'), goalUpdate);
-              await updateDoc(doc(db, 'users', user.uid, 'aiInsights', 'daily'), { 'insights.food': '' });
-            }
+          // Regex: extract numeric targets explicitly mentioned in the response
+          const partialGoals: Record<string, number> = {};
+          const proteinMatch = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?protein/i);
+          const calMatch     = aiText.match(/(\d{3,4})\s*(?:kcal|calories)/i);
+          const carbMatch    = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?carbs?/i);
+          const fatMatch     = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?fat/i);
+          const stepsMatch   = aiText.match(/(\d{4,5})\s*steps/i);
+          const sleepMatch   = aiText.match(/(\d+\.?\d*)\s*(?:hours?|hrs?)\s*(?:of\s*)?sleep/i);
+          const waterMatch   = aiText.match(/(\d+\.?\d*)\s*(?:litres?|liters?|L)\s*(?:of\s*)?water/i);
+
+          if (proteinMatch) partialGoals.proteinGoal   = parseInt(proteinMatch[1]);
+          if (calMatch)     partialGoals.calorieGoal   = parseInt(calMatch[1]);
+          if (carbMatch)    partialGoals.carbGoal      = parseInt(carbMatch[1]);
+          if (fatMatch)     partialGoals.fatGoal       = parseInt(fatMatch[1]);
+          if (stepsMatch)   partialGoals.stepsGoal     = parseInt(stepsMatch[1]);
+          if (sleepMatch)   partialGoals.sleepGoal     = parseFloat(sleepMatch[1]);
+          if (waterMatch)   partialGoals.waterGoal     = parseFloat(waterMatch[1]);
+
+          if (Object.keys(partialGoals).length > 0) {
+            await saveGoals(user.uid, partialGoals, 'ai_coach');
+            console.log('[Goals] recalculated:', partialGoals);
           }
-        } catch (_) { /* silent — goal extraction is best-effort */ }
+
+          // Full recalculation if user was asking about goals/macros/nutrition targets
+          const goalKeywords = /goals?|targets?|macros?|how much protein|what should i eat|calories i need|nutrition plan/i;
+          if (goalKeywords.test(text)) {
+            calculateGoalsWithAI(user.uid, { trigger: 'ai_coach_conversation' }).catch(() => {});
+          }
+        } catch (_) { /* silent */ }
       }
 
       // increment count on successful response

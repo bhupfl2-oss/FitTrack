@@ -10,6 +10,7 @@ import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
+import { useGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface WorkoutSession {
@@ -107,6 +108,7 @@ function todayStr() {
 export default function Workouts() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { goals: userGoals } = useGoals(user?.uid);
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
   const [editingCalories, setEditingCalories] = useState(false);
@@ -147,7 +149,7 @@ export default function Workouts() {
   // Steps state
   const [stepsHabitId, setStepsHabitId] = useState<string | null>(null);
   const [stepsToday, setStepsToday] = useState<number>(0);
-  const [stepsGoal, setStepsGoal] = useState<number>(8000);
+  const stepsGoal = userGoals.stepsGoal ?? 8000;
   const [stepInput, setStepInput] = useState('');
   const [savingSteps, setSavingSteps] = useState(false);
 
@@ -181,7 +183,7 @@ export default function Workouts() {
         const stepsHabit = defaultHabits['steps'];
         if (stepsHabit) {
           setStepsHabitId(stepsHabit.id);
-          setStepsGoal(stepsHabit.targetValue || 8000);
+          // stepsGoal now comes from useGoals — no local state write needed
           const val = await getHabitLogToday(user.uid, stepsHabit.id);
           setStepsToday(val);
           setStepInput(String(val));
