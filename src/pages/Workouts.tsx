@@ -9,6 +9,7 @@ import { cleanData } from '@/lib/cleanData';
 import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
+import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface WorkoutSession {
@@ -131,7 +132,8 @@ export default function Workouts() {
   // Workout library state
   const [libraryExpanded, setLibraryExpanded] = useState(false);
   const [libraryTab, setLibraryTab] = useState<'strength' | 'cardio' | 'mindbody' | 'other'>('strength');
-  const [todayRecommendation, setTodayRecommendation] = useState<{ type: string; title: string; subtitle: string; emoji: string } | null>(null);
+  const [todayRecommendation, setTodayRecommendation] = useState<WorkoutRecommendation | null>(null);
+  const [workedOutToday, setWorkedOutToday] = useState(false);
 
   // AI chat state — multi-turn
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -158,14 +160,21 @@ export default function Workouts() {
     if (!user) return;
     const fetchData = async () => {
       try {
-        const [sessSnap, tSnap, profileSnap] = await Promise.all([
+        const [sessSnap, tSnap] = await Promise.all([
           getDocs(query(collection(db, 'users', user.uid, 'workoutSessions'), orderBy('date', 'desc'), limit(20))),
           getDocs(collection(db, 'users', user.uid, 'workoutTemplates')),
-          getDoc(doc(db, 'users', user.uid, 'profile', 'data')),
         ]);
         const fetchedSessions = sessSnap.docs.map(d => ({ id: d.id, ...d.data() } as WorkoutSession));
         setSessions(fetchedSessions);
         setCustomWorkouts(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as CustomWorkout)));
+        setWorkedOutToday(fetchedSessions.some(s => s.date === todayStr()));
+
+        // AI recommendation — runs after UI is unblocked
+        const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+        const profile = profileSnap.exists() ? profileSnap.data() : {};
+        getWorkoutRecommendation(user.uid, fetchedSessions, profile, []).then(rec => {
+          if (rec) setTodayRecommendation(rec);
+        });
 
         // ensureDefaultHabits is cached after first call — fast on repeat visits
         const defaultHabits = await ensureDefaultHabits(user.uid);
@@ -178,9 +187,6 @@ export default function Workouts() {
           setStepInput(String(val));
         }
 
-        // Compute today's recommendation based on last session + profile
-        const profile = profileSnap.exists() ? profileSnap.data() as any : {};
-        computeRecommendation(fetchedSessions, profile);
       } catch (e) {
         console.error('Error fetching data:', e);
       } finally {
@@ -194,32 +200,6 @@ export default function Workouts() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
-
-  const computeRecommendation = (fetchedSessions: WorkoutSession[], profile: any) => {
-    const focus = profile.fitnessFocus || [];
-    const goal = (profile.primaryGoal || '').toLowerCase();
-
-    // Detect what was done recently to rotate
-    const last = fetchedSessions[0];
-    const lastTemplate = last?.template?.toLowerCase() || '';
-
-    // Simple rotation: push → pull → legs → push
-    if (lastTemplate.includes('push') || lastTemplate.includes('chest')) {
-      setTodayRecommendation(WORKOUT_LIBRARY.strength[1]); // pull
-    } else if (lastTemplate.includes('pull') || lastTemplate.includes('back')) {
-      setTodayRecommendation(WORKOUT_LIBRARY.strength[2]); // legs
-    } else if (lastTemplate.includes('leg')) {
-      setTodayRecommendation(WORKOUT_LIBRARY.strength[0]); // push
-    } else if (focus.some((f: string) => f.includes('Running') || f.includes('Marathon'))) {
-      setTodayRecommendation(WORKOUT_LIBRARY.cardio[0]); // running
-    } else if (focus.some((f: string) => f.includes('Yoga'))) {
-      setTodayRecommendation(WORKOUT_LIBRARY.mindbody[0]); // yoga
-    } else if (goal.includes('muscle')) {
-      setTodayRecommendation(WORKOUT_LIBRARY.strength[0]); // push
-    } else {
-      setTodayRecommendation(WORKOUT_LIBRARY.strength[5]); // full body
-    }
-  };
 
   // ── Save steps ─────────────────────────────────────────────────────────
   const saveSteps = async (val: number) => {
@@ -958,33 +938,63 @@ Rules:
 
         {/* ── TODAY'S RECOMMENDATION + WORKOUT LIBRARY ── */}
         <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-          {/* Recommendation header */}
-          <div className="p-4 border-b border-slate-800">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Today's Pick</span>
+          {workedOutToday ? (
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🎉</span>
+                <div>
+                  <div className="text-sm font-semibold text-white">Workout done for today!</div>
+                  <div className="text-[10px] text-emerald-400 font-mono mt-0.5">
+                    {sessions[0]?.template} · Great work 💪
+                  </div>
+                </div>
+              </div>
               <button onClick={() => setLibraryExpanded(e => !e)}
                 className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
                 {libraryExpanded ? 'Close' : 'All workouts'}
                 {libraryExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
               </button>
             </div>
-            {todayRecommendation && (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="text-2xl">{todayRecommendation.emoji}</span>
-                  <div>
-                    <div className="text-sm font-semibold text-white">{todayRecommendation.title}</div>
-                    <div className="text-[10px] text-slate-500">{todayRecommendation.subtitle}</div>
-                  </div>
-                </div>
-                <button
-                  onClick={() => startWorkoutFromLibrary(todayRecommendation.type)}
-                  className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">
-                  Start
+          ) : (
+            <div className="p-4 border-b border-slate-800">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Today's Pick</span>
+                <button onClick={() => setLibraryExpanded(e => !e)}
+                  className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                  {libraryExpanded ? 'Close' : 'All workouts'}
+                  {libraryExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
               </div>
-            )}
-          </div>
+              {todayRecommendation ? (
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{todayRecommendation.emoji}</span>
+                    <div>
+                      <div className="text-sm font-semibold text-white">{todayRecommendation.title}</div>
+                      <div className="text-[10px] text-slate-500">{todayRecommendation.subtitle}</div>
+                      {todayRecommendation.reason && (
+                        <div className="text-[10px] text-slate-500 italic mt-0.5">{todayRecommendation.reason}</div>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => startWorkoutFromLibrary(todayRecommendation.type)}
+                    className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">
+                    Start
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 animate-pulse">
+                  <div className="w-8 h-8 bg-slate-800 rounded-lg flex-shrink-0" />
+                  <div className="flex-1 space-y-1.5">
+                    <div className="h-3 bg-slate-800 rounded w-24" />
+                    <div className="h-2 bg-slate-800 rounded w-36" />
+                  </div>
+                  <div className="w-14 h-8 bg-slate-800 rounded-lg" />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Expandable library */}
           {libraryExpanded && (

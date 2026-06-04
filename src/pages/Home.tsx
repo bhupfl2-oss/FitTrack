@@ -9,6 +9,7 @@ import {
 import { db } from '@/lib/firebase';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
+import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
 import { useActivityRings } from '@/hooks/useActivityRings';
 import html2canvas from 'html2canvas';
 
@@ -25,14 +26,7 @@ const labRanges: { [key: string]: { min: number; max: number } } = {
   creatinine: { min: 0.7, max: 1.3 },
 };
 
-const workoutTemplates = {
-  'Push': { groups: ['Chest', 'Shoulders', 'Triceps'], duration: 45 },
-  'Pull': { groups: ['Back', 'Biceps'], duration: 40 },
-  'Legs': { groups: ['Quads', 'Hamstrings', 'Glutes', 'Calves'], duration: 50 },
-  'Running': { groups: ['Cardio', 'Endurance'], duration: 30 },
-  'Upper': { groups: ['Chest', 'Back', 'Shoulders'], duration: 55 },
-  'Lower': { groups: ['Quads', 'Hamstrings', 'Glutes'], duration: 45 },
-};
+
 
 const muscleGroupMap: Record<string, string[]> = {
   push: ['Push', 'Chest', 'Shoulders', 'Triceps'], pushday: ['Push', 'Chest', 'Shoulders', 'Triceps'],
@@ -60,10 +54,12 @@ interface WeeklyPosterProps {
   weekStreak: number;
   thisWeekCount: number;
   thisWeekDays: { label: string; hasWorkout: boolean; isFuture: boolean }[];
-  rings: { train: any; move: any; track: any; fuel: any };
+  rings: { train: any; move: any; track: any; fuel: any; weekDays: any[] };
+  weeklyCalsBurned?: number;
+  weeklyNutrition?: number;
 }
 
-function WeeklyPosterModal({ open, onClose, weekSessions, weekStreak, thisWeekCount, thisWeekDays, rings }: WeeklyPosterProps) {
+function WeeklyPosterModal({ open, onClose, weekSessions, thisWeekCount, thisWeekDays, rings, weeklyCalsBurned = 0, weeklyNutrition = 0 }: WeeklyPosterProps) {
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [userPhoto, setUserPhoto] = useState<string | null>(null);
@@ -81,7 +77,7 @@ function WeeklyPosterModal({ open, onClose, weekSessions, weekStreak, thisWeekCo
   const weekLabel = `${monday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${sunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Total duration this week
-  const totalMins = weekSessions.reduce((sum, s) => sum + (s.duration || (s as any).durationMins || 0), 0);
+  const totalMins = Math.round(weekSessions.reduce((sum, s) => sum + (s.duration || (s as any).durationMins || 0), 0));
 
   // Muscle groups trained this week
   const muscleSet = new Set<string>();
@@ -93,11 +89,21 @@ function WeeklyPosterModal({ open, onClose, weekSessions, weekStreak, thisWeekCo
   const muscles = Array.from(muscleSet).filter(m => !['Cardio', 'Endurance'].includes(m));
 
   // Ring bars data
+  const weeklySteps  = rings.weekDays.reduce((sum, d) => sum + (d.trainVal * (rings.train.goal || 8000)), 0);
+  const weeklyBurned = weeklyCalsBurned || 0;
+  const weeklyCalIn  = weeklyNutrition  || 0;
+  const weeklySleep  = rings.weekDays.reduce((sum, d) => sum + (d.fuelVal  * (rings.fuel.goal  || 8)), 0);
+
+  const stepsWeeklyGoal  = (rings.train.goal || 8000) * 7;
+  const burnedWeeklyGoal = (rings.move.goal  || 400)  * 7;
+  const calInWeeklyGoal  = (rings.track.goal || 2000) * 7;
+  const sleepWeeklyGoal  = (rings.fuel.goal  || 8)    * 7;
+
   const ringBars = [
-    { label: 'Train', pct: Math.round(rings.train.pct), color: '#ff375f' },
-    { label: 'Move',  pct: Math.round(rings.move.pct),  color: '#30d158' },
-    { label: 'Track', pct: Math.round(rings.track.pct), color: '#32ade6' },
-    { label: 'Fuel',  pct: Math.round(rings.fuel.pct),  color: '#f97316' },
+    { label: 'Steps',    pct: Math.round((weeklySteps  / stepsWeeklyGoal)  * 100), color: '#ff375f' },
+    { label: 'Burned',   pct: Math.round((weeklyBurned / burnedWeeklyGoal)  * 100), color: '#30d158' },
+    { label: 'Calories', pct: Math.round((weeklyCalIn  / calInWeeklyGoal)   * 100), color: '#32ade6' },
+    { label: 'Sleep',    pct: Math.round((weeklySleep  / sleepWeeklyGoal)   * 100), color: '#f97316' },
   ];
 
   const handleShare = async () => {
@@ -167,15 +173,16 @@ function WeeklyPosterModal({ open, onClose, weekSessions, weekStreak, thisWeekCo
             <div style={{ color: '#64748b', fontSize: '10px' }}>{weekLabel}</div>
           </div>
 
-          {/* Big stats row */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', marginBottom: '18px', gap: '8px' }}>
+          {/* Big stats grid — 2×2 */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '16px' }}>
             {[
-              { val: thisWeekCount, label: 'Sessions' },
-              { val: totalMins > 0 ? `${totalMins}m` : '—', label: 'Total time' },
-              { val: weekStreak > 0 ? `${weekStreak}wk` : '—', label: 'Streak' },
-            ].map(({ val, label }) => (
+              { val: thisWeekCount, label: 'Sessions', color: '#f1f5f9' },
+              { val: totalMins > 0 ? `${totalMins}m` : '—', label: 'Active time', color: '#f1f5f9' },
+              { val: weeklyCalsBurned > 0 ? weeklyCalsBurned : '—', label: 'Kcal burned', color: '#f97316' },
+              { val: weeklyNutrition > 0 ? weeklyNutrition : '—', label: 'Kcal consumed', color: '#32ade6' },
+            ].map(({ val, label, color }) => (
               <div key={label} style={{ backgroundColor: 'rgba(15,23,42,0.6)', borderRadius: '10px', padding: '10px 8px', textAlign: 'center', border: '1px solid rgba(255,255,255,0.06)' }}>
-                <div style={{ fontSize: '20px', fontWeight: 700, color: '#f1f5f9' }}>{val}</div>
+                <div style={{ fontSize: '20px', fontWeight: 700, color }}>{val}</div>
                 <div style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: '2px' }}>{label}</div>
               </div>
             ))}
@@ -268,6 +275,190 @@ function WeeklyPosterModal({ open, onClose, weekSessions, weekStreak, thisWeekCo
   );
 }
 
+// ── Training Volume Chart ──────────────────────────────────────────────────
+
+type TimeRange = 'day' | 'week' | 'month' | 'year';
+type Metric = 'sessions' | 'minutes' | 'calories' | 'km';
+
+const toDateStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const getValue = (session: any, metric: Metric): number => {
+  if (metric === 'sessions') return 1;
+  if (metric === 'minutes')  return session.durationMins || 0;
+  if (metric === 'calories') return session.caloriesBurned || 0;
+  if (metric === 'km')       return session.distanceKm || 0;
+  return 0;
+};
+
+interface TrainingVolumeChartProps { userId: string; }
+
+function TrainingVolumeChart({ userId }: TrainingVolumeChartProps) {
+  const [timeRange, setTimeRange] = useState<TimeRange>('week');
+  const [metric, setMetric]       = useState<Metric>('sessions');
+  const [chartData, setChartData] = useState<{ label: string; value: number }[]>([]);
+  const [loading, setLoading]     = useState(false);
+
+  const fetchChartData = async () => {
+    if (!userId) return;
+    setLoading(true);
+    try {
+      const now = new Date();
+      let startDate: Date;
+      if (timeRange === 'day')   startDate = new Date(now.getTime() - 14 * 86400000);
+      else if (timeRange === 'week')  startDate = new Date(now.getTime() - 12 * 7 * 86400000);
+      else if (timeRange === 'month') startDate = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+      else                            startDate = new Date(now.getFullYear() - 2, 0, 1);
+
+      const startStr = toDateStr(startDate);
+      const snap = await getDocs(query(
+        collection(db, 'users', userId, 'workoutSessions'),
+        where('date', '>=', startStr),
+        orderBy('date', 'asc')
+      ));
+      const sessions = snap.docs.map(d => d.data() as any);
+
+      const buckets: { label: string; key: string; endKey?: string; value: number }[] = [];
+
+      if (timeRange === 'day') {
+        for (let i = 13; i >= 0; i--) {
+          const d = new Date(now.getTime() - i * 86400000);
+          buckets.push({ key: toDateStr(d), label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), value: 0 });
+        }
+        sessions.forEach(s => {
+          const b = buckets.find(b => b.key === s.date);
+          if (b) b.value += getValue(s, metric);
+        });
+      }
+
+      if (timeRange === 'week') {
+        for (let i = 11; i >= 0; i--) {
+          const mon = new Date(now);
+          mon.setDate(now.getDate() - ((now.getDay() + 6) % 7) - i * 7);
+          mon.setHours(0, 0, 0, 0);
+          const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+          buckets.push({ key: toDateStr(mon), endKey: toDateStr(sun), label: mon.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), value: 0 });
+        }
+        sessions.forEach(s => {
+          const b = buckets.find(b => s.date >= b.key && s.date <= (b.endKey ?? b.key));
+          if (b) b.value += getValue(s, metric);
+        });
+      }
+
+      if (timeRange === 'month') {
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+          buckets.push({ key, label: d.toLocaleDateString('en-US', { month: 'short' }), value: 0 });
+        }
+        sessions.forEach(s => {
+          const b = buckets.find(b => b.key === s.date?.slice(0, 7));
+          if (b) b.value += getValue(s, metric);
+        });
+      }
+
+      if (timeRange === 'year') {
+        for (let i = 2; i >= 0; i--) {
+          const year = now.getFullYear() - i;
+          buckets.push({ key: String(year), label: String(year), value: 0 });
+        }
+        sessions.forEach(s => {
+          const b = buckets.find(b => b.key === s.date?.slice(0, 4));
+          if (b) b.value += getValue(s, metric);
+        });
+      }
+
+      setChartData(buckets.map(b => ({ label: b.label, value: Math.round(b.value * 10) / 10 })));
+    } catch (e) {
+      console.error('fetchChartData error:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchChartData(); }, [timeRange, metric, userId]);
+
+  const CHART_H = 64;
+  const maxVal  = Math.max(...chartData.map(d => d.value), 1);
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-slate-500 text-[10px] uppercase tracking-wider font-mono">Training Volume</span>
+        <div className="flex bg-slate-800 rounded-lg p-0.5 gap-0.5">
+          {(['sessions', 'minutes', 'calories', 'km'] as Metric[]).map(m => (
+            <button key={m} onClick={() => setMetric(m)}
+              className={`px-2 py-1 rounded text-[9px] font-mono transition-colors ${
+                metric === m ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-500'
+              }`}>
+              {m === 'sessions' ? '# sessions' : m === 'minutes' ? 'mins' : m === 'calories' ? 'kcal' : 'km'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Bars */}
+      {loading ? (
+        <div className="flex items-center justify-center" style={{ height: `${CHART_H}px` }}>
+          <div className="w-4 h-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : (
+        <div className="flex items-end gap-1 mb-2" style={{ height: `${CHART_H + 14}px` }}>
+          {chartData.map((d, i) => {
+            const pct  = d.value / maxVal;
+            const barH = Math.max(pct * CHART_H, d.value > 0 ? 4 : 1);
+            const isLast = i === chartData.length - 1;
+            const color  = d.value === 0 ? '#475569' : isLast ? '#10b981' : '#34d399';
+            const label  = d.value === 0 ? '' :
+              metric === 'minutes' ? `${d.value}m` :
+              metric === 'calories' ? `${d.value}` :
+              metric === 'km' ? `${d.value}k` :
+              String(d.value);
+            return (
+              <div key={i} className="flex-1 flex flex-col items-center justify-end">
+                {/* value label above bar */}
+                <span className="text-[8px] font-mono mb-0.5 leading-none" style={{ color, opacity: d.value === 0 ? 0 : 1 }}>
+                  {label}
+                </span>
+                <div className="w-full rounded-t transition-all" style={{
+                  height: `${barH}px`,
+                  backgroundColor: d.value === 0 ? '#1e293b' : isLast ? '#10b981' : '#34d399',
+                  opacity: d.value === 0 ? 0.4 : 1,
+                }} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* X-axis labels */}
+      <div className="flex gap-1 mb-3">
+        {chartData.map((d, i) => {
+          const show = timeRange === 'month' || timeRange === 'year' ? true : i % 2 === 0;
+          return (
+            <div key={i} className="flex-1 text-center">
+              {show && <span className="text-[7px] font-mono text-slate-600">{d.label}</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Time range switcher */}
+      <div className="flex bg-slate-800 rounded-lg p-0.5 gap-0.5">
+        {(['day', 'week', 'month', 'year'] as TimeRange[]).map(r => (
+          <button key={r} onClick={() => setTimeRange(r)}
+            className={`flex-1 py-1.5 rounded text-[10px] font-mono transition-colors ${
+              timeRange === r ? 'bg-slate-700 text-white' : 'text-slate-500'
+            }`}>
+            {r.charAt(0).toUpperCase() + r.slice(1)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Home component ────────────────────────────────────────────────────
 export default function Home() {
   const { user } = useAuth();
@@ -278,6 +469,7 @@ export default function Home() {
   const [loadingQuote, setLoadingQuote] = useState<{ text: string; sub: string } | null>(null);
   const quoteCardRef = useRef<HTMLDivElement>(null);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
+  const [todayRecommendation, setTodayRecommendation] = useState<WorkoutRecommendation | null>(null);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
   const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
@@ -292,6 +484,9 @@ export default function Home() {
   const [savingSteps, setSavingSteps] = useState(false);
   const [savingSleep, setSavingSleep] = useState(false);
   const [showWeeklyPoster, setShowWeeklyPoster] = useState(false);
+  const [weeklyCalsBurned, setWeeklyCalsBurned] = useState(0);
+  const [weeklyNutrition, setWeeklyNutrition] = useState(0);
+  const [_fetchingPosterData, setFetchingPosterData] = useState(false);
   const todayStr = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
   const [ringsKey, setRingsKey] = useState(0);
 
@@ -413,6 +608,42 @@ export default function Home() {
     return pool[Math.floor(Math.random() * pool.length)];
   };
 
+  const fetchWeeklyNutrition = async () => {
+    if (!user) return;
+    setFetchingPosterData(true);
+    try {
+      const now = new Date();
+      const monday = new Date(now);
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+      monday.setHours(0, 0, 0, 0);
+
+      const { weekSessions } = calculateStreak();
+      const burned = weekSessions.reduce((sum, s) => sum + ((s as any).caloriesBurned || 0), 0);
+      setWeeklyCalsBurned(burned);
+
+      const days = Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(monday);
+        d.setDate(monday.getDate() + i);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      });
+      const nutritionFetches = days.map(day =>
+        getDoc(doc(db, 'users', user.uid, 'nutritionLogs', day))
+          .then(snap => snap.exists() ? (snap.data().totalCalories || 0) : 0)
+          .catch(() => 0)
+      );
+      const totals = await Promise.all(nutritionFetches);
+      setWeeklyNutrition(totals.reduce((a, b) => a + b, 0));
+    } catch (e) {
+      console.error('fetchWeeklyNutrition error:', e);
+    } finally {
+      setFetchingPosterData(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showWeeklyPoster) fetchWeeklyNutrition();
+  }, [showWeeklyPoster]);
+
   const fetchAIInsights = useCallback(async () => {
     if (!user) return;
     setIsLoadingInsights(true);
@@ -461,6 +692,14 @@ export default function Home() {
         setWorkoutSessions(sessions); setMuscleAlert(getMuscleGroupAlert(sessions));
         const bodyStatsData = bodySnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BodyStats));
         setBodyStats(bodyStatsData); setLoadingQuote(generateLoadingQuote(sessions, bodyStatsData));
+
+        // AI workout recommendation — non-blocking, uses cache when available
+        getDoc(doc(db, 'users', user.uid, 'profile', 'data')).then(pSnap => {
+          const profile = pSnap.exists() ? pSnap.data() : {};
+          getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2)).then(rec => {
+            if (rec) setTodayRecommendation(rec);
+          });
+        });
         setLabResults(labsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)));
         const now = new Date(); const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
         const tests = testsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
@@ -500,12 +739,6 @@ export default function Home() {
         else { const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'fittrack-quote.png'; a.click(); URL.revokeObjectURL(url); }
       }, 'image/png');
     } catch (e) { console.error('Share failed:', e); }
-  };
-
-  const getSuggestedWorkout = () => {
-    if (workoutSessions.length === 0) return null;
-    const rotation: { [key: string]: string } = { 'Push': 'Pull', 'pull': 'Legs', 'Pull': 'Legs', 'Legs': 'Running', 'legs': 'Running', 'Running': 'Push', 'running': 'Push', 'pushday': 'Pull', 'pullday': 'Legs', 'legsday': 'Running' };
-    return rotation[workoutSessions[0].template] || 'Push';
   };
 
   const calculateStreak = () => {
@@ -595,7 +828,6 @@ export default function Home() {
     );
   }
 
-  const suggestedWorkout = getSuggestedWorkout();
   const streakData = calculateStreak();
   const bodyCompStats = getBodyCompStats();
   const fatLossStatus = getFatLossStatus();
@@ -737,27 +969,62 @@ export default function Home() {
         <div className="border-t border-slate-800/60" />
 
         {/* Today's Workout */}
-        <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
-          <div className="flex items-center gap-2 mb-2"><Target className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-400 text-[10px] font-bold tracking-wider uppercase">Today's Workout</span></div>
-          {suggestedWorkout ? (<><div className="text-lg font-semibold text-white">{suggestedWorkout}</div><div className="text-xs text-slate-400 mt-0.5 mb-3">{workoutTemplates[suggestedWorkout as keyof typeof workoutTemplates]?.groups.join(', ')} · ~{workoutTemplates[suggestedWorkout as keyof typeof workoutTemplates]?.duration} min</div></>) : (<><div className="text-lg font-semibold text-white mb-1">Start your first workout</div><div className="text-xs text-slate-400 mb-3">Choose a template to get started</div></>)}
-          <button onClick={() => suggestedWorkout === 'Running' ? navigate('/running-session') : navigate('/workout-session', { state: { template: suggestedWorkout?.toLowerCase().replace(' ', '') || '' } })} className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium transition-colors">{suggestedWorkout ? `Start ${suggestedWorkout} →` : 'Choose Template →'}</button>
-        </div>
-
-        {/* Streak */}
-        <div className="bg-slate-900 rounded-xl px-4 py-3 border border-slate-800 flex items-center justify-between">
-          <div>
-            <div className="flex items-baseline gap-1"><span className="text-lg font-bold text-white">{streakData.weeks}</span><span className="text-xs text-slate-500">weeks streak</span></div>
-            <div className="text-[10px] text-slate-600 mt-0.5">{streakData.thisWeekCount} done this week</div>
-          </div>
-          <div className="flex items-end gap-1.5">
-            {streakData.thisWeekDays.map((day, i) => (
-              <div key={i} className="flex flex-col items-center gap-0.5">
-                <div className={`w-2 h-2 rounded-sm ${day.hasWorkout ? 'bg-emerald-500' : day.isFuture ? 'bg-slate-800' : 'bg-slate-700'}`} />
-                <span className="text-[9px] text-slate-600">{day.label}</span>
+        {workoutSessions[0]?.date === todayStr ? (
+          <div className="bg-slate-900 rounded-xl p-4 border border-slate-800 flex items-center gap-3">
+            <span className="text-2xl">🎉</span>
+            <div>
+              <div className="text-sm font-semibold text-white">Workout done for today!</div>
+              <div className="text-[10px] text-emerald-400 font-mono mt-0.5">
+                {workoutSessions[0].template} · Great work 💪
               </div>
-            ))}
+            </div>
           </div>
-        </div>
+        ) : todayRecommendation ? (
+          <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+            <div className="flex items-center gap-2 mb-3">
+              <Target className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-400 text-[10px] font-bold tracking-wider uppercase">Today's Workout</span>
+            </div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{todayRecommendation.emoji}</span>
+                <div>
+                  <div className="text-base font-semibold text-white">{todayRecommendation.title}</div>
+                  <div className="text-xs text-slate-400 mt-0.5">{todayRecommendation.subtitle}</div>
+                  {todayRecommendation.reason && (
+                    <div className="text-[10px] text-slate-500 italic mt-0.5">{todayRecommendation.reason}</div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => ['running', 'walk', 'cycling'].includes(todayRecommendation.type)
+                ? navigate('/running-session')
+                : navigate('/workout-session', { state: { template: todayRecommendation.type } })}
+              className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium transition-colors">
+              Start {todayRecommendation.title} →
+            </button>
+          </div>
+        ) : (
+          <div className="bg-slate-900 rounded-xl p-4 border border-slate-800 animate-pulse">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-3.5 h-3.5 bg-slate-800 rounded" />
+              <div className="h-2.5 bg-slate-800 rounded w-28" />
+            </div>
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-8 h-8 bg-slate-800 rounded-lg flex-shrink-0" />
+              <div className="flex-1 space-y-1.5">
+                <div className="h-3.5 bg-slate-800 rounded w-24" />
+                <div className="h-2 bg-slate-800 rounded w-36" />
+              </div>
+            </div>
+            <div className="h-9 bg-slate-800 rounded-lg w-full" />
+          </div>
+        )}
+
+        <div className="border-t border-slate-800/60" />
+
+        <TrainingVolumeChart userId={user?.uid || ''} />
 
       </div>
 
@@ -772,6 +1039,8 @@ export default function Home() {
         thisWeekCount={streakData.thisWeekCount}
         thisWeekDays={streakData.thisWeekDays}
         rings={rings}
+        weeklyCalsBurned={weeklyCalsBurned}
+        weeklyNutrition={weeklyNutrition}
       />
     </div>
   );

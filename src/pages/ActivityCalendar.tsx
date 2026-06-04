@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Pencil } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   collection, query, orderBy, getDocs,
-  doc, getDoc, where
+  doc, getDoc, where, setDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
@@ -24,6 +24,7 @@ interface DayData {
   calInGoal?: number;
   sleepHrs?: number;
   sleepGoal?: number;
+  waterCount?: number;
   bodyStats?: { weightKg?: number; pbf?: number; smm?: number; loggedDate?: string };
 }
 
@@ -91,6 +92,9 @@ export default function ActivityCalendar() {
   usePageLoadTime('ActivityCalendar', loading);
   const [selectedDate, setSelectedDate] = useState<string | null>(dateStr(now));
   const [expandedExercises, setExpandedExercises] = useState(false);
+  const [editingField, setEditingField] = useState<'steps' | 'sleep' | 'water' | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [savingField, setSavingField] = useState(false);
 
   const today = dateStr(now);
 
@@ -110,6 +114,43 @@ export default function ActivityCalendar() {
     if (!user) return;
     fetchMonthData(viewYear, viewMonth);
   }, [user, viewYear, viewMonth]);
+
+  const isPastDate = (date: string) => date < today;
+
+  const saveHabitValue = async (field: 'steps' | 'sleep' | 'water', value: number, date: string) => {
+    if (!user) return;
+    setSavingField(true);
+    try {
+      const habitsSnap = await getDocs(collection(db, 'users', user.uid, 'habits'));
+      const habits = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+      const habit = habits.find((h: any) => {
+        const n = h.name?.toLowerCase() || '';
+        if (field === 'steps') return n.includes('step');
+        if (field === 'sleep') return n.includes('sleep');
+        if (field === 'water') return n.includes('water');
+        return false;
+      });
+      if (!habit) return;
+      const logRef = doc(db, 'users', user.uid, 'habits', habit.id, 'logs', date);
+      await setDoc(logRef, { date, value, updatedAt: new Date().toISOString() }, { merge: true });
+      // Update local monthData immediately — no full re-fetch needed
+      setMonthData(prev => {
+        const existing = prev[date] || {} as DayData;
+        const stepsGoal = (existing as any).stepsGoal || 8000;
+        const sleepGoal = (existing as any).sleepGoal || 8;
+        const updated: any = { ...existing };
+        if (field === 'steps') { updated.steps = value; updated.trainVal = Math.min(1, value / stepsGoal); }
+        if (field === 'sleep') { updated.sleepHrs = value; updated.fuelVal = Math.min(1, value / sleepGoal); }
+        if (field === 'water') { updated.waterCount = value; }
+        return { ...prev, [date]: updated };
+      });
+      setEditingField(null);
+    } catch (e) {
+      console.error('saveHabitValue error:', e);
+    } finally {
+      setSavingField(false);
+    }
+  };
 
   const fetchMonthData = async (year: number, month: number) => {
     setLoading(true);
@@ -134,6 +175,7 @@ export default function ActivityCalendar() {
       const habits = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
       const stepsHabit = habits.find((h: any) => h.name?.toLowerCase().includes('step'));
       const sleepHabit = habits.find((h: any) => h.name?.toLowerCase().includes('sleep'));
+      const waterHabit = habits.find((h: any) => h.name?.toLowerCase().includes('water'));
 
       // Build workout map — keyed by date string
       const workoutMap: Record<string, any> = {};
@@ -166,9 +208,10 @@ export default function ActivityCalendar() {
           .catch(() => {});
       });
 
-      // Fetch steps and sleep logs for the month
+      // Fetch steps, sleep, and water logs for the month
       const stepsMap: Record<string, number> = {};
       const sleepMap: Record<string, number> = {};
+      const waterMap: Record<string, number> = {};
 
       const habitLogFetches: Promise<void>[] = [];
 
@@ -195,6 +238,20 @@ export default function ActivityCalendar() {
             snap.docs.forEach(d => {
               const data = d.data() as any;
               sleepMap[data.date || d.id] = data.value ?? 0;
+            });
+          }).catch(() => {})
+        );
+      }
+
+      if (waterHabit) {
+        habitLogFetches.push(
+          getDocs(query(
+            collection(db, 'users', user!.uid, 'habits', waterHabit.id, 'logs'),
+            where('date', '>=', startStr), where('date', '<=', endStr)
+          )).then(snap => {
+            snap.docs.forEach(d => {
+              const data = d.data() as any;
+              waterMap[data.date || d.id] = data.value ?? 0;
             });
           }).catch(() => {})
         );
@@ -234,6 +291,7 @@ export default function ActivityCalendar() {
           calBurned, calBurnedGoal: burnedGoal,
           calIn, calInGoal,
           sleepHrs: sleep, sleepGoal,
+          waterCount: waterMap[ds] || 0,
           bodyStats: closestBody ? {
             weightKg: closestBody.weightKg,
             pbf: closestBody.pbf,
@@ -389,6 +447,26 @@ export default function ActivityCalendar() {
             ) : (
               <div className="text-xs text-slate-600">No steps logged</div>
             )}
+            {isPastDate(selected.date) && (
+              editingField === 'steps' ? (
+                <div className="flex items-center gap-2 mt-2">
+                  <input type="number" value={editValue} onChange={e => setEditValue(e.target.value)}
+                    className="w-24 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono text-white focus:outline-none focus:border-red-400"
+                    autoFocus />
+                  <button onClick={() => saveHabitValue('steps', parseInt(editValue) || 0, selected.date)}
+                    disabled={savingField}
+                    className="text-[10px] font-mono bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-1 rounded-lg disabled:opacity-50">
+                    {savingField ? '…' : '✓ Save'}
+                  </button>
+                  <button onClick={() => setEditingField(null)} className="text-slate-500 text-xs">✕</button>
+                </div>
+              ) : (
+                <button onClick={() => { setEditValue(String(selected.steps || 0)); setEditingField('steps'); }}
+                  className="flex items-center gap-1 mt-1 text-[9px] font-mono text-slate-600 hover:text-red-400 transition-colors">
+                  <Pencil className="w-2.5 h-2.5" /> Edit
+                </button>
+              )
+            )}
           </div>
 
           {/* CALORIES BURNED (2nd/green) */}
@@ -417,6 +495,19 @@ export default function ActivityCalendar() {
             {selected.workout && (
               <div className="mt-2 pt-2 border-t border-slate-800/50">
                 <div className="text-[10px] font-mono text-slate-500 capitalize mb-1">{selected.workout.template}</div>
+                <div className="flex gap-3 mt-1 mb-2">
+                  {selected.workout.durationMins != null && selected.workout.durationMins > 0 && (
+                    <span className="text-[10px] font-mono text-emerald-400">
+                      ⏱ {Math.floor(selected.workout.durationMins)}m
+                      {Math.round((selected.workout.durationMins % 1) * 60) > 0
+                        ? ` ${Math.round((selected.workout.durationMins % 1) * 60)}s`
+                        : ''}
+                    </span>
+                  )}
+                  {selected.calBurned != null && selected.calBurned > 0 && (
+                    <span className="text-[10px] font-mono text-orange-400">🔥 {selected.calBurned} kcal</span>
+                  )}
+                </div>
                 {selected.workout.type === 'running' ? (
                   <div className="text-xs text-slate-400">🏃 {selected.workout.distanceKm ?? '--'}km · {selected.workout.durationMins ?? '--'} min</div>
                 ) : (
@@ -480,6 +571,69 @@ export default function ActivityCalendar() {
               </div>
             ) : (
               <div className="text-xs text-slate-600">No sleep logged</div>
+            )}
+            {isPastDate(selected.date) && (
+              editingField === 'sleep' ? (
+                <div className="flex items-center gap-2 mt-2">
+                  <input type="number" min="0" max="24" step="0.5" value={editValue}
+                    onChange={e => setEditValue(e.target.value)}
+                    className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono text-white focus:outline-none focus:border-orange-400"
+                    autoFocus />
+                  <span className="text-[9px] text-slate-500">hrs</span>
+                  <button onClick={() => saveHabitValue('sleep', parseFloat(editValue) || 0, selected.date)}
+                    disabled={savingField}
+                    className="text-[10px] font-mono bg-orange-500/10 text-orange-400 border border-orange-500/20 px-2 py-1 rounded-lg disabled:opacity-50">
+                    {savingField ? '…' : '✓ Save'}
+                  </button>
+                  <button onClick={() => setEditingField(null)} className="text-slate-500 text-xs">✕</button>
+                </div>
+              ) : (
+                <button onClick={() => { setEditValue(String(selected.sleepHrs || 0)); setEditingField('sleep'); }}
+                  className="flex items-center gap-1 mt-1 text-[9px] font-mono text-slate-600 hover:text-orange-400 transition-colors">
+                  <Pencil className="w-2.5 h-2.5" /> Edit
+                </button>
+              )
+            )}
+          </div>
+
+          {/* WATER */}
+          <div className="px-4 py-3 border-b border-slate-800">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-sm">💧</span>
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Water</span>
+              <span className="ml-auto text-[10px] font-mono text-blue-400">
+                {selected.waterCount ? `${selected.waterCount} glasses` : '—'}
+              </span>
+            </div>
+            {selected.waterCount && selected.waterCount > 0 ? (
+              <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div className="h-full bg-blue-500 rounded-full"
+                  style={{ width: `${Math.min(100, (selected.waterCount / 8) * 100)}%` }} />
+              </div>
+            ) : (
+              <div className="text-xs text-slate-600">No water logged</div>
+            )}
+            {isPastDate(selected.date) && (
+              editingField === 'water' ? (
+                <div className="flex items-center gap-2 mt-2">
+                  <input type="number" min="0" value={editValue}
+                    onChange={e => setEditValue(e.target.value)}
+                    className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
+                    autoFocus />
+                  <span className="text-[9px] text-slate-500">glasses</span>
+                  <button onClick={() => saveHabitValue('water', parseInt(editValue) || 0, selected.date)}
+                    disabled={savingField}
+                    className="text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded-lg disabled:opacity-50">
+                    {savingField ? '…' : '✓ Save'}
+                  </button>
+                  <button onClick={() => setEditingField(null)} className="text-slate-500 text-xs">✕</button>
+                </div>
+              ) : (
+                <button onClick={() => { setEditValue(String(selected.waterCount || 0)); setEditingField('water'); }}
+                  className="flex items-center gap-1 mt-1 text-[9px] font-mono text-slate-600 hover:text-blue-400 transition-colors">
+                  <Pencil className="w-2.5 h-2.5" /> Edit
+                </button>
+              )
             )}
           </div>
 
