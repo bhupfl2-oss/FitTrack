@@ -1,12 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Plus, Minus, TrendingUp, TrendingDown, Edit3, Trash2 } from 'lucide-react';
+import { Plus, Minus, TrendingUp, TrendingDown, Edit3, Trash2, RotateCw } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip, XAxis } from 'recharts';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import BodyStatsModal from '@/components/BodyStatsModal';
-import GoalsModal from '@/components/GoalsModal';
-import { Button } from '@/components/ui/button';
-import { collection, query, orderBy, limit, getDocs, deleteDoc, doc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 
 interface BodyStats {
@@ -27,14 +25,6 @@ interface BodyStats {
   metabolicAge?: number;
   notes?: string;
   customFields?: { name: string; unit: string; value: number }[];
-  createdAt: any;
-}
-
-interface Goal {
-  id: string;
-  metric: string;
-  targetValue: number;
-  direction: 'reduce' | 'increase';
   createdAt: any;
 }
 
@@ -69,9 +59,7 @@ const ChartTooltip = ({ active, payload, label }: any) => {
 export default function Body() {
   const { user } = useAuth();
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isGoalsModalOpen, setIsGoalsModalOpen] = useState(false);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
-  const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   usePageLoadTime('Body', loading);
   const [timeRange, setTimeRange] = useState<'1W' | '1M' | '3M' | 'All'>('1M');
@@ -101,18 +89,6 @@ export default function Body() {
           ...doc.data()
         } as BodyStats));
         setBodyStats(stats);
-
-        const goalsQuery = query(
-          collection(db, 'users', user.uid, 'goals'),
-          orderBy('createdAt', 'desc'),
-          limit(1)
-        );
-        const goalsSnapshot = await getDocs(goalsQuery);
-        const userGoals: Goal[] = goalsSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        } as Goal));
-        setGoals(userGoals);
       } catch (error) {
         console.error('Error fetching data:', error);
       } finally {
@@ -138,18 +114,6 @@ export default function Body() {
           ...doc.data()
         } as BodyStats));
         setBodyStats(stats);
-
-        const goalsQuery = query(
-          collection(db, 'users', user.uid, 'goals'),
-          orderBy('createdAt', 'desc'),
-          limit(1)
-        );
-        const goalsSnapshot = await getDocs(goalsQuery);
-        const userGoals: Goal[] = goalsSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        } as Goal));
-        setGoals(userGoals);
       } catch (error) {
         console.error('Error fetching data:', error);
       } finally {
@@ -158,6 +122,96 @@ export default function Body() {
     };
     fetchData();
   };
+
+  // ── AI Body Insight ─────────────────────────────────────────────────────
+  const [aiInsight, setAiInsight] = useState<string | null>(null);
+  const [aiInsightGeneratedAt, setAiInsightGeneratedAt] = useState<Date | null>(null);
+  const [aiInsightLoading, setAiInsightLoading] = useState(false);
+
+  const fetchAiInsight = async (forceRefresh = false) => {
+    if (!user) return;
+    setAiInsightLoading(true);
+    try {
+      const cacheRef = doc(db, 'users', user.uid, 'aiInsights', 'body');
+
+      if (!forceRefresh) {
+        const cacheSnap = await getDoc(cacheRef);
+        if (cacheSnap.exists()) {
+          const cached = cacheSnap.data() as any;
+          const ageHrs = (Date.now() - new Date(cached.generatedAt).getTime()) / 3_600_000;
+          if (ageHrs < 24 && cached.insight) {
+            setAiInsight(cached.insight);
+            setAiInsightGeneratedAt(new Date(cached.generatedAt));
+            setAiInsightLoading(false);
+            return;
+          }
+        }
+      }
+
+      // Build context from last 10 bodyComp entries
+      const recent = bodyStats.slice(0, 10);
+      if (recent.length === 0) { setAiInsightLoading(false); return; }
+
+      const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+      const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+
+      const contextLines = recent.map(s => {
+        const parts = [`date: ${s.date}`, `weight: ${s.weightKg}kg`, `pbf: ${s.pbf}%`];
+        if (s.smm != null) parts.push(`SMM: ${s.smm}kg`);
+        if (s.visceralFat != null) parts.push(`visceral fat: ${s.visceralFat}`);
+        const fm = (s.weightKg != null && s.pbf != null) ? +(s.weightKg * s.pbf / 100).toFixed(1) : null;
+        const lm = (s.weightKg != null && fm != null) ? +(s.weightKg - fm).toFixed(1) : null;
+        if (fm != null) parts.push(`fat mass: ${fm}kg`);
+        if (lm != null) parts.push(`lean mass: ${lm}kg`);
+        if (s.legLeanMass != null) parts.push(`leg lean: ${s.legLeanMass}kg`);
+        return parts.join(', ');
+      }).join('\n');
+
+      const profileCtx = [
+        profile.age && `Age: ${profile.age}`,
+        profile.height && `Height: ${profile.height}cm`,
+        profile.gender && `Gender: ${profile.gender}`,
+        profile.primaryGoal && `Goal: ${profile.primaryGoal}`,
+      ].filter(Boolean).join(', ');
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 150,
+          system: 'You are a body composition coach. Analyse the user\'s body composition trend data and give 2-3 sentences of specific, encouraging insight. Mention actual numbers. Flag if fat mass is rising while weight drops (muscle loss risk), or praise recomposition if fat is down and SMM is up. Keep it under 60 words. No bullet points.',
+          messages: [{
+            role: 'user',
+            content: `Body composition data (most recent first):\n${contextLines}\n\nProfile: ${profileCtx || 'not provided'}\nTime range viewed: ${timeRange}`,
+          }],
+        }),
+      });
+
+      if (!response.ok) throw new Error(`API error ${response.status}`);
+      const data = await response.json();
+      const insight = data.content?.[0]?.text?.trim() || '';
+      if (!insight) throw new Error('Empty response');
+
+      const generatedAt = new Date().toISOString();
+      await setDoc(cacheRef, { insight, generatedAt }, { merge: true });
+      setAiInsight(insight);
+      setAiInsightGeneratedAt(new Date(generatedAt));
+    } catch (e) {
+      console.error('AI body insight failed:', e);
+    } finally {
+      setAiInsightLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (bodyStats.length > 0 && user) fetchAiInsight();
+  }, [bodyStats, user]);
 
   const deleteEntry = async (id: string) => {
     if (!user) return;
@@ -256,24 +310,6 @@ export default function Body() {
 
 
 
-  const insightText = (() => {
-    if (!latestEntry || !rangeStartEntry) return '';
-    const weightDelta = getDelta('weightKg');
-    const smmDelta = getDelta('smm');
-    const parts = [];
-    if (weightDelta != null && weightDelta !== 0) {
-      parts.push(`Weight ${weightDelta > 0 ? 'up' : 'down'} ${fmt(Math.abs(weightDelta))} kg`);
-    }
-    if (smmDelta != null && smmDelta !== 0) {
-      parts.push(`SMM ${smmDelta > 0 ? 'up' : 'down'} ${fmt(Math.abs(smmDelta))} kg`);
-    }
-    if (parts.length === 0) return '';
-    const rangeLabel = timeRange === '1W' ? 'this week' :
-      timeRange === '1M' ? 'this month' :
-      timeRange === '3M' ? 'over 3 months' : 'all-time';
-    return `${parts.join(' · ')} ${rangeLabel}`;
-  })();
-
   const calculateDerivedMetrics = (stats: BodyStats) => {
     const w = stats.weightKg != null ? Number(stats.weightKg) : null;
     const p = stats.pbf != null ? Number(stats.pbf) : null;
@@ -282,44 +318,6 @@ export default function Body() {
     const leanMass = (w != null && fatMass != null && !isNaN(w) && !isNaN(fatMass))
       ? parseFloat((w - fatMass).toFixed(1)) : null;
     return { fatMass, leanMass };
-  };
-
-  const getThreeMonthTrend = () => {
-    const threeMonthsAgo = new Date();
-    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-    const recentStats = bodyStats.filter(stat => new Date(stat.date) >= threeMonthsAgo);
-    if (recentStats.length < 2) return { fatMassTrend: 'hold', smmTrend: 'hold' };
-    const oldest = recentStats[recentStats.length - 1];
-    const newest = recentStats[0];
-    const oldestFatMass = (oldest.weightKg != null && oldest.pbf != null) ? Number(oldest.weightKg) * (Number(oldest.pbf) / 100) : null;
-    const newestFatMass = (newest.weightKg != null && newest.pbf != null) ? Number(newest.weightKg) * (Number(newest.pbf) / 100) : null;
-    const fatMassChange = (oldestFatMass != null && newestFatMass != null) ? newestFatMass - oldestFatMass : 0;
-    const smmChange = (Number(newest.smm) || 0) - (Number(oldest.smm) || 0);
-    return {
-      fatMassTrend: fatMassChange < -0.5 ? 'improving' : fatMassChange > 0.5 ? 'focus' : 'hold',
-      smmTrend: smmChange > 0.5 ? 'strong' : smmChange < -0.5 ? 'improve' : 'steady'
-    };
-  };
-
-  const generateTrendSummary = () => {
-    const threeMonthsAgo = new Date();
-    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-    const recentStats = bodyStats.filter(stat => new Date(stat.date) >= threeMonthsAgo);
-    if (recentStats.length < 2) return 'Insufficient data for trend analysis';
-    const oldest = recentStats[recentStats.length - 1];
-    const newest = recentStats[0];
-    const oldestFatMass = (oldest.weightKg != null && oldest.pbf != null) ? Number(oldest.weightKg) * (Number(oldest.pbf) / 100) : null;
-    const newestFatMass = (newest.weightKg != null && newest.pbf != null) ? Number(newest.weightKg) * (Number(newest.pbf) / 100) : null;
-    const fatMassChange = (oldestFatMass != null && newestFatMass != null) ? newestFatMass - oldestFatMass : 0;
-    const smmChange = (Number(newest.smm) || 0) - (Number(oldest.smm) || 0);
-    const parts = [];
-    if (Math.abs(fatMassChange) > 0.1) {
-      parts.push(`Fat mass ${fatMassChange >= 0 ? 'up' : 'down'} ${fmt(Math.abs(fatMassChange))} kg over 3 months`);
-    }
-    if (Math.abs(smmChange) > 0.1) {
-      parts.push(`SMM ${smmChange >= 0 ? 'up' : 'down'} ${fmt(Math.abs(smmChange))} kg`);
-    }
-    return parts.length > 0 ? parts.join(' · ') : 'No significant changes over 3 months';
   };
 
   if (loading) {
@@ -417,141 +415,32 @@ export default function Body() {
           </div>
         )}
 
-        {/* Goal Progress Bar */}
-        {latestStats && goals.length > 0 ? (() => {
-          const activeGoal = goals[0];
-          const getMetricLabel = (metric: string) => {
-            switch (metric) {
-              case 'weight': return 'Weight';
-              case 'pbf': return 'PBF%';
-              case 'smm': return 'SMM';
-              default: return metric;
-            }
-          };
-          const getMetricUnit = (metric: string) => {
-            switch (metric) {
-              case 'weight': return 'kg';
-              case 'pbf': return '%';
-              case 'smm': return 'kg';
-              default: return '';
-            }
-          };
-          const getCurrentValue = (): number | null => {
-            switch (activeGoal.metric) {
-              case 'weight': return latestStats.weightKg != null ? Number(latestStats.weightKg) : null;
-              case 'pbf': return latestStats.pbf != null ? Number(latestStats.pbf) : null;
-              case 'smm': return latestStats.smm != null ? Number(latestStats.smm) : null;
-              default: return latestStats.weightKg != null ? Number(latestStats.weightKg) : null;
-            }
-          };
-
-          const currentValue = getCurrentValue();
-          const targetValue = activeGoal.targetValue != null ? Number(activeGoal.targetValue) : null;
-
-          if (currentValue == null || targetValue == null || isNaN(currentValue) || isNaN(targetValue)) {
-            return (
-              <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-slate-300">Goal: {getMetricLabel(activeGoal.metric)} {targetValue}{getMetricUnit(activeGoal.metric)}</span>
-                  <button onClick={() => setIsGoalsModalOpen(true)} className="text-slate-400 hover:text-emerald-400 text-sm">Edit goal</button>
-                </div>
-              </div>
-            );
-          }
-
-          const isWeightLoss = activeGoal.metric === 'weight';
-          let progress = 0;
-          let statusText = '';
-
-
-          if (isWeightLoss) {
-            const startWeight = bodyStats[bodyStats.length - 1]?.weightKg != null ? Number(bodyStats[bodyStats.length - 1].weightKg) : currentValue;
-            const totalToLose = startWeight - targetValue;
-            const lostSoFar = startWeight - currentValue;
-            if (totalToLose > 0) progress = Math.max(0, Math.min(100, (lostSoFar / totalToLose) * 100));
-            if (currentValue <= targetValue) { statusText = 'Goal reached! 🎉'; }
-            else statusText = `${fmt(currentValue - targetValue)}${getMetricUnit(activeGoal.metric)} to go`;
-          } else if (activeGoal.metric === 'pbf') {
-            if (targetValue > 0) progress = Math.max(0, Math.min(100, ((targetValue - currentValue) / targetValue) * 100));
-            if (currentValue <= targetValue) { statusText = 'Goal reached! 🎉'; }
-            else statusText = `${fmt(currentValue - targetValue)}% to go`;
-          } else {
-            if (targetValue > 0) progress = Math.max(0, Math.min(100, (currentValue / targetValue) * 100));
-            if (currentValue >= targetValue) { statusText = 'Goal reached! 🎉'; }
-            else statusText = `${fmt(targetValue - currentValue)}${getMetricUnit(activeGoal.metric)} to go`;
-          }
-
-          return (
-            <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-slate-300">
-                  Goal: {getMetricLabel(activeGoal.metric)} {targetValue}{getMetricUnit(activeGoal.metric)}
-                </span>
-                <button onClick={() => setIsGoalsModalOpen(true)} className="text-slate-400 hover:text-emerald-400 text-sm">
-                  Edit goal
-                </button>
-              </div>
-              <div className="mb-2">
-                <span className="text-sm text-slate-400">{statusText}</span>
-              </div>
-              <div className="w-full bg-slate-800 rounded-full h-2">
-                <div className="h-2 rounded-full bg-emerald-500 transition-all duration-300" style={{ width: `${progress}%` }} />
-              </div>
-              <div className="flex justify-between mt-2">
-                <span className="text-xs text-slate-400">{fmt(currentValue)}{getMetricUnit(activeGoal.metric)}</span>
-                <span className="text-xs text-emerald-400">{Math.round(isNaN(progress) ? 0 : progress)}%</span>
-              </div>
-            </div>
-          );
-        })() : (
+        {/* AI Body Insight */}
+        {bodyStats.length > 0 && (
           <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-slate-300">Set a goal →</span>
-              <Button size="sm" onClick={() => setIsGoalsModalOpen(true)} className="bg-emerald-500 hover:bg-emerald-600 text-white">
-                Set Goal
-              </Button>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold tracking-wider uppercase text-emerald-400">✦ AI Insight</span>
+              <button
+                onClick={() => fetchAiInsight(true)}
+                disabled={aiInsightLoading}
+                className="text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40"
+                title="Refresh insight"
+              >
+                <RotateCw className={`w-3.5 h-3.5 ${aiInsightLoading ? 'animate-spin' : ''}`} />
+              </button>
             </div>
-          </div>
-        )}
-
-        {/* Insight Line */}
-        {insightText && (
-          <div className="bg-slate-900 rounded-lg p-4 border border-slate-800">
-            <p className="text-sm text-slate-300">{insightText}</p>
-          </div>
-        )}
-
-        {/* Status Pills */}
-        {latestStats && bodyStats.length > 1 && (() => {
-          const trends = getThreeMonthTrend();
-          return (
-            <div className="flex space-x-3">
-              <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                trends.fatMassTrend === 'improving'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : trends.fatMassTrend === 'hold'
-                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                  : 'bg-red-500/20 text-red-400 border border-red-500/30'
-              }`}>
-                Fat Loss: {trends.fatMassTrend === 'improving' ? 'Improving' : trends.fatMassTrend === 'hold' ? 'Hold' : 'Focus'}
-              </div>
-              <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                trends.smmTrend === 'strong'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : trends.smmTrend === 'steady'
-                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                  : 'bg-red-500/20 text-red-400 border border-red-500/30'
-              }`}>
-                Muscle: {trends.smmTrend === 'strong' ? 'Strong' : trends.smmTrend === 'steady' ? 'Steady' : 'Improve'}
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Trend Summary */}
-        {bodyStats.length > 1 && (
-          <div className="bg-slate-900 rounded-lg p-3 border border-slate-800">
-            <p className="text-sm text-slate-300">{generateTrendSummary()}</p>
+            {aiInsightLoading && !aiInsight ? (
+              <div className="h-4 bg-slate-800 rounded animate-pulse w-3/4" />
+            ) : aiInsight ? (
+              <>
+                <p className="text-sm text-slate-200 leading-relaxed">{aiInsight}</p>
+                {aiInsightGeneratedAt && (
+                  <p className="text-[10px] text-slate-500 mt-2">
+                    Updated {Math.round((Date.now() - aiInsightGeneratedAt.getTime()) / 3_600_000)}h ago
+                  </p>
+                )}
+              </>
+            ) : null}
           </div>
         )}
 
@@ -840,11 +729,6 @@ export default function Body() {
         onClose={() => { setIsModalOpen(false); setEditData(undefined); }}
         onSave={refreshData}
         editData={editData}
-      />
-      <GoalsModal
-        isOpen={isGoalsModalOpen}
-        onClose={() => setIsGoalsModalOpen(false)}
-        onSave={refreshData}
       />
     </div>
   );
