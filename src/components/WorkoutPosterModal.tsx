@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import html2canvas from 'html2canvas';
 import { X, Pencil, Check } from 'lucide-react';
 import { doc, updateDoc } from 'firebase/firestore';
@@ -86,6 +86,14 @@ export default function WorkoutPosterModal({
   const [editingCalories, setEditingCalories] = useState(false);
   const [caloriesInput, setCaloriesInput] = useState(String(caloriesBurnedProp ?? ''));
   const [savingCalories, setSavingCalories] = useState(false);
+
+  // Sync calories from prop when AI analysis completes after the modal is already open
+  useEffect(() => {
+    if (caloriesBurnedProp != null && caloriesBurnedProp > 0 && !editingCalories) {
+      setCaloriesBurned(caloriesBurnedProp);
+      setCaloriesInput(String(caloriesBurnedProp));
+    }
+  }, [caloriesBurnedProp]);
 
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
