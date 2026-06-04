@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp } from 'lucide-react';
+import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp, Share2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
@@ -113,6 +113,7 @@ export default function Workouts() {
   const [sessions, setSessions] = useState<WorkoutSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<WorkoutSession | null>(null);
   const [showRunningPoster, setShowRunningPoster] = useState(false);
+  const [posterSession, setPosterSession] = useState<WorkoutSession | null>(null);
   const [editingCalories, setEditingCalories] = useState(false);
   const [caloriesInput, setCaloriesInput] = useState('');
   const [editingDuration, setEditingDuration] = useState(false);
@@ -1125,6 +1126,10 @@ Rules:
                           <Pencil className="w-3.5 h-3.5" />
                         </button>
                       )}
+                      <button onClick={e => { e.stopPropagation(); setPosterSession(session); }}
+                        className="text-slate-500 hover:text-emerald-400 p-2 transition-colors">
+                        <Share2 className="w-3.5 h-3.5" />
+                      </button>
                       <button onClick={e => { e.stopPropagation(); if (window.confirm('Delete?')) { deleteDoc(doc(db, 'users', user!.uid, 'workoutSessions', session.id)); setSessions(s => s.filter(x => x.id !== session.id)); } }}
                         className="text-slate-600 hover:text-red-400 p-2 transition-colors">
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1314,10 +1319,44 @@ Rules:
                   </div>
                 ))}
               </div>
+              {selectedSession.type !== 'running' && (
+                <button
+                  onClick={() => { setPosterSession(selectedSession); setSelectedSession(null); }}
+                  className="w-full mt-2 bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors flex items-center justify-center gap-2">
+                  <Share2 className="w-4 h-4" /> Share Poster
+                </button>
+              )}
             </div>
           </div>
         </div>
       )}
+
+      {/* ── HISTORY SESSION POSTER ── */}
+      {posterSession && (() => {
+        const isRun = posterSession.type === 'running' || !!(posterSession as any).distanceKm;
+        return (
+          <WorkoutPosterModal
+            open={!!posterSession}
+            onDone={() => setPosterSession(null)}
+            template={(posterSession.template || (posterSession as any).effortType || 'Run')}
+            sessionDate={posterSession.date}
+            exercises={isRun ? [] : (posterSession.exercises || [])}
+            durationMins={posterSession.durationMins}
+            caloriesBurned={(posterSession as any).caloriesBurned}
+            sessionDocId={posterSession.id}
+            userId={user?.uid}
+            sessionType={isRun ? 'running' : 'strength'}
+            {...(isRun ? {
+              distanceKm: (posterSession as any).distanceKm,
+              paceMinPerKm: (posterSession as any).paceMinPerKm,
+              effortType: (posterSession as any).effortType,
+              intervals: (posterSession as any).intervals || [],
+            } : {
+              aiMuscles: (posterSession as any).aiMuscles || [],
+            })}
+          />
+        );
+      })()}
 
       {/* ── RUNNING SESSION POSTER ── */}
       {showRunningPoster && selectedSession && (
