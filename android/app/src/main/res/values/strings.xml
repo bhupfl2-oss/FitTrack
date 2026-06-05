@@ -1,7 +1,8 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">FitTrack</string>
     <string name="title_activity_main">FitTrack</string>
     <string name="package_name">com.bhupesh.fittrack</string>
     <string name="custom_url_scheme">com.bhupesh.fittrack</string>
+    <string name="server_client_id">360000316522-rjhql740rjb5ff38pi2qiujchs31lfdj.apps.googleusercontent.com</string>
 </resources>
