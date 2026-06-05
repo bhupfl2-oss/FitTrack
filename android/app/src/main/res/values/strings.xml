@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FitTrack</string>
+    <string name="title_activity_main">FitTrack</string>
+    <string name="package_name">com.bhupesh.fittrack</string>
+    <string name="custom_url_scheme">com.bhupesh.fittrack</string>
+</resources>
