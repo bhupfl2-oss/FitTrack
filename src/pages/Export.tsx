@@ -140,21 +140,7 @@ function daysInMonth(monthLabel: string): number {
   return new Date(year, month, 0).getDate();
 }
 
-function avgCalBurned(days: DaySummary[]): number {
-  const totals = days
-    .map(day => day.workouts.reduce((sum, w) => sum + (w.caloriesBurned || 0), 0))
-    .filter(v => v > 0);
-  if (!totals.length) return 0;
-  return Math.round(totals.reduce((a, b) => a + b, 0) / totals.length);
-}
 
-function avgRunKm(days: DaySummary[]): number {
-  const totals = days
-    .map(day => day.workouts.reduce((sum, w) => sum + (w.distanceKm || 0), 0))
-    .filter(v => v > 0);
-  if (!totals.length) return 0;
-  return Math.round((totals.reduce((a, b) => a + b, 0) / totals.length) * 10) / 10;
-}
 
 function fmtVal(val: number | null, suffix = ''): string {
   if (val === null || val === 0) return '—';
