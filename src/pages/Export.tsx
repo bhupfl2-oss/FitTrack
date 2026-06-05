@@ -267,6 +267,22 @@ export default function Export() {
       }
     });
 
+    // If no body comp entries fall within range, use the single most recent entry available
+    if (bodyCompData.length === 0 && bodySnap.docs.length > 0) {
+      const latest = bodySnap.docs[0].data() as any;
+      const ds = latest.date?.split('T')[0] || '';
+      if (ds) {
+        bodyCompData.push({
+          date: ds,
+          weightKg: latest.weightKg ?? null,
+          pbf: latest.pbf ?? null,
+          smm: latest.smm ?? null,
+          bmr: latest.bmr ?? null,
+          visceralFat: latest.visceralFat ?? null,
+        });
+      }
+    }
+
     // Map habits by date
     const stepsByDate: Record<string, number> = {};
     stepsLogsSnap?.docs.forEach(d => {
