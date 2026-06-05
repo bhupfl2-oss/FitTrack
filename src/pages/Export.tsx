@@ -235,13 +235,14 @@ export default function Export() {
       const n = d.data() as any;
       const ds = n.date || '';
       if (ds >= startStr) {
+        const items = (n.items || []).map((i: any) => ({ name: i.name || '', calories: i.calories || 0, protein: i.protein || 0, carbs: i.carbs || 0, fat: i.fat || 0, fibre: i.fibre || 0 }));
         nutritionByDate[ds] = {
-          calories: n.totalCalories || 0,
-          protein: n.totalProtein || 0,
-          carbs: n.totalCarbs || 0,
-          fat: n.totalFat || 0,
-          fibre: n.totalFibre || 0,
-          items: (n.items || []).map((i: any) => ({ name: i.name || '', calories: i.calories || 0 })),
+          calories: n.totalCalories || items.reduce((s: number, i: any) => s + i.calories, 0) || 0,
+          protein: n.totalProtein || items.reduce((s: number, i: any) => s + i.protein, 0) || 0,
+          carbs: n.totalCarbs || items.reduce((s: number, i: any) => s + i.carbs, 0) || 0,
+          fat: n.totalFat || items.reduce((s: number, i: any) => s + i.fat, 0) || 0,
+          fibre: n.totalFibre || items.reduce((s: number, i: any) => s + i.fibre, 0) || 0,
+          items: items,
         };
       }
     });
