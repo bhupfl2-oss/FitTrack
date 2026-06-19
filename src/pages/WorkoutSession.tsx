@@ -21,6 +21,7 @@ import {
 import { db } from '@/lib/firebase';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { cleanData } from '@/lib/cleanData';
+import { classifyWorkoutMuscles, estimateCaloriesBurned } from '@/lib/exerciseMuscleMap';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 
 interface Exercise {
@@ -111,66 +112,6 @@ const workoutTemplates: Record<string, WorkoutTemplate> = {
   },
 };
 
-// ── AI workout analysis ────────────────────────────────────────────────────
-async function analyzeWorkoutWithAI(
-  exerciseList: Array<{ name: string; sets: Array<{ reps: number; weight: number | null }> }>,
-  templateName: string,
-  durationMins: number
-): Promise<{ muscles: Array<{ name: string; sets: number; category?: string }>; caloriesBurned: number } | null> {
-  try {
-    const exerciseSummary = exerciseList
-      .filter(ex => ex.sets.some(s => s.reps > 0))
-      .map(ex => {
-        const validSets = ex.sets.filter(s => s.reps > 0);
-        const avgWeight = validSets.reduce((s, v) => s + (v.weight || 0), 0) / validSets.length;
-        return `${ex.name}: ${validSets.length} sets × ~${Math.round(validSets.reduce((s,v) => s+v.reps,0)/validSets.length)} reps${avgWeight > 0 ? ` @ ${avgWeight.toFixed(1)}kg` : ''}`;
-      })
-      .join('\n');
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 600,
-        messages: [{
-          role: 'user',
-          content: `Analyze this ${templateName} workout and return muscle groups worked and calories burned.
-
-Exercises completed:
-${exerciseSummary}
-
-Duration: ${Math.round(durationMins)} minutes
-
-Rules:
-- Map every exercise to its PRIMARY muscle group(s). Use standard names: Chest, Back, Shoulders, Biceps, Triceps, Quads, Hamstrings, Glutes, Calves, Core, Cardio
-- If an exercise name is unusual or custom, make your best guess and set category to "Other"
-- Count SETS per muscle group (an exercise can contribute to multiple muscles)
-- Estimate calories burned based on exercise intensity, weights used, and duration. Typical strength training burns 200-500 kcal/hour. Be realistic.
-- Warm-ups, stretches, cool-downs: count as Cardio, low calorie contribution
-
-Return ONLY this JSON, no markdown, no other text:
-{"muscles":[{"name":"Chest","sets":9},{"name":"Triceps","sets":6},{"name":"Custom Exercise","sets":3,"category":"Other"}],"caloriesBurned":320}`
-        }],
-      }),
-    });
-
-    if (!response.ok) return null;
-    const data = await response.json();
-    const text = data.content?.[0]?.text || '';
-    const parsed = JSON.parse(text.trim());
-    return parsed;
-  } catch (e) {
-    console.error('AI workout analysis failed:', e);
-    return null;
-  }
-}
-
 export default function WorkoutSession() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -203,7 +144,7 @@ export default function WorkoutSession() {
     exercises: any[];
     durationMins?: number;
     sessionDocId?: string;
-    aiMuscles?: Array<{ name: string; sets: number; category?: string }>;
+    aiMuscles?: Array<{ name: string; sets: number; category?: string; source?: 'learned' | 'ai' }>;
     caloriesBurned?: number;
   } | null>(null);
 
@@ -476,16 +417,19 @@ export default function WorkoutSession() {
       setSavedSessionData({ template, date: sessionDate, exercises, durationMins, sessionDocId });
       setShowPoster(true);
 
-      // Fire AI analysis in background — non-blocking
-      analyzeWorkoutWithAI(cleanedExercises, template, durationMins).then(async (result) => {
-        if (!result) return;
+      // Fire muscle classification + calorie estimation in background — non-blocking
+      Promise.all([
+        classifyWorkoutMuscles(user.uid, cleanedExercises),
+        estimateCaloriesBurned(cleanedExercises, template, durationMins),
+      ]).then(async ([muscles, caloriesBurned]) => {
+        if (muscles.length === 0 && caloriesBurned == null) return;
         // Update poster state live
-        setSavedSessionData(prev => prev ? { ...prev, aiMuscles: result.muscles, caloriesBurned: result.caloriesBurned } : prev);
+        setSavedSessionData(prev => prev ? { ...prev, aiMuscles: muscles, caloriesBurned: caloriesBurned ?? undefined } : prev);
         // Persist to Firestore
         try {
           await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', sessionDocId), {
-            aiMuscles: result.muscles,
-            caloriesBurned: result.caloriesBurned,
+            aiMuscles: muscles,
+            ...(caloriesBurned != null ? { caloriesBurned } : {}),
           });
         } catch (e) { console.error('Failed to save AI analysis:', e); }
       });

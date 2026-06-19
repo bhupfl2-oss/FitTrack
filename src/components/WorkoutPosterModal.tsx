@@ -1,13 +1,15 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useMemo } from 'react';
 import html2canvas from 'html2canvas';
-import { X, Pencil, Check } from 'lucide-react';
-import { doc, updateDoc } from 'firebase/firestore';
+import { X, Pencil, Check, ChevronDown, Sparkles, Brain } from 'lucide-react';
+import { doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { saveExerciseMuscleCorrection, normalizeExerciseName } from '@/lib/exerciseMuscleMap';
 
 interface AIMuscle {
   name: string;
   sets: number;
   category?: string;
+  source?: 'learned' | 'ai';
 }
 
 interface WorkoutPosterModalProps {
@@ -51,6 +53,23 @@ const MUSCLE_MAP: Record<string, string[]> = {
   calves: ['calf raise', 'calf'],
   core: ['plank', 'crunch', 'ab wheel', 'russian twist', 'leg raise', 'mountain climber'],
 };
+
+const STANDARD_MUSCLE_OPTIONS = [
+  'Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Quads',
+  'Hamstrings', 'Glutes', 'Calves', 'Core', 'Cardio', 'Other',
+];
+
+interface ExerciseMuscleRow {
+  exerciseName: string;
+  primaryMuscle: string;
+  primarySets: number;
+  secondaryMuscle: string | null;
+  secondarySets: number | null;
+  badgeSource: 'ai' | 'learned' | null;
+  saving: boolean;
+  saved: boolean;
+  error: boolean;
+}
 
 const computeMusclesFallback = (
   exercises: WorkoutPosterModalProps['exercises'],
@@ -123,14 +142,163 @@ export default function WorkoutPosterModal({
   const posterRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Local copy of aiMuscles so "How this was calculated" edits update the poster instantly
+  const [localAiMuscles, setLocalAiMuscles] = useState<AIMuscle[] | undefined>(aiMuscles);
+  useEffect(() => {
+    if (aiMuscles && aiMuscles.length > 0) setLocalAiMuscles(aiMuscles);
+  }, [aiMuscles]);
+
+  // "How this was calculated" panel state
+  const [panelExpanded, setPanelExpanded] = useState(false);
+  const [exerciseRows, setExerciseRows] = useState<Record<string, ExerciseMuscleRow>>({});
+  const [rowsLoading, setRowsLoading] = useState(false);
+  const rowsFetchedRef = useRef(false);
+  const exerciseRowsRef = useRef<Record<string, ExerciseMuscleRow>>({});
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    exerciseRowsRef.current = exerciseRows;
+  }, [exerciseRows]);
+
+  useEffect(() => () => {
+    Object.values(saveTimers.current).forEach(clearTimeout);
+  }, []);
+
+  const distinctExercises = useMemo(() => {
+    const map = new Map<string, { name: string; setCount: number }>();
+    for (const ex of exercises) {
+      const validSets = ex.sets.filter(s => (parseInt(String(s.reps)) || 0) > 0).length;
+      if (validSets === 0) continue;
+      const norm = normalizeExerciseName(ex.name);
+      const existing = map.get(norm);
+      if (existing) existing.setCount += validSets;
+      else map.set(norm, { name: ex.name, setCount: validSets });
+    }
+    return [...map.entries()];
+  }, [exercises]);
+
+  // Lazily fetch per-exercise muscle mappings the first time the panel is expanded
+  useEffect(() => {
+    if (!open || !panelExpanded || rowsFetchedRef.current || !userId) return;
+    rowsFetchedRef.current = true;
+    setRowsLoading(true);
+    (async () => {
+      const next: Record<string, ExerciseMuscleRow> = {};
+      await Promise.all(distinctExercises.map(async ([norm, ex]) => {
+        const fallbackRow: ExerciseMuscleRow = {
+          exerciseName: ex.name,
+          primaryMuscle: 'Other',
+          primarySets: ex.setCount,
+          secondaryMuscle: null,
+          secondarySets: null,
+          badgeSource: null,
+          saving: false,
+          saved: false,
+          error: false,
+        };
+        try {
+          const snap = await getDoc(doc(db, 'users', userId, 'exerciseMuscleMap', norm));
+          if (snap.exists()) {
+            const d = snap.data() as {
+              primaryMuscle?: string; primarySets?: number;
+              secondaryMuscle?: string | null; secondarySets?: number | null;
+            };
+            const primaryMuscle = d.primaryMuscle ?? 'Other';
+            const badgeSource = (localAiMuscles?.find(m => m.name === primaryMuscle)?.source as 'ai' | 'learned' | undefined) ?? null;
+            next[norm] = {
+              exerciseName: ex.name,
+              primaryMuscle,
+              primarySets: d.primarySets ?? ex.setCount,
+              secondaryMuscle: d.secondaryMuscle ?? null,
+              secondarySets: d.secondarySets ?? null,
+              badgeSource,
+              saving: false,
+              saved: false,
+              error: false,
+            };
+          } else {
+            next[norm] = fallbackRow;
+          }
+        } catch (e) {
+          console.error('Failed to load exercise muscle mapping for', ex.name, e);
+          next[norm] = fallbackRow;
+        }
+      }));
+      setExerciseRows(next);
+      setRowsLoading(false);
+    })();
+  }, [open, panelExpanded, userId, distinctExercises, localAiMuscles]);
+
+  const recomputeAggregatedMuscles = (rows: Record<string, ExerciseMuscleRow>): AIMuscle[] => {
+    const counts: Record<string, { sets: number; source?: 'ai' | 'learned' }> = {};
+    const add = (name: string, sets: number, source: 'ai' | 'learned' | null) => {
+      if (!name || !sets || sets <= 0) return;
+      if (counts[name]) counts[name].sets += sets;
+      else counts[name] = { sets, source: source ?? 'learned' };
+    };
+    for (const row of Object.values(rows)) {
+      add(row.primaryMuscle, row.primarySets, row.badgeSource);
+      if (row.secondaryMuscle && row.secondarySets) add(row.secondaryMuscle, row.secondarySets, row.badgeSource);
+    }
+    return Object.entries(counts)
+      .map(([name, v]) => ({ name, sets: v.sets, source: v.source }))
+      .sort((a, b) => b.sets - a.sets);
+  };
+
+  const doSaveExerciseCorrection = async (norm: string) => {
+    const row = exerciseRowsRef.current[norm];
+    if (!row || !userId) return;
+    setExerciseRows(prev => (prev[norm] ? { ...prev, [norm]: { ...prev[norm], saving: true, error: false } } : prev));
+    try {
+      await saveExerciseMuscleCorrection(
+        userId,
+        row.exerciseName,
+        row.primaryMuscle,
+        row.primarySets,
+        row.secondaryMuscle,
+        row.secondarySets,
+        sessionDocId
+      );
+      setExerciseRows(prev => (prev[norm] ? { ...prev, [norm]: { ...prev[norm], saving: false, saved: true } } : prev));
+      setTimeout(() => {
+        setExerciseRows(prev => (prev[norm] ? { ...prev, [norm]: { ...prev[norm], saved: false } } : prev));
+      }, 1500);
+      setLocalAiMuscles(recomputeAggregatedMuscles({ ...exerciseRowsRef.current, [norm]: row }));
+    } catch (e) {
+      console.error('Failed to save exercise muscle correction for', row.exerciseName, e);
+      setExerciseRows(prev => (prev[norm] ? { ...prev, [norm]: { ...prev[norm], saving: false, error: true } } : prev));
+    }
+  };
+
+  const scheduleExerciseSave = (norm: string) => {
+    if (saveTimers.current[norm]) clearTimeout(saveTimers.current[norm]);
+    saveTimers.current[norm] = setTimeout(() => doSaveExerciseCorrection(norm), 500);
+  };
+
+  const updateExerciseRow = (norm: string, patch: Partial<ExerciseMuscleRow>) => {
+    setExerciseRows(prev => (prev[norm] ? { ...prev, [norm]: { ...prev[norm], ...patch, saved: false, error: false } } : prev));
+    scheduleExerciseSave(norm);
+  };
+
+  const removeSecondaryMuscle = (norm: string) => {
+    updateExerciseRow(norm, { secondaryMuscle: null, secondarySets: null });
+  };
+
+  const addSecondaryMuscle = (norm: string) => {
+    const row = exerciseRowsRef.current[norm];
+    if (!row) return;
+    const defaultSecondary = STANDARD_MUSCLE_OPTIONS.find(m => m !== row.primaryMuscle) ?? 'Other';
+    updateExerciseRow(norm, { secondaryMuscle: defaultSecondary, secondarySets: row.primarySets });
+  };
+
   if (!open) return null;
 
-  const musclesData: Array<[string, number]> = aiMuscles && aiMuscles.length > 0
-    ? aiMuscles.map(m => [m.name, m.sets] as [string, number])
+  const musclesData: Array<[string, number]> = localAiMuscles && localAiMuscles.length > 0
+    ? localAiMuscles.map(m => [m.name, m.sets] as [string, number])
     : computeMusclesFallback(exercises, template);
 
   // isAIAnalyzed: true when analysis is done, not needed, or timed out
-  const isAIAnalyzed = !!(aiMuscles && aiMuscles.length > 0)
+  const isAIAnalyzed = !!(localAiMuscles && localAiMuscles.length > 0)
     || isRunningSession
     || alreadyAnalyzed
     || analysisTimedOut;
@@ -241,10 +409,14 @@ export default function WorkoutPosterModal({
       ];
 
   return (
-    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 9999, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', overflowY: 'auto' }}>
+    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.92)', zIndex: 9999, display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px', overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
       <button onClick={onDone} style={{ position: 'absolute', top: '20px', right: '20px', width: '36px', height: '36px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.08)', border: 'none', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <X size={18} />
       </button>
+
+      {/* Centers content when short; lets it scroll naturally from the top when it overflows the viewport — a
+          plain justify-content:center on the scroll container would make the top become unreachable on overflow */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', margin: 'auto 0' }}>
 
       {/* Poster */}
       <div ref={posterRef} style={{ width: '300px', minHeight: '500px', backgroundColor: '#0f172a', borderRadius: '20px', overflow: 'hidden', position: 'relative', flexShrink: 0 }}>
@@ -356,7 +528,7 @@ export default function WorkoutPosterModal({
                 {!isAIAnalyzed && <div style={{ fontSize: '9px', color: '#475569', fontStyle: 'italic' }}>analyzing…</div>}
               </div>
               {musclesData.slice(0, 5).map(([muscle, sets], idx) => {
-                const isOther = aiMuscles?.find(m => m.name === muscle)?.category === 'Other';
+                const isOther = localAiMuscles?.find(m => m.name === muscle)?.category === 'Other';
                 const barColor = isOther ? '#64748b' : idx < 2 ? '#ef4444' : '#f97316';
                 const pct = (sets / maxSets) * 100;
                 return (
@@ -407,6 +579,127 @@ export default function WorkoutPosterModal({
           <div style={{ width: '100%', background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.15)', borderRadius: '10px', padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <span style={{ fontSize: '11px', color: '#64748b' }}>✦ AI Analysis complete</span>
             <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600 }}>~{caloriesBurned} kcal burned</span>
+          </div>
+        )}
+
+        {/* How this was calculated */}
+        {!isRunning && exercises.length > 0 && (
+          <div style={{ width: '100%', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', overflow: 'hidden' }}>
+            {!isAIAnalyzed ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 14px' }}>
+                <div style={{ width: '8px', height: '8px', borderRadius: '50%', border: '1.5px solid #10b981', borderTopColor: 'transparent', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+                <span style={{ fontSize: '12px', color: '#94a3b8' }}>AI is analyzing…</span>
+              </div>
+            ) : (
+              <>
+                <button
+                  onClick={() => setPanelExpanded(p => !p)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'none', border: 'none', color: '#e2e8f0', cursor: 'pointer', padding: '12px 14px', fontSize: '12px', minHeight: '44px' }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Sparkles size={14} color="#10b981" />
+                    How this was calculated
+                  </span>
+                  <ChevronDown
+                    size={16}
+                    color="#64748b"
+                    style={{ transform: panelExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}
+                  />
+                </button>
+
+                {panelExpanded && (
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', padding: '4px 14px 14px' }}>
+                    <style>{`@keyframes fadeInOut { 0% { opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; } }`}</style>
+
+                    {rowsLoading && Object.keys(exerciseRows).length === 0 && (
+                      <div style={{ fontSize: '11px', color: '#64748b', padding: '12px 0' }}>Loading details…</div>
+                    )}
+
+                    {distinctExercises.map(([norm]) => {
+                      const row = exerciseRows[norm];
+                      if (!row) return null;
+                      return (
+                        <div key={norm} style={{ padding: '12px 0', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', gap: '8px' }}>
+                            <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0' }}>{row.exerciseName}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                              {row.saved && <Check size={12} color="#10b981" style={{ animation: 'fadeInOut 1.5s ease' }} />}
+                              {row.error && <span style={{ fontSize: '10px', color: '#f87171' }}>Save failed</span>}
+                              {row.badgeSource === 'ai' && (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '9px', color: '#94a3b8', background: 'rgba(148,163,184,0.12)', border: '1px solid rgba(148,163,184,0.2)', borderRadius: '20px', padding: '2px 8px', whiteSpace: 'nowrap' }}>
+                                  <Brain size={10} /> AI suggested
+                                </span>
+                              )}
+                              {row.badgeSource === 'learned' && (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '9px', color: '#10b981', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.25)', borderRadius: '20px', padding: '2px 8px', whiteSpace: 'nowrap' }}>
+                                  <Check size={10} /> Learned
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Primary muscle */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                            <select
+                              value={row.primaryMuscle}
+                              onChange={e => updateExerciseRow(norm, { primaryMuscle: e.target.value })}
+                              style={{ flex: 1, background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: 'white', padding: '8px 10px', fontSize: '13px', minHeight: '40px' }}
+                            >
+                              {STANDARD_MUSCLE_OPTIONS.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                            <input
+                              type="number" min="0"
+                              value={row.primarySets}
+                              onChange={e => updateExerciseRow(norm, { primarySets: parseInt(e.target.value) || 0 })}
+                              style={{ width: '56px', background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: 'white', padding: '8px 6px', fontSize: '13px', textAlign: 'center', minHeight: '40px' }}
+                            />
+                            <span style={{ fontSize: '11px', color: '#64748b', flexShrink: 0 }}>sets</span>
+                          </div>
+
+                          {/* Secondary muscle */}
+                          {row.secondaryMuscle ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <select
+                                value={row.secondaryMuscle}
+                                onChange={e => updateExerciseRow(norm, { secondaryMuscle: e.target.value })}
+                                style={{ flex: 1, background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: '#cbd5e1', padding: '8px 10px', fontSize: '13px', minHeight: '40px' }}
+                              >
+                                {STANDARD_MUSCLE_OPTIONS.map(m => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                              <input
+                                type="number" min="0"
+                                value={row.secondarySets ?? 0}
+                                onChange={e => updateExerciseRow(norm, { secondarySets: parseInt(e.target.value) || 0 })}
+                                style={{ width: '56px', background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: 'white', padding: '8px 6px', fontSize: '13px', textAlign: 'center', minHeight: '40px' }}
+                              />
+                              <span style={{ fontSize: '11px', color: '#64748b', flexShrink: 0 }}>sets</span>
+                              <button
+                                onClick={() => removeSecondaryMuscle(norm)}
+                                aria-label="Remove secondary muscle"
+                                style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', padding: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => addSecondaryMuscle(norm)}
+                              style={{ background: 'none', border: 'none', color: '#10b981', cursor: 'pointer', fontSize: '12px', padding: '6px 0', minHeight: '32px' }}
+                            >
+                              + Add secondary muscle
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    <div style={{ fontSize: '10px', color: '#475569', marginTop: '8px', fontStyle: 'italic' }}>
+                      Edits update this poster and are remembered next time you log these exercises.
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 
@@ -484,6 +777,8 @@ export default function WorkoutPosterModal({
             Done
           </button>
         </div>
+      </div>
+
       </div>
     </div>
   );
