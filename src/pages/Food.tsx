@@ -37,12 +37,18 @@ interface ParsedFoodItem extends MacroInfo {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-const todayStr = () => (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+// Serializes a Date's LOCAL calendar day to YYYY-MM-DD — never use toISOString()
+// for calendar-day purposes, it converts to UTC and shifts the date for IST.
+const toLocalDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const todayStr = () => toLocalDateStr(new Date());
 
 const formatDate = (dateStr: string) => {
   const d = new Date(dateStr + 'T00:00:00');
   const today = todayStr();
-  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = toLocalDateStr(yesterdayDate);
   if (dateStr === today) return 'Today';
   if (dateStr === yesterday) return 'Yesterday';
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -364,12 +370,12 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
   const prevDay = () => {
     const d = new Date(date + 'T00:00:00');
     d.setDate(d.getDate() - 1);
-    setDate(d.toISOString().split('T')[0]);
+    setDate(toLocalDateStr(d));
   };
   const nextDay = () => {
     const d = new Date(date + 'T00:00:00');
     d.setDate(d.getDate() + 1);
-    const next = d.toISOString().split('T')[0];
+    const next = toLocalDateStr(d);
     if (next <= todayStr()) setDate(next);
   };
 
