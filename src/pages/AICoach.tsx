@@ -27,9 +27,15 @@ interface ContextData {
   labResults: any[];
   tests: any[];
   workoutSessions: any[];
+  nutritionLogs: any[];
 }
 
 // labRanges removed — reference ranges now come from tests collection
+
+// Serializes a Date's LOCAL calendar day to YYYY-MM-DD — never use toISOString()
+// for calendar-day purposes, it converts to UTC and shifts the date for IST.
+const toLocalDateStr = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const todayLocalStr = () => toLocalDateStr(new Date());
 
 const calculateAge = (dob: string) => {
   if (!dob) return null;
@@ -156,6 +162,32 @@ export default function AICoach() {
       parts.push('LAST 10 WORKOUTS:\n' + last10.map((s: any) => `- ${s.date}: ${s.template}`).join('\n'));
     }
 
+    if (data.nutritionLogs.length > 0) {
+      const sumMacros = (items: any[]) => items.reduce((acc, it) => ({
+        calories: acc.calories + (it.calories || 0),
+        protein: acc.protein + (it.protein || 0),
+        carbs: acc.carbs + (it.carbs || 0),
+        fat: acc.fat + (it.fat || 0),
+      }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+
+      const today = todayLocalStr();
+      const todayLog = data.nutritionLogs.find((l: any) => l.date === today);
+      if (todayLog && todayLog.items?.length > 0) {
+        const m = sumMacros(todayLog.items);
+        parts.push(`TODAY'S NUTRITION (${today}):\n${m.calories} kcal, ${m.protein}g protein, ${m.carbs}g carbs, ${m.fat}g fat\nMeals: ${todayLog.items.map((it: any) => it.name).join(', ')}`);
+      } else {
+        parts.push(`TODAY'S NUTRITION (${today}):\nNo meals logged yet today.`);
+      }
+
+      const recentLogs = data.nutritionLogs.filter((l: any) => l.date !== today && l.items?.length > 0).slice(0, 9);
+      if (recentLogs.length > 0) {
+        parts.push('RECENT NUTRITION:\n' + recentLogs.map((l: any) => {
+          const m = sumMacros(l.items);
+          return `- ${l.date}: ${m.calories} kcal, ${m.protein}g protein`;
+        }).join('\n'));
+      }
+    }
+
     if (data.tests.length > 0) {
       // Use tests collection (new) — includes latest reading per test
       const testsWithReadings = data.tests.filter((t: any) => t.latestReading);
@@ -229,7 +261,28 @@ export default function AICoach() {
         const sessionsSnap = await getDocs(sessionsQuery);
         const workoutSessions = sessionsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions };
+        let nutritionLogs: any[] = [];
+        try {
+          // nutritionLogs docs are keyed by local YYYY-MM-DD date string (no auto-increment id),
+          // so a collection query ordered by documentId() needs a composite index Firestore
+          // doesn't provision by default. Fetch the last 10 calendar days directly by id instead —
+          // same pattern as Home.tsx's fetchWeeklyNutrition.
+          const last10Dates = Array.from({ length: 10 }, (_, i) => {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            return toLocalDateStr(d);
+          });
+          const nutritionDocs = await Promise.all(
+            last10Dates.map(dateStr => getDoc(doc(db, 'users', user.uid, 'nutritionLogs', dateStr)))
+          );
+          nutritionLogs = nutritionDocs
+            .filter(snap => snap.exists())
+            .map(snap => ({ id: snap.id, ...snap.data() }));
+        } catch (e) {
+          console.error('Error loading nutrition logs:', e);
+        }
+
+        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs };
         setContextData(data);
         const ctx = buildContext(data);
         setSystemContext(ctx);
@@ -498,6 +551,7 @@ ${systemContext}`,
   if (contextData && contextData.bodyStats.length > 0) contextChips.push('Body stats');
   if (contextData && contextData.tests.length > 0) contextChips.push(`${contextData.tests.length} tests tracked`);
   if (contextData && contextData.workoutSessions.length > 0) contextChips.push(`Last ${contextData.workoutSessions.length} workouts`);
+  if (contextData && contextData.nutritionLogs.length > 0) contextChips.push(`Last ${contextData.nutritionLogs.length} days food`);
 
   return (
     <div className="fixed inset-0 bg-slate-950 text-white z-50 flex flex-col" style={{ height: '100dvh' }}>

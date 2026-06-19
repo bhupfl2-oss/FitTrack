@@ -664,6 +664,24 @@ export default function Home() {
       }
       if (bodyStats.length > 0) { const cur = bodyStats[0]; const prev = bodyStats.length > 1 ? bodyStats[1] : null; const parts = [cur.weightKg != null && `Weight: ${cur.weightKg} kg`, cur.pbf != null && `PBF: ${cur.pbf}%`, cur.smm != null && `SMM: ${cur.smm} kg`, prev?.weightKg != null && cur.weightKg != null && `Weight change: ${(cur.weightKg - prev.weightKg).toFixed(1)} kg`].filter(Boolean) as string[]; if (parts.length) contextParts.push('BODY STATS:\n' + parts.join('\n')); }
       if (workoutSessions.length > 0) contextParts.push('LAST 3 WORKOUTS:\n' + workoutSessions.slice(0, 3).map(s => `- ${s.date}: ${s.template}`).join('\n'));
+      try {
+        const todayStr = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`;
+        const nutritionSnap = await getDoc(doc(db, 'users', user.uid, 'nutritionLogs', todayStr));
+        if (nutritionSnap.exists()) {
+          const items = (nutritionSnap.data() as any).items || [];
+          if (items.length > 0) {
+            const m = items.reduce((acc: any, it: any) => ({
+              calories: acc.calories + (it.calories || 0),
+              protein: acc.protein + (it.protein || 0),
+              carbs: acc.carbs + (it.carbs || 0),
+              fat: acc.fat + (it.fat || 0),
+            }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+            contextParts.push(`TODAY'S NUTRITION (${todayStr}):\n${m.calories} kcal, ${m.protein}g protein, ${m.carbs}g carbs, ${m.fat}g fat\nMeals: ${items.map((it: any) => it.name).join(', ')}`);
+          } else {
+            contextParts.push(`TODAY'S NUTRITION (${todayStr}):\nNo meals logged yet today.`);
+          }
+        }
+      } catch (e) { console.error('Error loading nutrition for insights:', e); }
       if (labResults.length > 0) { const latest = labResults[0]; if (latest.results && Array.isArray(latest.results)) { const outOfRange = latest.results.filter((test: LabTest) => { const key = test.testName.toLowerCase().replace(/\s+/g, ''); const range = labRanges[key]; if (!range) return false; if (key === 'hdl') return test.value < range.min; return test.value < range.min || test.value > range.max; }); contextParts.push(outOfRange.length > 0 ? `LABS (${outOfRange.length} out of range):\n` + outOfRange.map((t: LabTest) => `- ${t.testName}: ${t.value} ${t.unit}`).join('\n') : 'LABS: All markers in range'); } }
       if (muscleAlert) contextParts.push(`MUSCLE ALERT: ${muscleAlert.group} neglected — ${muscleAlert.daysSince} days`);
       const response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 600, messages: [{ role: 'user', content: `You are a personal health coach. Generate 3 short personalized insights.\n\nUSER DATA:\n${contextParts.join('\n\n')}\n\nReturn ONLY a JSON object, no markdown, no preamble:\n{\n  "workout": "1-2 sentence actionable workout insight",\n  "food": "1-2 sentence food/nutrition insight based on their diet preference and goals",\n  "labs": "1-2 sentence insight based on lab results, or general health tip if no labs"\n}\nRules: be specific, use actual numbers, under 25 words each, respect diet preference, friendly coach tone.` }] }) });
