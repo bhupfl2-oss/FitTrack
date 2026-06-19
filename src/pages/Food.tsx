@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { Plus, Send, Camera, Search, X, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Send, Camera, Search, X, Trash2, ChevronLeft, ChevronRight, Image } from 'lucide-react';
+import { Camera as CapacitorCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
@@ -89,11 +90,11 @@ export default function Food() {
   const [chatError, setChatError] = useState('');
 
   // Photo state
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [photoMediaType, setPhotoMediaType] = useState<'image/jpeg' | 'image/png' | 'image/webp'>('image/jpeg');
   const [photoLoading, setPhotoLoading] = useState(false);
   const [photoItems, setPhotoItems] = useState<ParsedFoodItem[] | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showPhotoSourceSheet, setShowPhotoSourceSheet] = useState(false);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
@@ -170,7 +171,6 @@ export default function Food() {
     setChatIntro('');
     setPhotoItems(null);
     setPhotoPreview(null);
-    setPhotoFile(null);
     setSearchResults(null);
     setSearchQuery('');
   };
@@ -238,23 +238,34 @@ Rules:
   };
 
   // ── AI Photo parsing ───────────────────────────────────────────────────
-  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setPhotoFile(file);
-    const reader = new FileReader();
-    reader.onload = () => setPhotoPreview(reader.result as string);
-    reader.readAsDataURL(file);
-    setPhotoItems(null);
+  // @capacitor/camera's Photo.format is a bare format string ('jpeg'/'png'/'webp'/etc, not a full
+  // MIME type) — normalize it to the MIME type the food-analysis API call expects.
+  const FORMAT_TO_MEDIA_TYPE: Record<string, 'image/jpeg' | 'image/png' | 'image/webp'> = {
+    jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+  };
+
+  const capturePhoto = async (source: CameraSource) => {
+    setShowPhotoSourceSheet(false);
+    try {
+      const photo = await CapacitorCamera.getPhoto({ source, resultType: CameraResultType.DataUrl });
+      if (!photo.dataUrl) return;
+      setPhotoPreview(photo.dataUrl);
+      setPhotoMediaType(FORMAT_TO_MEDIA_TYPE[photo.format] ?? 'image/jpeg');
+      setPhotoItems(null);
+    } catch (e) {
+      // User cancelling the native/web picker rejects with "User cancelled photos app" — not a real error
+      if ((e as Error)?.message?.toLowerCase().includes('cancel')) return;
+      console.error('Photo capture failed:', e);
+    }
   };
 
   const analyzePhoto = async () => {
-    if (!photoFile || !photoPreview) return;
+    if (!photoPreview) return;
     setPhotoLoading(true);
     setPhotoItems(null);
     try {
       const base64 = photoPreview.split(',')[1];
-      const mediaType = photoFile.type as 'image/jpeg' | 'image/png' | 'image/webp';
+      const mediaType = photoMediaType;
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -388,7 +399,6 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
     setChatError('');
     setPhotoItems(null);
     setPhotoPreview(null);
-    setPhotoFile(null);
     setSearchResults(null);
     setSearchQuery('');
     setShowModal(true);
@@ -780,7 +790,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                 <div className="space-y-3">
                   {!photoPreview ? (
                     <button
-                      onClick={() => fileInputRef.current?.click()}
+                      onClick={() => setShowPhotoSourceSheet(true)}
                       className="w-full border-2 border-dashed border-slate-700 rounded-xl py-10 flex flex-col items-center gap-2 hover:border-slate-600 transition-colors"
                     >
                       <Camera className="w-8 h-8 text-slate-500" />
@@ -792,7 +802,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                       <div className="relative rounded-xl overflow-hidden mb-3">
                         <img src={photoPreview} alt="Food" className="w-full max-h-48 object-cover" />
                         <button
-                          onClick={() => { setPhotoPreview(null); setPhotoFile(null); setPhotoItems(null); }}
+                          onClick={() => { setPhotoPreview(null); setPhotoItems(null); }}
                           className="absolute top-2 right-2 w-7 h-7 bg-black/60 rounded-full flex items-center justify-center"
                         >
                           <X className="w-4 h-4 text-white" />
@@ -818,15 +828,6 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                       onLog={() => logItems(photoItems, activeMealSlot)}
                     />
                   )}
-
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    onChange={handlePhotoSelect}
-                    className="hidden"
-                  />
                 </div>
               )}
 
@@ -863,6 +864,35 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── PHOTO SOURCE SHEET ── */}
+      {showPhotoSourceSheet && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-end" onClick={() => setShowPhotoSourceSheet(false)}>
+          <div className="bg-slate-900 rounded-t-2xl w-full mb-16 flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mt-3 mb-1 flex-shrink-0" />
+            <button
+              onClick={() => capturePhoto(CameraSource.Camera)}
+              className="w-full flex items-center gap-3 px-4 py-3.5 border-t border-slate-800 hover:bg-slate-800/50 transition-colors"
+            >
+              <Camera className="w-5 h-5 text-orange-400" />
+              <span className="text-sm text-white font-medium">Take photo</span>
+            </button>
+            <button
+              onClick={() => capturePhoto(CameraSource.Photos)}
+              className="w-full flex items-center gap-3 px-4 py-3.5 border-t border-slate-800 hover:bg-slate-800/50 transition-colors"
+            >
+              <Image className="w-5 h-5 text-orange-400" />
+              <span className="text-sm text-white font-medium">Choose from gallery</span>
+            </button>
+            <button
+              onClick={() => setShowPhotoSourceSheet(false)}
+              className="w-full flex items-center justify-center px-4 py-3.5 border-t border-slate-800 hover:bg-slate-800/50 transition-colors mb-2"
+            >
+              <span className="text-sm text-slate-400 font-medium">Cancel</span>
+            </button>
           </div>
         </div>
       )}

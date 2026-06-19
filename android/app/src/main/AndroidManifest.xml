@@ -38,4 +38,10 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required by @capacitor/camera for in-app direct photo capture (Camera.getPhoto with source: Camera).
+         No storage/media permission is declared here: gallery picks (source: Photos) go through the
+         Android Photo Picker via implicit intents, which requires no runtime permission on this app's
+         targetSdkVersion (36); @capacitor/camera only requests READ/WRITE_EXTERNAL_STORAGE if the host
+         app declares it, which we deliberately do not. -->
+    <uses-permission android:name="android.permission.CAMERA" />
 </manifest>

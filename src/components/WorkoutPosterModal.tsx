@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import html2canvas from 'html2canvas';
 import { X, Pencil, Check, ChevronDown, Sparkles, Brain } from 'lucide-react';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { saveExerciseMuscleCorrection, normalizeExerciseName } from '@/lib/exerciseMuscleMap';
@@ -140,7 +141,6 @@ export default function WorkoutPosterModal({
   }, [open]);
 
   const posterRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Local copy of aiMuscles so "How this was calculated" edits update the poster instantly
   const [localAiMuscles, setLocalAiMuscles] = useState<AIMuscle[] | undefined>(aiMuscles);
@@ -366,9 +366,15 @@ export default function WorkoutPosterModal({
     } catch (e) { console.error('Share failed:', e); setSharing(false); }
   };
 
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) { const r = new FileReader(); r.onload = ev => setUserPhoto(ev.target?.result as string); r.readAsDataURL(file); }
+  const handlePhotoUpload = async () => {
+    try {
+      const photo = await Camera.getPhoto({ source: CameraSource.Photos, resultType: CameraResultType.DataUrl });
+      if (photo.dataUrl) setUserPhoto(photo.dataUrl);
+    } catch (e) {
+      // User cancelling the native/web picker rejects with "User cancelled photos app" — not a real error
+      if ((e as Error)?.message?.toLowerCase().includes('cancel')) return;
+      console.error('Photo selection failed:', e);
+    }
   };
 
   const formattedDate = new Date(sessionDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
@@ -763,10 +769,9 @@ export default function WorkoutPosterModal({
         </div>
 
         {/* Photo */}
-        <button onClick={() => fileInputRef.current?.click()} style={{ width: '100%', padding: '10px 20px', borderRadius: '10px', backgroundColor: userPhoto ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.05)', border: userPhoto ? '1px solid rgba(16,185,129,0.3)' : '1px solid rgba(255,255,255,0.1)', color: userPhoto ? '#10b981' : '#e2e8f0', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+        <button onClick={handlePhotoUpload} style={{ width: '100%', padding: '10px 20px', borderRadius: '10px', backgroundColor: userPhoto ? 'rgba(16,185,129,0.1)' : 'rgba(255,255,255,0.05)', border: userPhoto ? '1px solid rgba(16,185,129,0.3)' : '1px solid rgba(255,255,255,0.1)', color: userPhoto ? '#10b981' : '#e2e8f0', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
           📷 {userPhoto ? 'Change photo' : 'Add your photo'}
         </button>
-        <input ref={fileInputRef} type="file" accept="image/*" onChange={handlePhotoUpload} style={{ display: 'none' }} />
 
         {/* Actions */}
         <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
