@@ -508,15 +508,15 @@ export default function WorkoutSession() {
                 const ghostReps = getLastValue(exercise.name, setIndex, 'reps');
                 const ghostWeight = getLastValue(exercise.name, setIndex, 'weight');
                 return (
-                  <div key={setIndex} className="flex items-center space-x-3">
+                  <div key={setIndex} className="grid grid-cols-[auto_1fr_1fr] items-center gap-3">
                     <span className="text-slate-400 text-sm w-12">Set {setIndex + 1}</span>
                     <input type="text" inputMode="numeric" placeholder={ghostReps || 'Reps'} value={set.reps}
                       onChange={(e) => updateSet(exercise.id, setIndex, 'reps', e.target.value)}
-                      className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" />
+                      className={`w-full min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500 ${exercise.hasWeight === false ? 'col-span-2' : ''}`} />
                     {exercise.hasWeight !== false && (
                       <input type="text" inputMode="decimal" placeholder={ghostWeight ? `${ghostWeight} kg` : 'kg'} value={set.weight}
                         onChange={(e) => updateSet(exercise.id, setIndex, 'weight', e.target.value)}
-                        className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" />
+                        className="w-full min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500" />
                     )}
                   </div>
                 );
