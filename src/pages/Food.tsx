@@ -8,7 +8,7 @@ import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   doc, getDoc, setDoc,
 } from 'firebase/firestore';
-import { useGoals, calculateGoalsWithAI } from '@/services/goalsService';
+import { useGoals } from '@/services/goalsService';
 import { db } from '@/lib/firebase';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -130,9 +130,6 @@ export default function Food() {
       ]);
       const profile = profileSnap.exists() ? profileSnap.data() : {};
       setFoodPreference(((profile as any).foodPreference || '').toLowerCase());
-
-      // Silently recalculate goals via full AI context if goals/current is stale or missing
-      calculateGoalsWithAI(user.uid, { trigger: 'manual_refresh' }).catch(() => {});
 
       // AI insight — discard if protein goal has drifted >10g vs goals/current
       if (insightSnap.exists()) {

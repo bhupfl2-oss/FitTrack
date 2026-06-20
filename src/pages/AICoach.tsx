@@ -467,11 +467,15 @@ ${systemContext}`,
 
 When the user wants to log something, suggest the right page naturally:
 - Log food / meal / calories → suggest going to Food page
-- Log workout / exercise / run → suggest going to Workouts page  
+- Log workout / exercise / run → suggest going to Workouts page
 - Log weight / body stats → suggest going to Body page
 - Upload lab report / blood test → suggest going to Labs page
 - Log water / steps / sleep → suggest going to Home page (wellness section)
 Say something like "Head to the Food page to log that — tap Food in the nav bar." Keep it brief.
+
+GOAL UPDATES: If — and only if — you are recommending the user change one of their daily targets (calorie, protein, carb, fat, steps, sleep, or water goal), append a structured block at the very end of your reply, after all the text you want shown to the user:
+<<<GOAL_UPDATE>>>{"calorieGoal":2000,"proteinGoal":140}<<<END_GOAL_UPDATE>>>
+Only include keys for goals you are actually recommending changing (valid keys: calorieGoal, proteinGoal, carbGoal, fatGoal, stepsGoal, sleepGoal, waterGoal). Never include this block when you are simply restating today's logged intake or making general commentary — it must only appear when you are proposing a new target.
 
 USER CONTEXT:
 ${systemContext}`,
@@ -481,7 +485,14 @@ ${systemContext}`,
 
       if (!response.ok) throw new Error('AI request failed');
       const data = await response.json();
-      const aiText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
+      const rawText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
+
+      // Structured goal-update block: the model emits this only when it's
+      // recommending a changed target, never when restating logged intake.
+      const goalUpdateMatch = rawText.match(/<<<GOAL_UPDATE>>>([\s\S]*?)<<<END_GOAL_UPDATE>>>/);
+      const aiText = goalUpdateMatch
+        ? rawText.slice(0, goalUpdateMatch.index).trim()
+        : rawText;
 
       const workoutExercises = detectWorkoutSuggestion(aiText);
       setMessages(prev => [...prev, {
@@ -490,38 +501,22 @@ ${systemContext}`,
         showWorkoutLoad: !!workoutExercises,
       }]);
 
-      // Silent goal update — parse explicit targets from AI response, or trigger full recalc
-      if (user) {
+      if (user && goalUpdateMatch) {
         try {
-          // Regex: extract numeric targets explicitly mentioned in the response
-          const partialGoals: Record<string, number> = {};
-          const proteinMatch = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?protein/i);
-          const calMatch     = aiText.match(/(\d{3,4})\s*(?:kcal|calories)/i);
-          const carbMatch    = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?carbs?/i);
-          const fatMatch     = aiText.match(/(\d+)\s*g?\s*(?:of\s*)?fat/i);
-          const stepsMatch   = aiText.match(/(\d{4,5})\s*steps/i);
-          const sleepMatch   = aiText.match(/(\d+\.?\d*)\s*(?:hours?|hrs?)\s*(?:of\s*)?sleep/i);
-          const waterMatch   = aiText.match(/(\d+\.?\d*)\s*(?:litres?|liters?|L)\s*(?:of\s*)?water/i);
-
-          if (proteinMatch) partialGoals.proteinGoal   = parseInt(proteinMatch[1]);
-          if (calMatch)     partialGoals.calorieGoal   = parseInt(calMatch[1]);
-          if (carbMatch)    partialGoals.carbGoal      = parseInt(carbMatch[1]);
-          if (fatMatch)     partialGoals.fatGoal       = parseInt(fatMatch[1]);
-          if (stepsMatch)   partialGoals.stepsGoal     = parseInt(stepsMatch[1]);
-          if (sleepMatch)   partialGoals.sleepGoal     = parseFloat(sleepMatch[1]);
-          if (waterMatch)   partialGoals.waterGoal     = parseFloat(waterMatch[1]);
-
-          if (Object.keys(partialGoals).length > 0) {
-            await saveGoals(user.uid, partialGoals, 'ai_coach');
-            console.log('[Goals] recalculated:', partialGoals);
-          }
-
-          // Full recalculation if user was asking about goals/macros/nutrition targets
-          const goalKeywords = /goals?|targets?|macros?|how much protein|what should i eat|calories i need|nutrition plan/i;
-          if (goalKeywords.test(text)) {
-            calculateGoalsWithAI(user.uid, { trigger: 'ai_coach_conversation' }).catch(() => {});
+          const partialGoals = JSON.parse(goalUpdateMatch[1]) as Record<string, number>;
+          if (partialGoals && Object.keys(partialGoals).length > 0) {
+            await saveGoals(user.uid, partialGoals, 'ai_coach_recommendation');
+            console.log('[Goals] AI coach recommended goal update, saved:', partialGoals);
           }
         } catch (_) { /* silent */ }
+      }
+
+      // Full recalculation if user was asking about goals/macros/nutrition targets
+      if (user) {
+        const goalKeywords = /goals?|targets?|macros?|how much protein|what should i eat|calories i need|nutrition plan/i;
+        if (goalKeywords.test(text)) {
+          calculateGoalsWithAI(user.uid, { trigger: 'ai_coach_conversation' }).catch(() => {});
+        }
       }
 
       // increment count on successful response

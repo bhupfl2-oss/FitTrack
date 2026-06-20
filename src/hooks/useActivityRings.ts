@@ -4,9 +4,11 @@ import {
   getDocs,
   doc,
   getDoc,
+  onSnapshot,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { getGoals, calculateGoalsWithAI, DEFAULT_GOALS as SERVICE_DEFAULTS } from '@/services/goalsService';
+import { calculateGoalsWithAI, DEFAULT_GOALS as SERVICE_DEFAULTS } from '@/services/goalsService';
+import type { UserGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -84,7 +86,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
   useEffect(() => {
     if (!uid) return;
 
-    const fetchData = async () => {
+    const fetchData = async (userGoals: UserGoals) => {
       const todayStr = getTodayStr();
       const weekDateStrings = getWeekDateStrings();
 
@@ -97,8 +99,7 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
       ]);
       const profile = profileDoc.exists() ? profileDoc.data() as any : {};
 
-      // ── Load goals from goals/current (single source of truth) ──
-      const userGoals = await getGoals(uid);
+      // ── Goals from goals/current (single source of truth, live via onSnapshot below) ──
       const goals: RingGoals = {
         steps:          userGoals.stepsGoal        ?? DEFAULT_GOALS.steps,
         caloriesBurned: userGoals.caloriesBurnGoal ?? DEFAULT_GOALS.caloriesBurned,
@@ -106,20 +107,14 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
         sleep:          userGoals.sleepGoal         ?? DEFAULT_GOALS.sleep,
       };
 
-      // Recalculate if goals have never been set or are older than 7 days
+      // Recalculate if goals have never been set or are older than 7 days.
+      // No manual state patch needed — the onSnapshot listener below picks up
+      // the resulting Firestore write and re-runs this whole computation.
       const agedays = userGoals.updatedAt
         ? (Date.now() - new Date(userGoals.updatedAt).getTime()) / 86400000
         : 999;
       if (agedays > 7) {
-        calculateGoalsWithAI(uid, { trigger: 'manual_refresh' }).then(newGoals => {
-          setState(prev => ({
-            ...prev,
-            train: { ...prev.train, goal: newGoals.stepsGoal        ?? prev.train.goal },
-            move:  { ...prev.move,  goal: newGoals.caloriesBurnGoal ?? prev.move.goal  },
-            track: { ...prev.track, goal: newGoals.calorieGoal      ?? prev.track.goal },
-            fuel:  { ...prev.fuel,  goal: newGoals.sleepGoal        ?? prev.fuel.goal  },
-          }));
-        });
+        calculateGoalsWithAI(uid, { trigger: 'manual_refresh' }).catch(() => {});
       }
 
       // ── Habits ──
@@ -248,7 +243,14 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
       });
     };
 
-    fetchData();
+    const unsubscribe = onSnapshot(
+      doc(db, 'users', uid, 'goals', 'current'),
+      snap => {
+        const userGoals = snap.exists() ? (snap.data() as UserGoals) : {};
+        fetchData(userGoals);
+      }
+    );
+    return unsubscribe;
   }, [uid, refreshKey]);
 
   return state;

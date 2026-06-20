@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import {
-  doc, getDoc, setDoc,
+  doc, getDoc, setDoc, onSnapshot,
   collection, query, orderBy, limit, getDocs,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -17,7 +17,7 @@ export interface UserGoals {
   sleepGoal?: number;   // hours
   waterGoal?: number;   // litres
   updatedAt?: string;
-  updatedBy?: 'ai_coach' | 'ai_body_stats' | 'manual';
+  updatedBy?: 'ai_coach' | 'ai_coach_recommendation' | 'ai_body_stats' | 'manual';
   aiSummary?: string;
 }
 
@@ -68,15 +68,23 @@ export function useGoals(uid: string | undefined): {
 } {
   const [goals, setGoals] = useState<UserGoals>({ ...DEFAULT_GOALS });
   const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     if (!uid) { setLoading(false); return; }
     setLoading(true);
-    getGoals(uid).then(g => { setGoals(g); setLoading(false); });
-  }, [uid, tick]);
+    const unsubscribe = onSnapshot(
+      doc(db, 'users', uid, 'goals', 'current'),
+      snap => {
+        setGoals(snap.exists() ? (snap.data() as UserGoals) : { ...DEFAULT_GOALS });
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+    return unsubscribe;
+  }, [uid]);
 
-  return { goals, loading, refetch: () => setTick(t => t + 1) };
+  // refetch is a no-op now that goals stay live via onSnapshot; kept for API compatibility.
+  return { goals, loading, refetch: () => {} };
 }
 
 // ── AI full-context calculation ────────────────────────────────────────────
