@@ -30,6 +30,7 @@ interface Exercise {
   hasWeight?: boolean;
   note?: string;
   sets: Set[];
+  fromLastSession?: boolean; // UI-only flag, not persisted — see finishWorkout
 }
 
 interface Set {
@@ -133,6 +134,7 @@ export default function WorkoutSession() {
 
   // --- Last session ghost values ---
   const [lastSessionExercises, setLastSessionExercises] = useState<any[]>([]);
+  const autoAddedFromLastSessionRef = useRef(false);
 
   // --- Auto-save state ---
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
@@ -234,6 +236,7 @@ export default function WorkoutSession() {
     if (!user) { setExercises(initialExercises); return; }
 
     let restoredFromDraft = false;
+    let baseExercises: Exercise[] = initialExercises;
     try {
       const draftRef = doc(db, 'users', user.uid, 'draftSessions', key);
       const draftSnap = await getDoc(draftRef);
@@ -242,6 +245,7 @@ export default function WorkoutSession() {
         const savedAt = new Date(draft.savedAt);
         const ageHours = (Date.now() - savedAt.getTime()) / 3600000;
         if (ageHours < 24 && draft.exercises?.length > 0) {
+          baseExercises = draft.exercises;
           setExercises(draft.exercises);
           if (draft.sessionDate) setSessionDate(draft.sessionDate);
           setAutoSaveStatus('saved');
@@ -276,6 +280,29 @@ export default function WorkoutSession() {
         }
       }
       setLastSessionExercises(lastExercises);
+
+      // Auto-add any exercise that was logged last time but isn't part of today's list
+      // (e.g. an ad-hoc exercise added manually last session). Runs once per session load.
+      if (!autoAddedFromLastSessionRef.current) {
+        autoAddedFromLastSessionRef.current = true;
+        const missing = lastExercises.filter(le =>
+          le?.name && le.sets?.length &&
+          !baseExercises.some(e => e.name.toLowerCase() === le.name.toLowerCase())
+        );
+        if (missing.length > 0) {
+          const newRows: Exercise[] = missing.map((le, i: number) => ({
+            id: `exercise-${Date.now()}-${i}`,
+            name: le.name,
+            hasWeight: le.hasWeight !== false,
+            // Empty sets, same count as last time — matches every other exercise row,
+            // which shows historical values as a greyed placeholder (via getLastValue)
+            // until the user types or taps Copy Last Session, not pre-filled as real values.
+            sets: le.sets.map(() => ({ reps: '', weight: '' })),
+            fromLastSession: true,
+          }));
+          setExercises([...baseExercises, ...newRows]);
+        }
+      }
     } catch (_) {}
   };
 
@@ -393,7 +420,8 @@ export default function WorkoutSession() {
     try {
       const durationMins = elapsedSecs / 60;
 
-      const cleanedExercises = exercises.map(({ id, ...exercise }) => ({
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const cleanedExercises = exercises.map(({ id, fromLastSession, ...exercise }) => ({
         ...exercise,
         sets: exercise.sets.map(set => ({
           reps: parseInt(set.reps) || 0,
@@ -510,7 +538,12 @@ export default function WorkoutSession() {
           <div key={exercise.id} className="bg-slate-900 rounded-lg p-4 border border-slate-800">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-lg font-semibold text-white">{exercise.name}</h3>
+                  {exercise.fromLastSession && (
+                    <span className="text-xs text-slate-500">from last session</span>
+                  )}
+                </div>
                 {exercise.note && <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>}
               </div>
               <div className="flex items-center gap-2">
