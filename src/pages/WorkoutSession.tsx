@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Check } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Check, History } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import {
@@ -354,6 +354,28 @@ export default function WorkoutSession() {
 
   const addSet = (exerciseId: string) => setExercises(exercises.map(e => e.id === exerciseId ? { ...e, sets: [...e.sets, { reps: '', weight: '' }] } : e));
 
+  const copyLastSession = (exerciseId: string) => {
+    const exercise = exercises.find(e => e.id === exerciseId);
+    if (!exercise) return;
+    const last = lastSessionExercises.find(e => e.name?.toLowerCase() === exercise.name.toLowerCase());
+    if (!last?.sets?.length) return;
+
+    const newSets: Set[] = last.sets.map((histSet: { reps: number | string | null; weight: number | string | null }, i: number) => {
+      const todaySet = exercise.sets[i];
+      const histAsStrings: Set = {
+        reps: histSet.reps != null ? String(histSet.reps) : '',
+        weight: histSet.weight != null ? String(histSet.weight) : '',
+      };
+      if (!todaySet) return histAsStrings; // no row at this position yet — create it
+      const isEmpty = todaySet.reps === '' && todaySet.weight === '';
+      return isEmpty ? histAsStrings : todaySet; // leave filled sets untouched
+    });
+    // Preserve any of today's extra sets beyond what last session had
+    if (exercise.sets.length > newSets.length) newSets.push(...exercise.sets.slice(newSets.length));
+
+    setExercises(exercises.map(e => e.id === exerciseId ? { ...e, sets: newSets } : e));
+  };
+
   const updateSet = (exerciseId: string, setIndex: number, field: 'reps' | 'weight', value: string) =>
     setExercises(exercises.map(e => e.id === exerciseId ? { ...e, sets: e.sets.map((s, i) => i === setIndex ? { ...s, [field]: value } : s) } : e));
 
@@ -492,6 +514,18 @@ export default function WorkoutSession() {
                 {exercise.note && <p className="text-sm text-slate-500 mt-1">{exercise.note}</p>}
               </div>
               <div className="flex items-center gap-2">
+                {lastSessionExercises.some(e => e.name?.toLowerCase() === exercise.name.toLowerCase()) && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => copyLastSession(exercise.id)}
+                    aria-label={`Copy last session for ${exercise.name}`}
+                    title={`Copy last session for ${exercise.name}`}
+                    className="text-slate-400 hover:text-emerald-400"
+                  >
+                    <History className="w-4 h-4" />
+                  </Button>
+                )}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                   <button onClick={() => moveExercise(index, 'up')} disabled={index === 0}
                     style={{ background: 'none', border: 'none', color: index === 0 ? '#374151' : '#6b7280', cursor: index === 0 ? 'default' : 'pointer', padding: '2px 4px', fontSize: '12px' }}>▲</button>
