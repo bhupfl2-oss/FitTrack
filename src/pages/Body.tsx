@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Plus, Minus, TrendingUp, TrendingDown, Edit3, Trash2, RotateCw } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip, XAxis } from 'recharts';
 import { useAuth } from '@/hooks/useAuth';
@@ -57,6 +58,7 @@ const ChartTooltip = ({ active, payload, label }: any) => {
 };
 
 export default function Body() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
@@ -183,7 +185,7 @@ export default function Body() {
           'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 150,
           system: 'You are a body composition coach. Analyse the user\'s body composition trend data and give 2-3 sentences of specific, encouraging insight. Mention actual numbers. Flag if fat mass is rising while weight drops (muscle loss risk), or praise recomposition if fat is down and SMM is up. Keep it under 60 words. No bullet points.',
           messages: [{
@@ -441,6 +443,14 @@ export default function Body() {
                 )}
               </>
             ) : null}
+            <button
+              onClick={() => navigate('/ai-coach?topic=body')}
+              className="w-full flex items-center gap-2 mt-3 pt-3 border-t border-slate-800 hover:opacity-80 transition-opacity"
+            >
+              <span className="text-emerald-400 text-xs">✦</span>
+              <span className="text-xs text-slate-500 flex-1 text-left">Want a deeper look at your trends?</span>
+              <span className="text-[10px] font-mono text-emerald-400">Ask AI Coach →</span>
+            </button>
           </div>
         )}
 

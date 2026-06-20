@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, AlertCircle, ChevronRight, ChevronDown, ChevronUp, Send, RefreshCw } from 'lucide-react';
+import { Plus, AlertCircle, ChevronRight, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import LabsModal from '@/components/LabsModal';
@@ -61,14 +61,9 @@ export default function Labs() {
   const [profile, setProfile] = useState<any>(null);
 
   // AI insight state
-  interface ChatMsg { role: 'user' | 'ai'; text: string; }
   const [insightText, setInsightText] = useState('');
   const [insightGeneratedAt, setInsightGeneratedAt] = useState<string | null>(null);
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
   const [insightLoading, setInsightLoading] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // ── Fetch lab results (old collection) ──────────────────────────────────
   useEffect(() => {
@@ -266,51 +261,6 @@ Response: plain text only, no markdown, no headers.`,
     finally { setInsightLoading(false); }
   };
 
-  // ── Chat with AI about labs ───────────────────────────────────────────────
-  const sendChat = async (inputOverride?: string) => {
-    const input = (inputOverride ?? chatInput).trim();
-    if (!input || !user) return;
-    setChatInput('');
-    setChatLoading(true);
-    setChatMessages(prev => [...prev, { role: 'user', text: input }]);
-
-    try {
-      const context = buildLabContext();
-      const history = chatMessages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text }));
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          system: `You are a personal health advisor. Answer questions about the user's lab results, health plan, and test packages. Be specific, reference their actual data. For package coverage questions, list covered and missing tests clearly.
-
-Format rules:
-- No markdown headers (no ##)
-- No bold (**text**)  
-- For tables: use "Test | Yes/No" format per line
-- Use plain section labels ending with colon e.g. "Covered by package:"
-- Keep responses concise and scannable
-
-${context}`,
-          messages: [...history, { role: 'user', content: input }],
-        }),
-      });
-      const data = await response.json();
-      const text = data.content?.[0]?.text || '';
-      setChatMessages(prev => [...prev, { role: 'ai', text }]);
-    } catch (e) {
-      setChatMessages(prev => [...prev, { role: 'ai', text: 'Something went wrong. Try again.' }]);
-    } finally { setChatLoading(false); }
-  };
-
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
 
   const refreshData = () => {
     if (!user) return;
@@ -586,105 +536,15 @@ ${context}`,
               </div>
             )}
 
-            {/* Chat messages */}
-            {chatMessages.length > 0 && (
-              <div className="space-y-2 mb-3 max-h-60 overflow-y-auto border-t border-slate-800 pt-3" style={{ scrollbarWidth: 'none' }}>
-                {chatMessages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    {msg.role === 'user' ? (
-                      <div className="bg-blue-500/15 border border-blue-500/20 rounded-2xl rounded-tr-sm px-3 py-2 max-w-[80%]">
-                        <p className="text-xs text-blue-100">{msg.text}</p>
-                      </div>
-                    ) : (
-                      <div className="max-w-[95%] space-y-1.5">
-                        {msg.text
-                          .replace(/#{1,3}\s/g, '')           // remove ## headers
-                          .replace(/\*\*(.*?)\*\*/g, '$1')    // remove bold
-                          .replace(/\|---\|---\|/g, '')       // remove table separators
-                          .split('\n')
-                          .filter(l => l.trim())
-                          .map((line, j) => {
-                            const isTableRow = line.includes('|') && line.trim().startsWith('|');
-                            const isBullet = line.trim().startsWith('-') || line.trim().startsWith('•');
-                            const isHeader = /^[A-Z][^a-z]*:/.test(line.trim()) || line.trim().endsWith(':');
-                            if (isTableRow) {
-                              const cells = line.split('|').filter(c => c.trim());
-                              if (cells.length >= 2) return (
-                                <div key={j} className="flex items-center justify-between bg-slate-800/60 rounded-lg px-2.5 py-1.5">
-                                  <span className="text-[11px] text-slate-300 flex-1">{cells[0].trim()}</span>
-                                  <span className={`text-[11px] font-medium flex-shrink-0 ml-2 ${
-                                    cells[1].includes('✅') || cells[1].toLowerCase().includes('yes') ? 'text-emerald-400' :
-                                    cells[1].includes('❌') || cells[1].toLowerCase().includes('no') ? 'text-red-400' :
-                                    'text-slate-300'}`}>
-                                    {cells[1].trim()}
-                                  </span>
-                                </div>
-                              );
-                            }
-                            if (isHeader) return <p key={j} className="text-[11px] font-semibold text-white pt-1">{line.trim()}</p>;
-                            if (isBullet) return (
-                              <div key={j} className="flex gap-1.5">
-                                <span className="text-slate-500 flex-shrink-0 text-[11px]">·</span>
-                                <p className="text-[11px] text-slate-300 leading-relaxed">{line.replace(/^[-•]\s*/, '')}</p>
-                              </div>
-                            );
-                            return <p key={j} className="text-[11px] text-slate-300 leading-relaxed">{line.trim()}</p>;
-                          })}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {chatLoading && (
-                  <div className="flex gap-1.5 px-1">
-                    {[0, 150, 300].map(d => (
-                      <div key={d} className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />
-                    ))}
-                  </div>
-                )}
-                <div ref={chatEndRef} />
-              </div>
-            )}
-
-            {/* Quick starters */}
-            {chatMessages.length === 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-3">
-                {[
-                  'What does my latest report say?',
-                  'What tests am I missing?',
-                  'Does a package cover my needs?',
-                  'When should I get tested next?',
-                ].map(q => (
-                  <button key={q} onClick={() => {
-                    if (q === 'Does a package cover my needs?') {
-                      setChatMessages([{ role: 'ai', text: `Sure! Tell me which package you're considering and I'll check if it covers your needs.\n\nYou can:\n- Type the package name (e.g. "Dr Lal Pathlabs Full Body Checkup")\n- List the tests included\n- Upload a PDF of the package — I'll read it\n\nSome popular ones to start with:\n- Dr Lal Pathlabs | Aarogyam 1.2\n- Thyrocare | Aarogyam C\n- 1mg | Full Body Checkup Advanced\n- Healthians | Good Health Package\n\nWhich one are you considering, or paste your own list?` }]);
-                    } else {
-                      sendChat(q);
-                    }
-                  }}
-                    className="text-[10px] px-2.5 py-1.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:border-blue-500/40 hover:text-blue-400 transition-colors">
-                    {q}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Input */}
-            <div className="flex gap-2">
-              <input type="text" value={chatInput} onChange={e => setChatInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendChat()}
-                placeholder={chatMessages.length > 0 ? 'Ask a follow-up…' : 'Ask about your labs or a test package…'}
-                className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500" />
-              <button onClick={() => sendChat()} disabled={chatLoading || !chatInput.trim()}
-                className="w-8 h-8 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 rounded-xl flex items-center justify-center transition-colors">
-                <Send className="w-3.5 h-3.5 text-white" />
-              </button>
-            </div>
-
-            {chatMessages.length > 0 && (
-              <button onClick={() => setChatMessages([])} className="mt-2 text-[9px] font-mono text-slate-600 hover:text-slate-400">
-                clear chat
-              </button>
-            )}
+            {/* Ask AI Coach — full-screen chat entry point */}
+            <button
+              onClick={() => navigate('/ai-coach?topic=labs')}
+              className="w-full flex items-center gap-2 mt-3 pt-3 border-t border-slate-800 hover:opacity-80 transition-opacity"
+            >
+              <span className="text-blue-400 text-xs">✦</span>
+              <span className="text-xs text-slate-500 flex-1 text-left">Have a question about your results or a test package?</span>
+              <span className="text-[10px] font-mono text-blue-400">Ask AI Coach →</span>
+            </button>
           </div>
         </div>
 

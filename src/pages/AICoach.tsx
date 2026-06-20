@@ -50,7 +50,8 @@ const calculateAge = (dob: string) => {
 const quickChips: Record<string, string[]> = {
   workout: ["Suggest today's workout", "Why is my SMM dropping?", "How many days rest?"],
   food: ["What should I eat today?", "High protein veg meals", "Best pre-workout meal"],
-  labs: ["Explain my results", "What should I retest?", "What affects Vitamin D?"],
+  labs: ["Explain my results", "What should I retest?", "What affects Vitamin D?", "Is this package suitable for my needs?"],
+  body: ["How's my body comp trending?", "Am I on track with my goals?", "What should I focus on next?", "Why is my SMM dropping?"],
   general: ["How am I doing overall?", "Plan my week", "What should I focus on?", "Log something", "What should I eat today?"],
 };
 
@@ -334,6 +335,7 @@ export default function AICoach() {
       workout: 'Based on the user\'s workout history and body stats, give a 2-3 sentence personalized workout insight and ask what they\'d like help with. Be specific about their data.',
       food: 'Based on the user\'s diet preference, body stats and goals, give a 2-3 sentence personalized food insight and ask what they\'d like help with.',
       labs: 'Based on the user\'s lab results (or lack thereof), give a 2-3 sentence insight and ask what they\'d like to know more about.',
+      body: 'Based on the user\'s body composition trend (weight, body fat %, SMM), give a 2-3 sentence personalized insight and ask what they\'d like help with. Be specific about their data.',
     };
 
     const generateOpener = async () => {
@@ -472,6 +474,8 @@ When the user wants to log something, suggest the right page naturally:
 - Upload lab report / blood test → suggest going to Labs page
 - Log water / steps / sleep → suggest going to Home page (wellness section)
 Say something like "Head to the Food page to log that — tap Food in the nav bar." Keep it brief.
+
+TEST PACKAGE COVERAGE: If the user asks whether a lab test package suits their needs but hasn't named the package or listed its tests yet, ask them to share the package name, paste the list of tests it includes, or describe it — give 2-3 popular examples (e.g. Dr Lal PathLabs Aarogyam, Thyrocare Aarogyam C, 1mg Full Body Checkup) to make replying easy. Once they give you the package's tests, compare it against their tracked tests and upcoming/overdue tests from their context, and clearly state what's covered and what's missing.
 
 GOAL UPDATES: If — and only if — you are recommending the user change one of their daily targets (calorie, protein, carb, fat, steps, sleep, or water goal), append a structured block at the very end of your reply, after all the text you want shown to the user:
 <<<GOAL_UPDATE>>>{"calorieGoal":2000,"proteinGoal":140}<<<END_GOAL_UPDATE>>>
