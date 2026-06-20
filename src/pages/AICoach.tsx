@@ -163,18 +163,22 @@ export default function AICoach() {
     }
 
     if (data.nutritionLogs.length > 0) {
-      const sumMacros = (items: any[]) => items.reduce((acc, it) => ({
-        calories: acc.calories + (it.calories || 0),
-        protein: acc.protein + (it.protein || 0),
-        carbs: acc.carbs + (it.carbs || 0),
-        fat: acc.fat + (it.fat || 0),
-      }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+      const sumMacros = (items: any[]) => items.reduce((acc, it) => {
+        const q = it.quantity || 1;
+        return {
+          calories: acc.calories + (it.calories || 0) * q,
+          protein: acc.protein + (it.protein || 0) * q,
+          carbs: acc.carbs + (it.carbs || 0) * q,
+          fat: acc.fat + (it.fat || 0) * q,
+          fibre: acc.fibre + (it.fibre || 0) * q,
+        };
+      }, { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 });
 
       const today = todayLocalStr();
       const todayLog = data.nutritionLogs.find((l: any) => l.date === today);
       if (todayLog && todayLog.items?.length > 0) {
         const m = sumMacros(todayLog.items);
-        parts.push(`TODAY'S NUTRITION (${today}):\n${m.calories} kcal, ${m.protein}g protein, ${m.carbs}g carbs, ${m.fat}g fat\nMeals: ${todayLog.items.map((it: any) => it.name).join(', ')}`);
+        parts.push(`TODAY'S NUTRITION (${today}):\n${m.calories} kcal, ${m.protein}g protein, ${m.carbs}g carbs, ${m.fat}g fat, ${m.fibre}g fibre\nMeals: ${todayLog.items.map((it: any) => it.name).join(', ')}`);
       } else {
         parts.push(`TODAY'S NUTRITION (${today}):\nNo meals logged yet today.`);
       }

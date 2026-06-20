@@ -17,6 +17,7 @@ interface MacroInfo {
   protein: number;
   carbs: number;
   fat: number;
+  fibre: number;
 }
 
 interface FoodItem extends MacroInfo {
@@ -25,6 +26,7 @@ interface FoodItem extends MacroInfo {
   portion: string;
   mealSlot: 'breakfast' | 'lunch' | 'dinner' | 'snack';
   loggedAt: string; // ISO
+  quantity: number; // multiplier applied to all macros; base values are quantity = 1
 }
 
 interface DayLog {
@@ -35,7 +37,21 @@ interface DayLog {
 interface ParsedFoodItem extends MacroInfo {
   name: string;
   portion: string;
+  quantity: number;
 }
+
+// Scales an item's stored (base) macros by its quantity multiplier. Single source of
+// truth for every macro read in this file — old data without quantity/fibre defaults safely.
+const scaled = (item: MacroInfo & { quantity?: number }) => {
+  const q = item.quantity ?? 1;
+  return {
+    calories: item.calories * q,
+    protein: item.protein * q,
+    carbs: item.carbs * q,
+    fat: item.fat * q,
+    fibre: (item.fibre ?? 0) * q,
+  };
+};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 // Serializes a Date's LOCAL calendar day to YYYY-MM-DD — never use toISOString()
@@ -76,6 +92,7 @@ export default function Food() {
   usePageLoadTime('Food', loading);
   const [foodPreference, setFoodPreference] = useState<string>('');  // 'veg', 'non-veg', 'vegan', etc.
   const [aiInsightText, setAiInsightText] = useState<string>('');
+  const [editingQty, setEditingQty] = useState<Record<string, string>>({}); // itemId -> in-progress quantity text
 
   // Chat / entry modal
   const [showModal, setShowModal] = useState(false);
@@ -146,7 +163,7 @@ export default function Food() {
     try {
       const ref = doc(db, 'users', user.uid, 'nutritionLogs', updated.date);
       // Compute totals
-      const totalCalories = updated.items.reduce((s, i) => s + (i.calories ?? 0), 0);
+      const totalCalories = updated.items.reduce((s, i) => s + scaled(i).calories, 0);
       await setDoc(ref, { ...updated, totalCalories });
       setDayLog(updated);
     } catch (e) {
@@ -181,6 +198,13 @@ export default function Food() {
     await saveDayLog(updated);
   };
 
+  const updateQuantity = async (itemId: string, qty: number) => {
+    if (!dayLog) return;
+    const q = Math.max(0.25, qty);
+    const updated = { ...dayLog, items: dayLog.items.map(i => i.id === itemId ? { ...i, quantity: q } : i) };
+    await saveDayLog(updated);
+  };
+
   // ── AI Chat parsing ────────────────────────────────────────────────────
   const sendChat = async () => {
     if (!chatInput.trim()) return;
@@ -208,13 +232,13 @@ Food description: "${chatInput}"
 
 Respond in exactly this format:
 <intro>One short friendly sentence acknowledging what they ate.</intro>
-<items>[{"name":"Food Name","portion":"1 plate / 200g / etc","calories":245,"protein":6,"carbs":42,"fat":8}]</items>
+<items>[{"name":"Food Name","portion":"1 plate / 200g / etc","calories":245,"protein":6,"carbs":42,"fat":8,"fibre":3}]</items>
 
 Rules:
 - Be accurate for Indian foods (poha, dal, roti, sabzi, chai etc.)
 - Estimate portions reasonably if not specified
 - Each item in the array is a separate food
-- calories/protein/carbs/fat are numbers (grams for macros)
+- calories/protein/carbs/fat/fibre are numbers (grams for macros, fibre is grams of dietary fibre)
 - Never include markdown or extra text outside the tags`,
           }],
         }),
@@ -227,7 +251,7 @@ Rules:
       const itemsMatch = text.match(/<items>([\s\S]*?)<\/items>/);
       if (itemsMatch) {
         const parsed = JSON.parse(itemsMatch[1].trim());
-        setParsedItems(parsed);
+        setParsedItems(parsed.map((p: ParsedFoodItem) => ({ ...p, quantity: 1, fibre: p.fibre ?? 0 })));
       }
     } catch (e) {
       console.error('Chat parse error:', e);
@@ -284,12 +308,12 @@ Rules:
               { type: 'text', text: `Identify all food items in this image and estimate calories and macros.
 
 Respond in exactly this format:
-<items>[{"name":"Food Name","portion":"estimated portion","calories":300,"protein":12,"carbs":45,"fat":8}]</items>
+<items>[{"name":"Food Name","portion":"estimated portion","calories":300,"protein":12,"carbs":45,"fat":8,"fibre":4}]</items>
 
 Rules:
 - List each distinct food item separately
 - Estimate portions visually (e.g. "1 cup", "2 rotis", "1 bowl")
-- calories/protein/carbs/fat are numbers
+- calories/protein/carbs/fat/fibre are numbers (fibre is grams of dietary fibre)
 - If unsure about a portion, add a note in the portion field like "~1 cup (estimated)"
 - Only output the tags, no other text` }
             ],
@@ -302,7 +326,7 @@ Rules:
       const itemsMatch = text.match(/<items>([\s\S]*?)<\/items>/);
       if (itemsMatch) {
         const parsed = JSON.parse(itemsMatch[1].trim());
-        setPhotoItems(parsed);
+        setPhotoItems(parsed.map((p: ParsedFoodItem) => ({ ...p, quantity: 1, fibre: p.fibre ?? 0 })));
       }
     } catch (e) {
       console.error('Photo analysis error:', e);
@@ -333,9 +357,9 @@ Rules:
             content: `Give nutrition info for: "${searchQuery}"
 
 Respond with exactly this JSON array, no other text:
-[{"name":"${searchQuery}","portion":"1 serving","calories":0,"protein":0,"carbs":0,"fat":0}]
+[{"name":"${searchQuery}","portion":"1 serving","calories":0,"protein":0,"carbs":0,"fat":0,"fibre":0}]
 
-Replace the zeros with accurate values. Include 2-3 common portion variants if relevant.`,
+Replace the zeros with accurate values (fibre is grams of dietary fibre). Include 2-3 common portion variants if relevant.`,
           }],
         }),
       });
@@ -343,7 +367,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
       const data = await response.json();
       const text = (data.content?.[0]?.text || '').trim();
       const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
-      setSearchResults(parsed);
+      setSearchResults(parsed.map((p: ParsedFoodItem) => ({ ...p, quantity: 1, fibre: p.fibre ?? 0 })));
     } catch (e) {
       console.error('Search error:', e);
     } finally {
@@ -353,20 +377,25 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
 
   // ── Computed totals ────────────────────────────────────────────────────
   const totals = dayLog?.items.reduce(
-    (acc, item) => ({
-      calories: acc.calories + (item.calories ?? 0),
-      protein: acc.protein + (item.protein ?? 0),
-      carbs: acc.carbs + (item.carbs ?? 0),
-      fat: acc.fat + (item.fat ?? 0),
-    }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
-  ) ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    (acc, item) => {
+      const s = scaled(item);
+      return {
+        calories: acc.calories + s.calories,
+        protein: acc.protein + s.protein,
+        carbs: acc.carbs + s.carbs,
+        fat: acc.fat + s.fat,
+        fibre: acc.fibre + s.fibre,
+      };
+    },
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 }
+  ) ?? { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 };
 
   const foodGoals = {
     calories: goals.calorieGoal ?? 2000,
     protein:  goals.proteinGoal ?? 120,
     carbs:    goals.carbGoal    ?? 220,
     fat:      goals.fatGoal     ?? 65,
+    fibre:    30,
   };
 
   const calPct = Math.min(100, (totals.calories / foodGoals.calories) * 100);
@@ -462,6 +491,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                 { label: 'Protein', val: totals.protein, goal: foodGoals.protein, color: '#6366f1', textColor: 'text-indigo-400' },
                 { label: 'Carbs',   val: totals.carbs,   goal: foodGoals.carbs,   color: '#f59e0b', textColor: 'text-amber-400' },
                 { label: 'Fat',     val: totals.fat,     goal: foodGoals.fat,     color: '#ec4899', textColor: 'text-pink-400' },
+                { label: 'Fibre',   val: totals.fibre,   goal: foodGoals.fibre,   color: '#22c55e', textColor: 'text-green-400' },
               ].map(({ label, val, goal, color, textColor }) => (
                 <div key={label}>
                   <div className="flex justify-between items-center mb-0.5">
@@ -510,15 +540,15 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
           const isProteinLow = proteinGap > 20;
           const allSuggestions = [
             ...(!foodPreference.includes('veg') || foodPreference.includes('non') ? [
-              { emoji: '🍗', name: 'Grilled Chicken + Roti', cal: 450, p: 42, c: 38, f: 14 },
-              { emoji: '🐟', name: 'Grilled Fish + Salad', cal: 320, p: 38, c: 8, f: 12 },
+              { emoji: '🍗', name: 'Grilled Chicken + Roti', cal: 450, p: 42, c: 38, f: 14, fb: 4 },
+              { emoji: '🐟', name: 'Grilled Fish + Salad', cal: 320, p: 38, c: 8, f: 12, fb: 3 },
             ] : []),
             ...(foodPreference !== 'vegan' ? [
-              { emoji: '🥚', name: 'Paneer Bhurji + 2 Eggs', cal: 380, p: 36, c: 12, f: 22 },
-              { emoji: '🧀', name: 'Paneer Tikka + Roti', cal: 420, p: 28, c: 35, f: 18 },
+              { emoji: '🥚', name: 'Paneer Bhurji + 2 Eggs', cal: 380, p: 36, c: 12, f: 22, fb: 2 },
+              { emoji: '🧀', name: 'Paneer Tikka + Roti', cal: 420, p: 28, c: 35, f: 18, fb: 3 },
             ] : []),
-            { emoji: '🫘', name: 'Chana Dal + Brown Rice', cal: 390, p: 28, c: 52, f: 8 },
-            { emoji: '🥗', name: 'Tofu Stir Fry + Quinoa', cal: 350, p: 26, c: 38, f: 10 },
+            { emoji: '🫘', name: 'Chana Dal + Brown Rice', cal: 390, p: 28, c: 52, f: 8, fb: 9 },
+            { emoji: '🥗', name: 'Tofu Stir Fry + Quinoa', cal: 350, p: 26, c: 38, f: 10, fb: 6 },
           ].filter(s => s.cal <= remaining + 150).slice(0, 3);
 
           return (
@@ -583,7 +613,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                           <p className="text-[9px] text-slate-600">kcal</p>
                         </div>
                         <button
-                          onClick={() => logItems([{ name: sug.name, portion: '1 serving', calories: sug.cal, protein: sug.p, carbs: sug.c, fat: sug.f }], 'dinner')}
+                          onClick={() => logItems([{ name: sug.name, portion: '1 serving', calories: sug.cal, protein: sug.p, carbs: sug.c, fat: sug.f, fibre: sug.fb, quantity: 1 }], 'dinner')}
                           className="text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded-lg hover:bg-emerald-500/20 transition-colors flex-shrink-0"
                         >
                           +Log
@@ -610,7 +640,7 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
         {/* Meal sections */}
         {MEAL_SLOTS.map(slot => {
           const items = bySlot[slot];
-          const slotCals = items.reduce((s, i) => s + (i.calories ?? 0), 0);
+          const slotCals = items.reduce((s, i) => s + scaled(i).calories, 0);
           return (
             <div key={slot} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
@@ -637,29 +667,61 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                 </button>
               ) : (
                 <div>
-                  {items.map(item => (
-                    <div key={item.id} className="flex items-center gap-3 px-4 py-3 border-b border-slate-800/50 last:border-0">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-white truncate">{item.name}</p>
-                        <p className="text-[9px] text-slate-500 mt-0.5">{item.portion}</p>
-                        <div className="flex gap-2 mt-1">
-                          <span className="text-[8px] font-mono bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">P {item.protein}g</span>
-                          <span className="text-[8px] font-mono bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">C {item.carbs}g</span>
-                          <span className="text-[8px] font-mono bg-pink-500/10 text-pink-400 px-1.5 py-0.5 rounded">F {item.fat}g</span>
+                  {items.map(item => {
+                    const m = scaled(item);
+                    const qtyText = editingQty[item.id] ?? String(item.quantity ?? 1);
+                    const commitQty = () => {
+                      const q = parseFloat(qtyText);
+                      updateQuantity(item.id, Number.isFinite(q) ? q : 1);
+                      setEditingQty(prev => { const next = { ...prev }; delete next[item.id]; return next; });
+                    };
+                    return (
+                      <div key={item.id} className="flex items-center gap-3 px-4 py-3 border-b border-slate-800/50 last:border-0">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-white truncate">{item.name}</p>
+                          <p className="text-[9px] text-slate-500 mt-0.5">{item.portion}</p>
+                          <div className="flex gap-2 mt-1">
+                            <span className="text-[8px] font-mono bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">P {Math.round(m.protein)}g</span>
+                            <span className="text-[8px] font-mono bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">C {Math.round(m.carbs)}g</span>
+                            <span className="text-[8px] font-mono bg-pink-500/10 text-pink-400 px-1.5 py-0.5 rounded">F {Math.round(m.fat)}g</span>
+                            <span className="text-[8px] font-mono bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded">Fb {Math.round(m.fibre)}g</span>
+                          </div>
                         </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="text-sm font-bold font-mono text-orange-400">{Math.round(m.calories)}</p>
+                          <p className="text-[9px] text-slate-600">kcal</p>
+                        </div>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => updateQuantity(item.id, (item.quantity ?? 1) - 0.5)}
+                            className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white flex items-center justify-center text-xs font-bold transition-colors"
+                          >
+                            −
+                          </button>
+                          <input
+                            type="number"
+                            value={qtyText}
+                            onChange={e => setEditingQty(prev => ({ ...prev, [item.id]: e.target.value }))}
+                            onBlur={commitQty}
+                            onKeyDown={e => { if (e.key === 'Enter') { commitQty(); (e.target as HTMLInputElement).blur(); } }}
+                            className="w-10 bg-slate-800 border border-slate-700 rounded-md px-1 py-0.5 text-center text-[10px] font-mono text-white focus:outline-none focus:border-orange-500"
+                          />
+                          <button
+                            onClick={() => updateQuantity(item.id, (item.quantity ?? 1) + 0.5)}
+                            className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded-md text-slate-400 hover:text-white flex items-center justify-center text-xs font-bold transition-colors"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <button
+                          onClick={() => deleteItem(item.id)}
+                          className="text-slate-700 hover:text-red-400 transition-colors p-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <div className="text-right flex-shrink-0">
-                        <p className="text-sm font-bold font-mono text-orange-400">{item.calories}</p>
-                        <p className="text-[9px] text-slate-600">kcal</p>
-                      </div>
-                      <button
-                        onClick={() => deleteItem(item.id)}
-                        className="text-slate-700 hover:text-red-400 transition-colors p-1"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -708,8 +770,8 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                 ))}
               </div>
 
-              {/* Save button — only visible when items are parsed */}
-              {(parsedItems || photoItems || searchResults) ? (
+              {/* Save button — only visible when items are parsed and the list isn't empty */}
+              {(parsedItems?.length || photoItems?.length || searchResults?.length) ? (
                 <button
                   onClick={() => {
                     const items = modalMode === 'chat' ? parsedItems
@@ -779,7 +841,8 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                   {parsedItems && parsedItems.length > 0 && (
                     <ParsedItemsList
                       items={parsedItems}
-                      onLog={() => logItems(parsedItems, activeMealSlot)}
+                      onChange={setParsedItems}
+                      onLog={(item) => logItems([item], activeMealSlot)}
                     />
                   )}
                 </div>
@@ -825,7 +888,8 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                   {photoItems && photoItems.length > 0 && (
                     <ParsedItemsList
                       items={photoItems}
-                      onLog={() => logItems(photoItems, activeMealSlot)}
+                      onChange={setPhotoItems}
+                      onLog={(item) => logItems([item], activeMealSlot)}
                     />
                   )}
                 </div>
@@ -857,7 +921,8 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
                   {searchResults && searchResults.length > 0 && (
                     <ParsedItemsList
                       items={searchResults}
-                      onLog={() => logItems(searchResults, activeMealSlot)}
+                      onChange={setSearchResults}
+                      onLog={(item) => logItems([item], activeMealSlot)}
                       singleLog
                     />
                   )}
@@ -903,54 +968,99 @@ Replace the zeros with accurate values. Include 2-3 common portion variants if r
 // ── Sub-component: parsed food items list ──────────────────────────────────
 function ParsedItemsList({
   items,
+  onChange,
   onLog,
   singleLog = false,
 }: {
   items: ParsedFoodItem[];
-  onLog: () => void;
+  onChange: (items: ParsedFoodItem[]) => void;
+  onLog: (item: ParsedFoodItem) => void;
   singleLog?: boolean;
 }) {
-  const total = items.reduce((acc, i) => ({
-    calories: acc.calories + i.calories,
-    protein: acc.protein + i.protein,
-    carbs: acc.carbs + i.carbs,
-    fat: acc.fat + i.fat,
-  }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const total = items.reduce((acc, item) => {
+    const m = scaled(item);
+    return {
+      calories: acc.calories + m.calories,
+      protein: acc.protein + m.protein,
+      carbs: acc.carbs + m.carbs,
+      fat: acc.fat + m.fat,
+      fibre: acc.fibre + m.fibre,
+    };
+  }, { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 });
+
+  const setQuantity = (index: number, qty: number) => {
+    const q = Math.max(0.25, Number.isFinite(qty) ? qty : 1);
+    onChange(items.map((it, i) => i === index ? { ...it, quantity: q } : it));
+  };
+
+  const removeItem = (index: number) => {
+    onChange(items.filter((_, i) => i !== index));
+  };
 
   return (
     <div className="space-y-2">
-      {items.map((item, i) => (
-        <div key={i} className="flex items-start gap-3 bg-slate-800 rounded-xl px-3 py-2.5">
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-white">{item.name}</p>
-            <p className="text-[9px] text-slate-500 mt-0.5">{item.portion}</p>
-            <div className="flex gap-1.5 mt-1.5">
-              <span className="text-[8px] font-mono bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">P {item.protein}g</span>
-              <span className="text-[8px] font-mono bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">C {item.carbs}g</span>
-              <span className="text-[8px] font-mono bg-pink-500/10 text-pink-400 px-1.5 py-0.5 rounded">F {item.fat}g</span>
+      {items.map((item, i) => {
+        const m = scaled(item);
+        return (
+          <div key={i} className="flex items-start gap-3 bg-slate-800 rounded-xl px-3 py-2.5">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-white">{item.name}</p>
+              <p className="text-[9px] text-slate-500 mt-0.5">{item.portion}</p>
+              <div className="flex gap-1.5 mt-1.5">
+                <span className="text-[8px] font-mono bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">P {Math.round(m.protein)}g</span>
+                <span className="text-[8px] font-mono bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">C {Math.round(m.carbs)}g</span>
+                <span className="text-[8px] font-mono bg-pink-500/10 text-pink-400 px-1.5 py-0.5 rounded">F {Math.round(m.fat)}g</span>
+                <span className="text-[8px] font-mono bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded">Fb {Math.round(m.fibre)}g</span>
+              </div>
+              <div className="flex items-center gap-1 mt-1.5">
+                <button
+                  onClick={() => setQuantity(i, (item.quantity ?? 1) - 0.5)}
+                  className="w-6 h-6 bg-slate-700 hover:bg-slate-600 rounded-md text-slate-400 hover:text-white flex items-center justify-center text-xs font-bold transition-colors"
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  value={item.quantity ?? 1}
+                  onChange={e => setQuantity(i, parseFloat(e.target.value))}
+                  className="w-10 bg-slate-700 border border-slate-600 rounded-md px-1 py-0.5 text-center text-[10px] font-mono text-white focus:outline-none focus:border-orange-500"
+                />
+                <button
+                  onClick={() => setQuantity(i, (item.quantity ?? 1) + 0.5)}
+                  className="w-6 h-6 bg-slate-700 hover:bg-slate-600 rounded-md text-slate-400 hover:text-white flex items-center justify-center text-xs font-bold transition-colors"
+                >
+                  +
+                </button>
+              </div>
             </div>
-          </div>
-          <div className="text-right flex-shrink-0">
-            <p className="text-sm font-bold font-mono text-orange-400">{item.calories}</p>
-            <p className="text-[9px] text-slate-600">kcal</p>
-          </div>
-          {singleLog && (
+            <div className="text-right flex-shrink-0">
+              <p className="text-sm font-bold font-mono text-orange-400">{Math.round(m.calories)}</p>
+              <p className="text-[9px] text-slate-600">kcal</p>
+            </div>
+            {singleLog && (
+              <button
+                onClick={() => onLog(item)}
+                className="text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded-lg self-center flex-shrink-0"
+              >
+                +Log
+              </button>
+            )}
             <button
-              onClick={onLog}
-              className="text-[9px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded-lg self-center flex-shrink-0"
+              onClick={() => removeItem(i)}
+              className="text-slate-600 hover:text-red-400 transition-colors p-1 flex-shrink-0"
             >
-              +Log
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
-          )}
-        </div>
-      ))}
+          </div>
+        );
+      })}
 
       {/* Total row — summary only, Save button is in modal header */}
       {!singleLog && (
         <div className="flex items-center justify-between bg-slate-800/60 border border-slate-700 rounded-xl px-3 py-2.5">
-          <p className="text-xs font-semibold text-orange-400">Total: {total.calories} kcal</p>
+          <p className="text-xs font-semibold text-orange-400">Total: {Math.round(total.calories)} kcal</p>
           <p className="text-[9px] font-mono text-slate-500">
-            P {total.protein}g · C {total.carbs}g · F {total.fat}g
+            P {Math.round(total.protein)}g · C {Math.round(total.carbs)}g · F {Math.round(total.fat)}g · Fb {Math.round(total.fibre)}g
           </p>
         </div>
       )}
