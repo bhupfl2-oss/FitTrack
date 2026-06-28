@@ -206,7 +206,7 @@ export default function Profile() {
       });
       await setDoc(doc(db, 'users', user.uid, 'profile', 'data'), payload);
       await bumpDataVersion(user.uid);
-      calculateNutritionGoals(user.uid).catch(e => console.warn('Nutrition goals calc failed:', e));
+      calculateNutritionGoals(user.uid, 'profile_change').catch(e => console.warn('Nutrition goals calc failed:', e));
 
       // Sync sleep target to Sleep habit
       if (profile.sleepTarget) {

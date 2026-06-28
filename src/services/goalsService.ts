@@ -17,7 +17,7 @@ export interface UserGoals {
   sleepGoal?: number;   // hours
   waterGoal?: number;   // litres
   updatedAt?: string;
-  updatedBy?: 'ai_coach' | 'ai_coach_recommendation' | 'ai_body_stats' | 'manual';
+  updatedBy?: 'ai_coach' | 'ai_coach_recommendation' | 'ai_body_stats' | 'manual' | 'profile_change';
   aiSummary?: string;
 }
 

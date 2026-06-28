@@ -17,7 +17,10 @@ interface NutritionGoals {
  * - Workouts: actual session frequency + types (running vs lifting) last 4 weeks
  * - Labs: TSH (thyroid), HbA1c (insulin resistance) modifiers
  */
-export async function calculateNutritionGoals(uid: string): Promise<NutritionGoals> {
+export async function calculateNutritionGoals(
+  uid: string,
+  triggerSource: 'profile_change' | 'body_stats_change' = 'profile_change'
+): Promise<NutritionGoals> {
 
   // ── Fetch all data in parallel ──────────────────────────────────────────
   const [profileSnap, bodySnap, labSnap, workoutSnap] = await Promise.all([
@@ -260,16 +263,21 @@ export async function calculateNutritionGoals(uid: string): Promise<NutritionGoa
     basis: basisParts.join(' · '),
   };
 
-  // ── Save to profile ───────────────────────────────────────────────────────
+  // ── Save to goals/current (merge to preserve stepsGoal, sleepGoal, etc.) ──
+  const aiSummary = goals.basis.length > 120
+    ? goals.basis.slice(0, 117) + '...'
+    : goals.basis;
+
   await setDoc(
-    doc(db, 'users', uid, 'profile', 'data'),
+    doc(db, 'users', uid, 'goals', 'current'),
     {
       calorieGoal,
       proteinGoal,
       carbGoal,
       fatGoal,
-      nutritionGoalsBasis: goals.basis,
-      nutritionGoalsCalculatedAt: goals.calculatedAt,
+      aiSummary,
+      updatedAt: goals.calculatedAt,
+      updatedBy: triggerSource,
     },
     { merge: true }
   );
