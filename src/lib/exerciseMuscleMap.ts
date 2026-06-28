@@ -150,28 +150,36 @@ export async function estimateCaloriesBurned(
         max_tokens: 200,
         messages: [{
           role: 'user',
-          content: `Analyze this ${templateName} workout and estimate calories burned.
+          content: `You are a fitness calorie estimator. Calculate the actual calories burned for this specific workout.
 
-Exercises completed:
-${exerciseSummary}
-
+Template: ${templateName}
 Duration: ${Math.round(durationMins)} minutes
 
-Rules:
-- Estimate calories burned based on exercise intensity, weights used, and duration. Typical strength training burns 200-500 kcal/hour. Be realistic.
-- Warm-ups, stretches, cool-downs contribute little.
+Exercises (name: sets × avg_reps @ avg_weight):
+${exerciseSummary}
 
-Return ONLY this JSON, no markdown, no other text:
-{"caloriesBurned":320}`,
+Instructions:
+- Calculate calories burned based on the actual exercises, weights, sets, reps, and duration listed above.
+- Do NOT return a default or example number — compute from the data.
+- Typical strength training: 200–500 kcal/hour depending on intensity and load.
+- Heavier compound lifts (squats, deadlifts, bench) burn more than isolation exercises.
+- Return a realistic, varied estimate — it will almost never be exactly 320.
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{"caloriesBurned": <your_calculated_integer>}`,
         }],
       }),
     });
 
     if (!response.ok) return null;
     const data = await response.json();
-    const text = data.content?.[0]?.text || '';
-    const parsed = JSON.parse(text.trim());
-    return parsed.caloriesBurned ?? null;
+    const raw = data.content?.[0]?.text || '';
+    console.log('[estimateCaloriesBurned] raw response:', raw);
+    // Extract the number directly — avoids JSON.parse failures when Claude adds reasoning text
+    const match = raw.match(/"caloriesBurned"\s*:\s*(\d+)/);
+    const calories = match ? parseInt(match[1], 10) : null;
+    console.log('[estimateCaloriesBurned] parsed caloriesBurned:', calories);
+    return calories;
   } catch (e) {
     console.error('Calorie estimation failed:', e);
     return null;

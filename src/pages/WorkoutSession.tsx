@@ -477,9 +477,12 @@ export default function WorkoutSession() {
         setSavedSessionData(prev => prev ? { ...prev, aiMuscles: muscles, caloriesBurned: caloriesBurned ?? undefined } : prev);
         // Persist to Firestore
         try {
+          // JSON round-trip strips undefined fields (e.g. category) that Firestore rejects
+          const sanitizedMuscles = JSON.parse(JSON.stringify(muscles));
+          console.log('[WorkoutSession] saving AI analysis:', { aiMuscles: sanitizedMuscles, caloriesBurned });
           await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', sessionDocId), {
-            aiMuscles: muscles,
-            ...(caloriesBurned != null ? { caloriesBurned } : {}),
+            aiMuscles: sanitizedMuscles,
+            caloriesBurned: caloriesBurned ?? null,
           });
         } catch (e) { console.error('Failed to save AI analysis:', e); }
       });

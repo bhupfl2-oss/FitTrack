@@ -4,7 +4,7 @@ import { X, Pencil, Check, ChevronDown, Sparkles, Brain } from 'lucide-react';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { saveExerciseMuscleCorrection, normalizeExerciseName } from '@/lib/exerciseMuscleMap';
+import { saveExerciseMuscleCorrection, normalizeExerciseName, classifyWorkoutMuscles, estimateCaloriesBurned } from '@/lib/exerciseMuscleMap';
 
 interface AIMuscle {
   name: string;
@@ -119,6 +119,37 @@ export default function WorkoutPosterModal({
   const [caloriesInput, setCaloriesInput] = useState(String(caloriesBurnedProp ?? ''));
   const [savingCalories, setSavingCalories] = useState(false);
 
+  const [recalculating, setRecalculating] = useState(false);
+
+  const rerunAI = async () => {
+    if (!userId || !sessionDocId || recalculating) return;
+    const cleanedExercises = exercises
+      .filter(ex => ex.sets.some(s => (parseInt(String(s.reps)) || 0) > 0))
+      .map(ex => ({
+        name: ex.name,
+        sets: ex.sets.map(s => ({ reps: parseInt(String(s.reps)) || 0, weight: parseFloat(String(s.weight)) || null })),
+      }));
+    if (cleanedExercises.length === 0) return;
+    setRecalculating(true);
+    try {
+      const [muscles, cals] = await Promise.all([
+        classifyWorkoutMuscles(userId, cleanedExercises),
+        estimateCaloriesBurned(cleanedExercises, template, durationMins ?? 0),
+      ]);
+      if (muscles.length > 0) setLocalAiMuscles(muscles);
+      if (cals != null) { setCaloriesBurned(cals); setCaloriesInput(String(cals)); }
+      const sanitizedMuscles = JSON.parse(JSON.stringify(muscles));
+      await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), {
+        aiMuscles: sanitizedMuscles,
+        caloriesBurned: cals ?? null,
+      });
+    } catch (e) {
+      console.error('[WorkoutPosterModal] rerunAI failed:', e);
+    } finally {
+      setRecalculating(false);
+    }
+  };
+
   // Sync calories from prop when AI analysis completes after the modal is already open
   useEffect(() => {
     if (caloriesBurnedProp != null && caloriesBurnedProp > 0 && !editingCalories) {
@@ -138,6 +169,61 @@ export default function WorkoutPosterModal({
     if (isRunningSession || alreadyAnalyzed) return; // no spinner needed
     const timer = setTimeout(() => setAnalysisTimedOut(true), 15000);
     return () => clearTimeout(timer);
+  }, [open]);
+
+  // One-time backfill for legacy sessions that were saved before AI analysis was persisted.
+  // Fires when the poster opens and sees no aiMuscles + no caloriesBurned. First re-checks
+  // Firestore in case props are stale; only calls AI if the doc truly has no data.
+  useEffect(() => {
+    if (!open || isRunningSession || alreadyAnalyzed) return;
+    if (!userId || !sessionDocId) return;
+
+    const run = async () => {
+      const snap = await getDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId));
+      const data = snap.data();
+      if (data?.caloriesBurned != null && data?.aiMuscles?.length > 0) {
+        // Data exists in Firestore but wasn't passed via props — hydrate local state
+        setLocalAiMuscles(data.aiMuscles);
+        setCaloriesBurned(data.caloriesBurned);
+        setCaloriesInput(String(data.caloriesBurned));
+        return;
+      }
+
+      // Genuinely legacy session — run AI once and persist so future opens skip this
+      const cleanedExercises = exercises
+        .filter(ex => ex.sets.some(s => (parseInt(String(s.reps)) || 0) > 0))
+        .map(ex => ({
+          name: ex.name,
+          sets: ex.sets.map(s => ({
+            reps: parseInt(String(s.reps)) || 0,
+            weight: parseFloat(String(s.weight)) || null,
+          })),
+        }));
+      if (cleanedExercises.length === 0) return;
+
+      const [muscles, cals] = await Promise.all([
+        classifyWorkoutMuscles(userId, cleanedExercises),
+        estimateCaloriesBurned(cleanedExercises, template, durationMins ?? 0),
+      ]);
+
+      if (muscles.length === 0 && cals == null) return;
+
+      if (muscles.length > 0) setLocalAiMuscles(muscles);
+      if (cals != null) { setCaloriesBurned(cals); setCaloriesInput(String(cals)); }
+
+      const sanitizedMuscles = JSON.parse(JSON.stringify(muscles));
+      console.log('[WorkoutPosterModal] backfill write:', { aiMuscles: sanitizedMuscles, caloriesBurned: cals });
+      try {
+        await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), {
+          aiMuscles: sanitizedMuscles,
+          caloriesBurned: cals ?? null,
+        });
+      } catch (e) {
+        console.error('[WorkoutPosterModal] backfill save failed:', e);
+      }
+    };
+
+    run();
   }, [open]);
 
   const posterRef = useRef<HTMLDivElement>(null);
@@ -584,7 +670,18 @@ export default function WorkoutPosterModal({
         {isAIAnalyzed && caloriesBurned && caloriesBurned > 0 && (
           <div style={{ width: '100%', background: 'rgba(16,185,129,0.05)', border: '1px solid rgba(16,185,129,0.15)', borderRadius: '10px', padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <span style={{ fontSize: '11px', color: '#64748b' }}>✦ AI Analysis complete</span>
-            <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600 }}>~{caloriesBurned} kcal burned</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600 }}>~{caloriesBurned} kcal burned</span>
+              {!isRunningSession && (
+                <button
+                  onClick={rerunAI}
+                  disabled={recalculating}
+                  style={{ background: 'none', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '6px', padding: '2px 8px', fontSize: '10px', color: recalculating ? '#475569' : '#10b981', cursor: recalculating ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: '4px', transition: 'opacity 0.2s' }}
+                >
+                  {recalculating ? '…' : '↻ Recalculate'}
+                </button>
+              )}
+            </div>
           </div>
         )}
 

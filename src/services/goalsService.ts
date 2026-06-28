@@ -210,7 +210,7 @@ export async function calculateGoalsWithAI(
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 600,
         system: `You are a precision health coach with access to the user's complete health picture. Calculate ALL their optimal daily goals based on body composition trends, workout history, lab results, and profile.
 Consider:
@@ -245,8 +245,10 @@ Calculate my optimal daily health goals.`,
 
     if (!response.ok) throw new Error(`API error ${response.status}`);
     const data = await response.json();
-    const raw = (data.content?.[0]?.text ?? '').replace(/```json|```/g, '').trim();
-    const result = JSON.parse(raw) as UserGoals;
+    const raw = data.content?.[0]?.text ?? '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON object found in response');
+    const result = JSON.parse(jsonMatch[0]) as UserGoals;
 
     if (!result.calorieGoal || !result.proteinGoal) throw new Error('Invalid response shape');
 
