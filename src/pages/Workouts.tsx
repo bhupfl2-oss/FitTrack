@@ -11,6 +11,7 @@ import { bumpDataVersion } from '@/lib/dataVersion';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
+import RunnerPlanView from '@/components/RunnerPlanView';
 import { useGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -123,6 +124,7 @@ export default function Workouts() {
   const [loading, setLoading] = useState(true);
   usePageLoadTime('Workouts', loading);
   const [showPrevSessions, setShowPrevSessions] = useState(false);
+  const [persona, setPersona] = useState<'gym' | 'runner'>('gym');
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
   const [editingWorkout, setEditingWorkout] = useState<CustomWorkout | null>(null);
@@ -732,6 +734,18 @@ Rules:
       <div className="p-5 space-y-4">
         <h1 className="text-2xl font-bold">Workouts</h1>
 
+        {/* ── GYM / RUNNER TOGGLE ── */}
+        <div className="flex gap-2">
+          {(['gym', 'runner'] as const).map(p => (
+            <button key={p} onClick={() => setPersona(p)}
+              className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
+                persona === p ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}>
+              {p === 'gym' ? 'Gym' : 'Runner'}
+            </button>
+          ))}
+        </div>
+
         {/* ── 2-RING HEADER ── */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5">
           <div className="flex items-center gap-3">
@@ -793,6 +807,8 @@ Rules:
           </div>
         </div>
 
+        {persona === 'gym' && (
+        <>
         {/* ── AI PLANNER — multi-turn chat ── */}
         <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-emerald-500 to-transparent" />
@@ -1163,10 +1179,14 @@ Rules:
             </div>
           )}
         </div>
+        </>
+        )}
+
+        {persona === 'runner' && <RunnerPlanView />}
       </div>
 
       {/* ── SESSION DETAIL MODAL ── */}
-      {selectedSession && (
+      {persona === 'gym' && selectedSession && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto">
             <div className="p-5">
@@ -1332,7 +1352,7 @@ Rules:
       )}
 
       {/* ── HISTORY SESSION POSTER ── */}
-      {posterSession && (() => {
+      {persona === 'gym' && posterSession && (() => {
         const isRun = posterSession.type === 'running' || !!(posterSession as any).distanceKm;
         return (
           <WorkoutPosterModal
@@ -1359,7 +1379,7 @@ Rules:
       })()}
 
       {/* ── RUNNING SESSION POSTER ── */}
-      {showRunningPoster && selectedSession && (
+      {persona === 'gym' && showRunningPoster && selectedSession && (
         <WorkoutPosterModal
           open={showRunningPoster}
           onDone={() => setShowRunningPoster(false)}
@@ -1380,7 +1400,7 @@ Rules:
       )}
 
       {/* ── CREATE/EDIT WORKOUT MODAL ── */}
-      {showCreateModal && (
+      {persona === 'gym' && showCreateModal && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 pb-20">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">
@@ -1436,7 +1456,7 @@ Rules:
       )}
 
       {/* ── EXERCISE LIBRARY MODAL ── */}
-      {showLibrary && (
+      {persona === 'gym' && showLibrary && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-[60]">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">

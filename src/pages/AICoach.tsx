@@ -14,6 +14,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
+import { getActiveRacePlan, getCurrentWeekEntry, type RacePlan } from '@/services/racePlanService';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -28,6 +29,7 @@ interface ContextData {
   tests: any[];
   workoutSessions: any[];
   nutritionLogs: any[];
+  racePlan: RacePlan | null;
 }
 
 // labRanges removed — reference ranges now come from tests collection
@@ -52,6 +54,7 @@ const quickChips: Record<string, string[]> = {
   food: ["What should I eat today?", "High protein veg meals", "Best pre-workout meal"],
   labs: ["Explain my results", "What should I retest?", "What affects Vitamin D?", "Is this package suitable for my needs?"],
   body: ["How's my body comp trending?", "Am I on track with my goals?", "What should I focus on next?", "Why is my SMM dropping?"],
+  runner: ["How's my training going?", "Adjust this week's plan", "Should I run today?"],
   general: ["How am I doing overall?", "Plan my week", "What should I focus on?", "Log something", "What should I eat today?"],
 };
 
@@ -160,7 +163,30 @@ export default function AICoach() {
 
     if (data.workoutSessions.length > 0) {
       const last10 = data.workoutSessions.slice(0, 10);
-      parts.push('LAST 10 WORKOUTS:\n' + last10.map((s: any) => `- ${s.date}: ${s.template}`).join('\n'));
+      parts.push('LAST 10 WORKOUTS:\n' + last10.map((s: any) => {
+        const extras = [
+          s.type === 'running' && ' (running)',
+          s.distanceKm != null && `, ${s.distanceKm}km`,
+          s.paceMinPerKm != null && `, ${s.paceMinPerKm.toFixed(2)} min/km`,
+          s.effortType && `, ${s.effortType}`,
+        ].filter(Boolean).join('');
+        return `- ${s.date}: ${s.template}${extras}`;
+      }).join('\n'));
+    }
+
+    if (data.racePlan) {
+      const rp = data.racePlan;
+      const week = getCurrentWeekEntry(rp);
+      const [ry, rm, rd] = rp.raceDate.split('-').map(Number);
+      const [ty, tm, td] = todayLocalStr().split('-').map(Number);
+      const daysToRace = Math.max(0, Math.round((new Date(ry, rm - 1, rd).getTime() - new Date(ty, tm - 1, td).getTime()) / 86400000));
+      const planParts = [
+        `Race: ${rp.raceName} (${rp.raceType}) on ${rp.raceDate} — ${daysToRace} days away`,
+        week && `Week ${week.weekNumber} of ${rp.totalWeeks}:`,
+        week && week.days.map(d => `  - ${d.date} (${d.runType})${d.targetDistanceKm != null ? `: ${d.targetDistanceKm}km` : ''}${d.targetPaceMinPerKm != null ? ` @ ${d.targetPaceMinPerKm.toFixed(2)} min/km` : ''}${d.note ? ` — ${d.note}` : ''}`).join('\n'),
+        rp.aiSummary && `Plan approach: ${rp.aiSummary}`,
+      ].filter(Boolean);
+      parts.push('RACE PLAN:\n' + planParts.join('\n'));
     }
 
     if (data.nutritionLogs.length > 0) {
@@ -287,7 +313,9 @@ export default function AICoach() {
           console.error('Error loading nutrition logs:', e);
         }
 
-        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs };
+        const racePlan = await getActiveRacePlan(user.uid);
+
+        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs, racePlan };
         setContextData(data);
         const ctx = buildContext(data);
         setSystemContext(ctx);
@@ -336,6 +364,7 @@ export default function AICoach() {
       food: 'Based on the user\'s diet preference, body stats and goals, give a 2-3 sentence personalized food insight and ask what they\'d like help with.',
       labs: 'Based on the user\'s lab results (or lack thereof), give a 2-3 sentence insight and ask what they\'d like to know more about.',
       body: 'Based on the user\'s body composition trend (weight, body fat %, SMM), give a 2-3 sentence personalized insight and ask what they\'d like help with. Be specific about their data.',
+      runner: 'Based on the user\'s active race plan (if any) and running history, give a 2-3 sentence personalized training insight and ask what they\'d like help with. Be specific about their data.',
     };
 
     const generateOpener = async () => {

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
@@ -36,7 +36,7 @@ const emptyInterval = (): IntervalRow => ({
   inclinePercent: 0,
 });
 
-const paceStr = (totalMins: number, distanceKm: number): string => {
+export const paceStr = (totalMins: number, distanceKm: number): string => {
   if (distanceKm <= 0 || totalMins <= 0) return '0:00 min/km';
   const pace = totalMins / distanceKm;
   const m = Math.floor(pace);
@@ -71,15 +71,19 @@ function estimateRunningCalories(
 
 export default function RunningSession() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const [isSaving, setIsSaving] = useState(false);
   const [sessionDate, setSessionDate] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
+  // Optional prefill from Runner mode's "Start This Run" — absent for every
+  // other entry point (library, gym chat), so this is a no-op by default.
+  const prefill = location.state as { targetDistanceKm?: number; effortType?: EffortType } | undefined;
   const [session, setSession] = useState<RunningSessionState>({
-    effortType: 'recovery',
+    effortType: prefill?.effortType ?? 'recovery',
     surface: 'road',
-    distanceKm: 0,
+    distanceKm: prefill?.targetDistanceKm ?? 0,
     durationMins: 0,
     durationSecs: 0,
     inclinePercent: 0,
