@@ -780,11 +780,6 @@ Rules:
                   </div>
                 </div>
               ))}
-              <div className="text-[9px] text-slate-600 font-mono">
-                {rings.train.pct < 100
-                  ? `${rings.train.current.toLocaleString()} / ${rings.train.goal.toLocaleString()} steps today`
-                  : '🎉 Step goal hit today'}
-              </div>
             </div>
           </div>
           {/* Steps stepper */}
