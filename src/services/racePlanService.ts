@@ -372,6 +372,24 @@ export function getWeekEntryByNumber(plan: RacePlan, weekNumber: number): Weekly
   return plan.weeklyPlan.find(w => w.weekNumber === weekNumber) ?? null;
 }
 
+// Unlike GoalPlan's gym split (evenly-spaced weekday slots — see goalPlansService.ts),
+// a race week's rest days aren't evenly spaced; they're wherever the AI-generated
+// schedule put runType === 'rest' that week. So this counts rest days fresh from
+// that week's actual days each call, rather than deriving slots.
+export function getGymSplitForDate(plan: RacePlan, date: string): string | null {
+  const pattern = plan.gymSplitPattern;
+  if (!pattern || pattern.length === 0) return null;
+
+  const week = getWeekEntryByDate(plan, date);
+  if (!week) return null;
+
+  const day = week.days.find(d => d.date === date);
+  if (!day || day.runType !== 'rest') return null;
+
+  const ordinal = week.days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
+  return pattern[ordinal % pattern.length];
+}
+
 export function computeAdherence(plan: RacePlan, workoutSessions: any[]): AdherenceResult {
   const week = getCurrentWeekEntry(plan);
   if (!week) return { completed: 0, total: 0, weekNumber: 0 };

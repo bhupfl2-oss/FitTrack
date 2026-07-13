@@ -12,6 +12,7 @@ import {
   getWeekEntryByDate,
   getWeekEntryByNumber,
   getPlanDayForDate,
+  getGymSplitForDate,
   type RacePlan,
   type RaceType,
   type RunType,
@@ -246,6 +247,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
   const dayCardLabel = highlightDate && highlightDate !== todayLocal
     ? new Date(highlightDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
     : 'Today';
+  const restGymSplit = dayEntry?.runType === 'rest' ? getGymSplitForDate(plan, dayEntry.date) : null;
 
   const goToPrevWeek = () => setViewedWeekNumber(n => (n != null ? Math.max(1, n - 1) : n));
   const goToNextWeek = () => setViewedWeekNumber(n => (n != null ? Math.min(plan.totalWeeks, n + 1) : n));
@@ -301,7 +303,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
                   <div key={day.date}
                     className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border}`}>
                     <span className={`text-[9px] font-mono ${isHighlighted ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'rest' ? '—' : RUN_TYPE_LABELS[day.runType]}</span>
+                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'rest' ? (getGymSplitForDate(plan, day.date) ?? '—') : RUN_TYPE_LABELS[day.runType]}</span>
                   </div>
                 );
               })}
@@ -313,7 +315,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
             dayEntry.runType === 'rest' ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
                 <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{dayCardLabel}</span>
-                <div className="text-sm font-semibold text-white mt-1">Rest day</div>
+                <div className="text-sm font-semibold text-white mt-1">{restGymSplit ? `Rest day · ${restGymSplit}` : 'Rest day'}</div>
                 {dayEntry.note && <p className="text-xs text-slate-400 mt-1">{dayEntry.note}</p>}
               </div>
             ) : (
