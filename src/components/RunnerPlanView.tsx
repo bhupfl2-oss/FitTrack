@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
@@ -8,6 +9,9 @@ import {
   generateRacePlan,
   computeAdherence,
   getCurrentWeekEntry,
+  getWeekEntryByDate,
+  getWeekEntryByNumber,
+  getPlanDayForDate,
   type RacePlan,
   type RaceType,
   type RunType,
@@ -36,18 +40,21 @@ const RACE_TYPES: { value: RaceType; label: string }[] = [
 ];
 
 const RUN_TYPE_STYLES: Record<RunType, { bg: string; text: string; border: string }> = {
-  easy: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20' },
+  recovery: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20' },
   tempo: { bg: 'bg-orange-500/10', text: 'text-orange-400', border: 'border-orange-500/20' },
-  long: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20' },
+  long_run: { bg: 'bg-blue-500/10', text: 'text-blue-400', border: 'border-blue-500/20' },
+  intervals: { bg: 'bg-purple-500/10', text: 'text-purple-400', border: 'border-purple-500/20' },
   race: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/20' },
   rest: { bg: 'bg-slate-800/50', text: 'text-slate-500', border: 'border-slate-700' },
 };
 
-const RUN_TYPE_TO_EFFORT: Record<Exclude<RunType, 'rest'>, 'recovery' | 'tempo' | 'long_run'> = {
-  easy: 'recovery',
-  tempo: 'tempo',
-  long: 'long_run',
-  race: 'tempo',
+const RUN_TYPE_LABELS: Record<RunType, string> = {
+  recovery: 'Recovery',
+  tempo: 'Tempo',
+  long_run: 'Long',
+  intervals: 'Intervals',
+  race: 'Race',
+  rest: 'Rest',
 };
 
 async function fetchRecentRunningSessions(uid: string): Promise<any[]> {
@@ -72,13 +79,15 @@ async function fetchRecentRunningSessions(uid: string): Promise<any[]> {
   }
 }
 
-export default function RunnerPlanView() {
+export default function RunnerPlanView({ initialDate }: { initialDate?: string }) {
   const navigate = useNavigate();
   const { user } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [plan, setPlan] = useState<RacePlan | null>(null);
   const [recentRunningSessions, setRecentRunningSessions] = useState<any[]>([]);
+  const [viewedWeekNumber, setViewedWeekNumber] = useState<number | null>(null);
+  const [highlightDate, setHighlightDate] = useState<string | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [raceType, setRaceType] = useState<RaceType>('10k');
@@ -100,6 +109,12 @@ export default function RunnerPlanView() {
         ]);
         setPlan(activePlan);
         setRecentRunningSessions(sessions);
+        if (activePlan) {
+          const resolvedInitialWeek = initialDate ? getWeekEntryByDate(activePlan, initialDate) : null;
+          const startWeek = resolvedInitialWeek ?? getCurrentWeekEntry(activePlan);
+          setViewedWeekNumber(startWeek?.weekNumber ?? 1);
+          setHighlightDate(resolvedInitialWeek ? initialDate! : toLocalDateStr(new Date()));
+        }
       } catch (e) {
         console.error('Error loading race plan:', e);
       } finally {
@@ -222,10 +237,18 @@ export default function RunnerPlanView() {
   }
 
   // ── Active plan state ────────────────────────────────────────────────────
-  const week = getCurrentWeekEntry(plan);
-  const todayStr = toLocalDateStr(new Date());
-  const todayEntry = week ? week.days.find(d => d.date === todayStr) ?? null : null;
-  const adherence = week ? computeAdherence(plan, recentRunningSessions) : null;
+  const todayLocal = toLocalDateStr(new Date());
+  const currentWeekNumber = getCurrentWeekEntry(plan)?.weekNumber ?? null;
+  const week = viewedWeekNumber != null ? getWeekEntryByNumber(plan, viewedWeekNumber) : null;
+  const isCurrentWeek = viewedWeekNumber != null && viewedWeekNumber === currentWeekNumber;
+  const dayEntry = highlightDate ? getPlanDayForDate(plan, highlightDate) : null;
+  const adherence = isCurrentWeek && week ? computeAdherence(plan, recentRunningSessions) : null;
+  const dayCardLabel = highlightDate && highlightDate !== todayLocal
+    ? new Date(highlightDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+    : 'Today';
+
+  const goToPrevWeek = () => setViewedWeekNumber(n => (n != null ? Math.max(1, n - 1) : n));
+  const goToNextWeek = () => setViewedWeekNumber(n => (n != null ? Math.min(plan.totalWeeks, n + 1) : n));
 
   return (
     <div className="space-y-4">
@@ -233,9 +256,21 @@ export default function RunnerPlanView() {
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Race Goal</span>
-          <span className="text-[10px] font-mono text-emerald-400">
-            {week ? `Week ${week.weekNumber} of ${plan.totalWeeks}` : `${plan.totalWeeks}-week plan`}
-          </span>
+          {week ? (
+            <div className="flex items-center gap-1.5">
+              <button onClick={goToPrevWeek} disabled={viewedWeekNumber === 1}
+                className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <span className="text-[10px] font-mono text-emerald-400">Week {week.weekNumber} of {plan.totalWeeks}</span>
+              <button onClick={goToNextWeek} disabled={viewedWeekNumber === plan.totalWeeks}
+                className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <span className="text-[10px] font-mono text-emerald-400">{plan.totalWeeks}-week plan</span>
+          )}
         </div>
         <div className="text-sm font-semibold text-white">{plan.raceName}</div>
         <div className="text-[10px] text-slate-500 font-mono mt-0.5">
@@ -260,58 +295,61 @@ export default function RunnerPlanView() {
             <div className="flex justify-between gap-1.5">
               {week.days.map(day => {
                 const style = RUN_TYPE_STYLES[day.runType];
-                const isToday = day.date === todayStr;
+                const isHighlighted = day.date === highlightDate;
                 const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
                 return (
                   <div key={day.date}
                     className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border}`}>
-                    <span className={`text-[9px] font-mono ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                    <span className={`text-[8px] font-mono ${style.text} capitalize`}>{day.runType === 'rest' ? '—' : day.runType}</span>
+                    <span className={`text-[9px] font-mono ${isHighlighted ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
+                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'rest' ? '—' : RUN_TYPE_LABELS[day.runType]}</span>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {/* Today's run card */}
-          {todayEntry && (
-            todayEntry.runType === 'rest' ? (
+          {/* Day detail card */}
+          {dayEntry && (
+            dayEntry.runType === 'rest' ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Today</span>
+                <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{dayCardLabel}</span>
                 <div className="text-sm font-semibold text-white mt-1">Rest day</div>
-                {todayEntry.note && <p className="text-xs text-slate-400 mt-1">{todayEntry.note}</p>}
+                {dayEntry.note && <p className="text-xs text-slate-400 mt-1">{dayEntry.note}</p>}
               </div>
             ) : (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Today</span>
-                  <span className={`text-[9px] font-mono px-2 py-0.5 rounded-full capitalize ${RUN_TYPE_STYLES[todayEntry.runType].bg} ${RUN_TYPE_STYLES[todayEntry.runType].text} border ${RUN_TYPE_STYLES[todayEntry.runType].border}`}>
-                    {todayEntry.runType}
+                  <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{dayCardLabel}</span>
+                  <span className={`text-[9px] font-mono px-2 py-0.5 rounded-full ${RUN_TYPE_STYLES[dayEntry.runType].bg} ${RUN_TYPE_STYLES[dayEntry.runType].text} border ${RUN_TYPE_STYLES[dayEntry.runType].border}`}>
+                    {RUN_TYPE_LABELS[dayEntry.runType]}
                   </span>
                 </div>
                 <div className="flex gap-4 mb-2">
-                  {todayEntry.targetDistanceKm != null && (
+                  {dayEntry.targetDistanceKm != null && (
                     <div className="text-lg font-bold text-white">
-                      {todayEntry.targetDistanceKm}<span className="text-xs text-slate-500 ml-0.5">km</span>
+                      {dayEntry.targetDistanceKm}<span className="text-xs text-slate-500 ml-0.5">km</span>
                     </div>
                   )}
-                  {todayEntry.targetPaceMinPerKm != null && (
+                  {dayEntry.targetPaceMinPerKm != null && (
                     <div className="text-lg font-bold text-emerald-400">
-                      {todayEntry.targetPaceMinPerKm.toFixed(2)}<span className="text-xs text-slate-500 ml-0.5">min/km</span>
+                      {dayEntry.targetPaceMinPerKm.toFixed(2)}<span className="text-xs text-slate-500 ml-0.5">min/km</span>
                     </div>
                   )}
                 </div>
-                {todayEntry.note && <p className="text-xs text-slate-400 mb-3">{todayEntry.note}</p>}
-                <button
-                  onClick={() => navigate('/running-session', {
-                    state: {
-                      targetDistanceKm: todayEntry.targetDistanceKm,
-                      effortType: RUN_TYPE_TO_EFFORT[todayEntry.runType as Exclude<RunType, 'rest'>],
-                    },
-                  })}
-                  className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors">
-                  Start This Run
-                </button>
+                {dayEntry.note && <p className="text-xs text-slate-400 mb-3">{dayEntry.note}</p>}
+                {isCurrentWeek && dayEntry.date === todayLocal && (
+                  <button
+                    onClick={() => navigate('/running-session', {
+                      state: {
+                        targetDistanceKm: dayEntry.targetDistanceKm,
+                        // 'race' isn't a loggable EffortType — closest real effort is tempo.
+                        effortType: dayEntry.runType === 'race' ? 'tempo' : dayEntry.runType,
+                      },
+                    })}
+                    className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors">
+                    Start This Run
+                  </button>
+                )}
               </div>
             )
           )}

@@ -19,6 +19,8 @@ export interface UserGoals {
   updatedAt?: string;
   updatedBy?: 'ai_coach' | 'ai_coach_recommendation' | 'ai_body_stats' | 'manual' | 'profile_change';
   aiSummary?: string;
+  // Points at the users/{uid}/goalPlans doc currently owning nutrition targets, if any.
+  activeGoalPlanId?: string | null;
 }
 
 export const DEFAULT_GOALS: Required<Pick<UserGoals,
@@ -47,11 +49,37 @@ export async function getGoals(uid: string): Promise<UserGoals> {
   }
 }
 
+const NUTRITION_FIELDS = ['calorieGoal', 'proteinGoal', 'carbGoal', 'fatGoal'] as const;
+
+// A goal plan "owns" nutrition targets once active — any write that touches
+// calorie/protein/carb/fat while a plan is active must be confirmed by the
+// caller first rather than silently overwriting the plan's numbers.
+export async function checkActiveGoalPlanConflict(
+  uid: string,
+  incomingFields: Partial<UserGoals>
+): Promise<{ hasConflict: boolean; activeGoalPlanId: string | null }> {
+  const touchesNutrition = NUTRITION_FIELDS.some(f => f in incomingFields);
+  if (!touchesNutrition) return { hasConflict: false, activeGoalPlanId: null };
+
+  const current = await getGoals(uid);
+  const activeGoalPlanId = current.activeGoalPlanId ?? null;
+  return { hasConflict: activeGoalPlanId != null, activeGoalPlanId };
+}
+
+export function goalPlanConflictError(): Error {
+  const err = new Error('Active goal plan owns nutrition targets — write blocked pending confirmation');
+  (err as any).code = 'GOAL_PLAN_CONFLICT';
+  return err;
+}
+
 export async function saveGoals(
   uid: string,
   partial: Partial<UserGoals>,
   source: string
 ): Promise<void> {
+  const { hasConflict } = await checkActiveGoalPlanConflict(uid, partial);
+  if (hasConflict) throw goalPlanConflictError();
+
   await setDoc(
     doc(db, 'users', uid, 'goals', 'current'),
     { ...partial, updatedAt: new Date().toISOString(), updatedBy: source as UserGoals['updatedBy'] },

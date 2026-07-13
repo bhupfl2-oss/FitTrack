@@ -7,7 +7,7 @@ import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/fires
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 
-type EffortType = 'recovery' | 'tempo' | 'long_run' | 'intervals';
+export type EffortType = 'recovery' | 'tempo' | 'long_run' | 'intervals';
 type Surface = 'road' | 'treadmill' | 'hill';
 
 interface IntervalRow {

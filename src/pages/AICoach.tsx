@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, Pencil } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import {
   collection,
@@ -11,10 +11,12 @@ import {
   getDoc,
   doc,
   setDoc,
+  updateDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
-import { getActiveRacePlan, getCurrentWeekEntry, type RacePlan } from '@/services/racePlanService';
+import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlan, type RacePlan, type RaceType } from '@/services/racePlanService';
+import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode } from '@/services/goalPlansService';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -30,6 +32,40 @@ interface ContextData {
   workoutSessions: any[];
   nutritionLogs: any[];
   racePlan: RacePlan | null;
+  activeGoalPlan: GoalPlan | null;
+}
+
+// ── Goal-intake types (topic === 'goal') ────────────────────────────────────
+
+interface GoalPrefill {
+  activeRacePlan: RacePlan | null;
+  activeGoalPlan: GoalPlan | null;
+}
+
+interface GoalPlanProposal {
+  goalPlanKind: GoalPlanType;
+  // race
+  raceType?: RaceType;
+  raceName?: string;
+  raceDate?: string;
+  targetFinishTime?: string | null;
+  customDistanceKm?: number | null;
+  // performance_target
+  metric?: string;
+  targetValue?: number;
+  // existing_routine
+  routineDescription?: string;
+  trackMode?: GoalPlanTrackMode;
+  // shared
+  daySplit?: { runDays: number; gymDays: number } | null;
+  gymSplitPattern?: string[] | null;
+  assumptions?: string[];
+}
+
+interface PendingGoalProposal {
+  plan: GoalPlanProposal | null;
+  nutritionUpdate: Record<string, number> | null;
+  conflict: { type: 'race' | 'goalPlan'; label: string } | null;
 }
 
 // labRanges removed — reference ranges now come from tests collection
@@ -49,14 +85,50 @@ const calculateAge = (dob: string) => {
   return age;
 };
 
+const describeGoalPlan = (gp: GoalPlan): string => {
+  if (gp.type === 'performance_target') {
+    return gp.bodyCompTarget ? `${gp.bodyCompTarget.metric} → ${gp.bodyCompTarget.targetValue}` : 'Performance target';
+  }
+  return gp.routineDescription || 'Your routine';
+};
+
 const quickChips: Record<string, string[]> = {
   workout: ["Suggest today's workout", "Why is my SMM dropping?", "How many days rest?"],
   food: ["What should I eat today?", "High protein veg meals", "Best pre-workout meal"],
   labs: ["Explain my results", "What should I retest?", "What affects Vitamin D?", "Is this package suitable for my needs?"],
   body: ["How's my body comp trending?", "Am I on track with my goals?", "What should I focus on next?", "Why is my SMM dropping?"],
   runner: ["How's my training going?", "Adjust this week's plan", "Should I run today?"],
+  goal: ["I'm training for a 10K in December", "I want to hit 15% body fat", "I already run 3x a week, just track it"],
   general: ["How am I doing overall?", "Plan my week", "What should I focus on?", "Log something", "What should I eat today?"],
 };
+
+// Shared verbatim with the goal-intake system prompt so the flat-numeric path
+// (Profile/Body/Workout/Food/Labs/General) behaves identically either way.
+const GOAL_UPDATE_INSTRUCTIONS = `GOAL UPDATES: If — and only if — you are recommending the user change one of their daily targets (calorie, protein, carb, fat, steps, sleep, or water goal), append a structured block at the very end of your reply, after all the text you want shown to the user:
+<<<GOAL_UPDATE>>>{"calorieGoal":2000,"proteinGoal":140}<<<END_GOAL_UPDATE>>>
+Only include keys for goals you are actually recommending changing (valid keys: calorieGoal, proteinGoal, carbGoal, fatGoal, stepsGoal, sleepGoal, waterGoal). Never include this block when you are simply restating today's logged intake or making general commentary — it must only appear when you are proposing a new target.`;
+
+const GOAL_PLAN_INTAKE_INSTRUCTIONS = `You are helping the user set up or edit a single active training goal — exactly one of three kinds. Figure out which kind fits from what they say, then gather the required info conversationally before proposing anything.
+
+RACE: they name a specific race or race distance/date they're training for.
+Required: race name (or a reasonable name if truly unnamed, e.g. "10K Race"), race date, race type (5k/10k/half_marathon/full_marathon/custom — infer from distance if given, customDistanceKm required if custom), and ideally a target finish time and weekly day-split (run days vs gym days). If the race date is incomplete (e.g. "December" with no day), never silently pick a day without saying so — either ask for the missing part, or if you default one, explicitly say what you assumed in your reply and list it in the assumptions array. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]).
+
+PERFORMANCE TARGET: they name a specific number/metric they want to hit that isn't a race (e.g. body fat %, a lift number, a pace).
+Required: the metric name, their current value (for your own context only — it is never saved, so it's fine to just ask), their target value, and ideally a weekly day-split. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]).
+
+EXISTING ROUTINE: they describe a routine they already follow and just want tracked, not changed.
+Parse the days/schedule exactly as they describe it — never invent structure they didn't mention. If any day of the week is left unstated, say so explicitly in your reply (e.g. "Sunday wasn't mentioned — I'll assume rest") and list it in the assumptions array; never silently fill a gap. Always ask explicitly: "Should I track this exactly as you described, or would you like AI to suggest improvements?" If the user doesn't answer that question, default trackMode to "as_is". Don't ask a separate question about the gym split — if what they described implies a rotating pattern (e.g. they mention push/pull/legs or upper/lower days), derive gymSplitPattern from that directly; if no rotating pattern is evident, leave it out.
+
+Only emit the structured block below once you have the minimum required info for whichever kind applies — keep asking plain-text questions otherwise, no block yet.
+
+COMPOUND GOALS: if the user's message also includes a body-composition or nutrition target (e.g. "...and I want to hit 15% body fat" or "...also up my protein"), include BOTH the goal-plan fields AND the flat numeric UserGoals fields (calorieGoal, proteinGoal, carbGoal, fatGoal, stepsGoal, sleepGoal, waterGoal) in the SAME JSON block below — never emit two separate blocks.
+
+When ready, append exactly one block at the very end of your reply, after all the text you want shown to the user. Shape depends on goalPlanKind:
+Race: <<<GOAL_UPDATE>>>{"goalPlanKind":"race","raceType":"10k","raceName":"...","raceDate":"YYYY-MM-DD","targetFinishTime":"55:00","daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":["..."]}<<<END_GOAL_UPDATE>>>
+Performance target: <<<GOAL_UPDATE>>>{"goalPlanKind":"performance_target","metric":"body fat %","targetValue":15,"daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":[]}<<<END_GOAL_UPDATE>>>
+Existing routine: <<<GOAL_UPDATE>>>{"goalPlanKind":"existing_routine","routineDescription":"as the user described it","trackMode":"as_is","daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":["..."]}<<<END_GOAL_UPDATE>>>
+For a compound goal, add any of the flat numeric UserGoals keys (calorieGoal, proteinGoal, etc.) alongside the goalPlanKind fields in that same object — do not emit them in a second block.
+"assumptions" is always an array of short strings describing anything you inferred rather than the user stating outright; use an empty array if nothing was assumed.`;
 
 const renderInline = (text: string): React.ReactNode[] => {
   const parts: React.ReactNode[] = [];
@@ -102,11 +174,66 @@ const renderMarkdown = (text: string): React.ReactNode[] => {
   });
 };
 
+// Row + pencil-edit pattern, mirroring WorkoutPosterModal's inline-edit rows —
+// closest existing convention in the app for a per-field editable summary.
+function EditableRow({
+  label, value, multiline, type = 'text', onSave,
+}: {
+  label: string;
+  value: string;
+  multiline?: boolean;
+  type?: 'text' | 'number' | 'date';
+  onSave: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  if (editing) {
+    return (
+      <div className="flex items-start justify-between gap-2 py-1.5">
+        <span className="text-[11px] text-slate-500 flex-shrink-0 pt-1.5">{label}</span>
+        <div className="flex items-center gap-1.5 flex-1 justify-end">
+          {multiline ? (
+            <textarea
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              rows={2}
+              className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          ) : (
+            <input
+              type={type}
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              className="w-32 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          )}
+          <button onClick={() => { onSave(draft); setEditing(false); }} className="text-emerald-400 hover:text-emerald-300 text-xs">✓</button>
+          <button onClick={() => { setDraft(value); setEditing(false); }} className="text-slate-500 hover:text-white text-xs">✕</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between py-1.5">
+      <span className="text-[11px] text-slate-500">{label}</span>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-white font-medium">{value || 'not set'}</span>
+        <button onClick={() => { setDraft(value); setEditing(true); }} className="text-slate-500 hover:text-emerald-400">
+          <Pencil size={11} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AICoach() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useAuth();
   const topic = new URLSearchParams(location.search).get('topic') || 'general';
+  const prefill = (location.state as { prefill?: GoalPrefill } | null)?.prefill;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -115,6 +242,9 @@ export default function AICoach() {
   const [contextData, setContextData] = useState<ContextData | null>(null);
   const [systemContext, setSystemContext] = useState('');
   const [messageCount, setMessageCount] = useState(0);
+  const [pendingProposal, setPendingProposal] = useState<PendingGoalProposal | null>(null);
+  const [savingProposal, setSavingProposal] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const DAILY_LIMIT = 10;
@@ -187,6 +317,18 @@ export default function AICoach() {
         rp.aiSummary && `Plan approach: ${rp.aiSummary}`,
       ].filter(Boolean);
       parts.push('RACE PLAN:\n' + planParts.join('\n'));
+    }
+
+    if (data.activeGoalPlan) {
+      const gp = data.activeGoalPlan;
+      const planParts = [
+        `Type: ${gp.type}`,
+        gp.bodyCompTarget && `Target: ${gp.bodyCompTarget.metric} → ${gp.bodyCompTarget.targetValue}`,
+        gp.daySplit && `Day split: ${gp.daySplit.runDays} run · ${gp.daySplit.gymDays} gym / week`,
+        gp.routineDescription && `Routine: ${gp.routineDescription}`,
+        gp.trackMode && `Track mode: ${gp.trackMode}`,
+      ].filter(Boolean);
+      parts.push('ACTIVE GOAL PLAN:\n' + planParts.join('\n'));
     }
 
     if (data.nutritionLogs.length > 0) {
@@ -313,9 +455,12 @@ export default function AICoach() {
           console.error('Error loading nutrition logs:', e);
         }
 
-        const racePlan = await getActiveRacePlan(user.uid);
+        const [racePlan, activeGoalPlan] = await Promise.all([
+          getActiveRacePlan(user.uid),
+          getActiveGoalPlan(user.uid),
+        ]);
 
-        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs, racePlan };
+        const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs, racePlan, activeGoalPlan };
         setContextData(data);
         const ctx = buildContext(data);
         setSystemContext(ctx);
@@ -355,6 +500,34 @@ export default function AICoach() {
         role: 'assistant',
         content: `Hey ${name}! I have your full health context loaded. What would you like to work on today?`,
       }]);
+      return;
+    }
+
+    if (topic === 'goal') {
+      // Deterministic opener (no API call) — references the specific active
+      // plan by name when prefilled, so it can't misstate a number the LLM
+      // might get wrong from context alone.
+      if (prefill?.activeRacePlan) {
+        const rp = prefill.activeRacePlan;
+        setMessages([{
+          role: 'assistant',
+          content: `Let's update your **${rp.raceName}** plan (${rp.raceDate}). What would you like to change — the race details, target pace, or weekly split?`,
+        }]);
+      } else if (prefill?.activeGoalPlan) {
+        const gp = prefill.activeGoalPlan;
+        const label = gp.type === 'performance_target'
+          ? (gp.bodyCompTarget ? `your ${gp.bodyCompTarget.metric} target` : 'your performance target')
+          : 'your routine';
+        setMessages([{
+          role: 'assistant',
+          content: `Let's update ${label}. What would you like to change?`,
+        }]);
+      } else {
+        setMessages([{
+          role: 'assistant',
+          content: `Let's set up your training goal. Are you training for a **race**, chasing a **performance target** (like a body composition or strength number), or do you already have a **routine** you just want tracked? Tell me about it — race name and date, your target, or your weekly split.`,
+        }]);
+      }
       return;
     }
 
@@ -416,7 +589,7 @@ ${systemContext}`,
     if (systemContext) {
       generateOpener();
     }
-  }, [contextLoaded, systemContext, topic, messages.length, contextData]);
+  }, [contextLoaded, systemContext, topic, messages.length, contextData, prefill]);
 
   const detectWorkoutSuggestion = (text: string): { name: string; sets: number; reps: number }[] | null => {
     const lines = text.split('\n');
@@ -483,18 +656,7 @@ ${systemContext}`,
         content: m.content,
       }));
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 400,
-          system: `You are a personal health coach for this user. Always use their actual data in responses. Be concise (max 3-4 sentences). Never give medical diagnoses. Friendly, direct tone.
+      const defaultSystemPrompt = `You are a personal health coach for this user. Always use their actual data in responses. Be concise (max 3-4 sentences). Never give medical diagnoses. Friendly, direct tone.
 
 When the user wants to log something, suggest the right page naturally:
 - Log food / meal / calories → suggest going to Food page
@@ -506,12 +668,32 @@ Say something like "Head to the Food page to log that — tap Food in the nav ba
 
 TEST PACKAGE COVERAGE: If the user asks whether a lab test package suits their needs but hasn't named the package or listed its tests yet, ask them to share the package name, paste the list of tests it includes, or describe it — give 2-3 popular examples (e.g. Dr Lal PathLabs Aarogyam, Thyrocare Aarogyam C, 1mg Full Body Checkup) to make replying easy. Once they give you the package's tests, compare it against their tracked tests and upcoming/overdue tests from their context, and clearly state what's covered and what's missing.
 
-GOAL UPDATES: If — and only if — you are recommending the user change one of their daily targets (calorie, protein, carb, fat, steps, sleep, or water goal), append a structured block at the very end of your reply, after all the text you want shown to the user:
-<<<GOAL_UPDATE>>>{"calorieGoal":2000,"proteinGoal":140}<<<END_GOAL_UPDATE>>>
-Only include keys for goals you are actually recommending changing (valid keys: calorieGoal, proteinGoal, carbGoal, fatGoal, stepsGoal, sleepGoal, waterGoal). Never include this block when you are simply restating today's logged intake or making general commentary — it must only appear when you are proposing a new target.
+${GOAL_UPDATE_INSTRUCTIONS}
 
 USER CONTEXT:
-${systemContext}`,
+${systemContext}`;
+
+      const goalSystemPrompt = `You are a personal training-goal coach for this user. Always use their actual data in responses. Be concise. Never give medical diagnoses. Friendly, direct tone.
+
+${GOAL_PLAN_INTAKE_INSTRUCTIONS}
+
+${GOAL_UPDATE_INSTRUCTIONS}
+
+USER CONTEXT:
+${systemContext}`;
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 500,
+          system: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
           messages: conversationHistory,
         }),
       });
@@ -523,9 +705,8 @@ ${systemContext}`,
       // Structured goal-update block: the model emits this only when it's
       // recommending a changed target, never when restating logged intake.
       const goalUpdateMatch = rawText.match(/<<<GOAL_UPDATE>>>([\s\S]*?)<<<END_GOAL_UPDATE>>>/);
-      const aiText = goalUpdateMatch
-        ? rawText.slice(0, goalUpdateMatch.index).trim()
-        : rawText;
+      let aiText = rawText;
+      if (goalUpdateMatch) aiText = aiText.replace(goalUpdateMatch[0], '').trim();
 
       const workoutExercises = detectWorkoutSuggestion(aiText);
       setMessages(prev => [...prev, {
@@ -536,10 +717,40 @@ ${systemContext}`,
 
       if (user && goalUpdateMatch) {
         try {
-          const partialGoals = JSON.parse(goalUpdateMatch[1]) as Record<string, number>;
-          if (partialGoals && Object.keys(partialGoals).length > 0) {
-            await saveGoals(user.uid, partialGoals, 'ai_coach_recommendation');
-            console.log('[Goals] AI coach recommended goal update, saved:', partialGoals);
+          const parsed = JSON.parse(goalUpdateMatch[1]) as Record<string, any>;
+          // Shape-based branch: plan-shaped keys route to the confirm-card flow
+          // instead of writing immediately; whatever numeric UserGoals keys are
+          // left over take the exact same path this always has (saveGoals).
+          // Whitelisted, not a catch-all spread — the goal-intake prompt can
+          // return extra keys the model invented on its own (e.g. targetDate)
+          // that must never be mistaken for a UserGoals field.
+          const {
+            goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
+            metric, targetValue, routineDescription, trackMode, daySplit, gymSplitPattern, assumptions,
+          } = parsed;
+          const numericFields: Record<string, number> = {};
+          for (const key of ['calorieGoal', 'proteinGoal', 'carbGoal', 'fatGoal', 'stepsGoal', 'sleepGoal', 'waterGoal']) {
+            if (typeof parsed[key] === 'number') numericFields[key] = parsed[key];
+          }
+
+          if (goalPlanKind) {
+            const conflict = contextData?.racePlan
+              ? { type: 'race' as const, label: `${contextData.racePlan.raceName} (${contextData.racePlan.raceDate})` }
+              : contextData?.activeGoalPlan
+                ? { type: 'goalPlan' as const, label: describeGoalPlan(contextData.activeGoalPlan) }
+                : null;
+            setPendingProposal({
+              plan: {
+                goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
+                metric, targetValue, routineDescription, trackMode, daySplit, gymSplitPattern,
+                assumptions: assumptions ?? [],
+              },
+              nutritionUpdate: Object.keys(numericFields).length > 0 ? numericFields : null,
+              conflict,
+            });
+          } else if (Object.keys(numericFields).length > 0) {
+            await saveGoals(user.uid, numericFields, 'ai_coach_recommendation');
+            console.log('[Goals] AI coach recommended goal update, saved:', numericFields);
           }
         } catch (_) { /* silent */ }
       }
@@ -573,6 +784,105 @@ ${systemContext}`,
 
   const handleChipClick = (chipText: string) => {
     sendMessage(chipText);
+  };
+
+  // ── Goal-plan confirm card ──────────────────────────────────────────────
+  const updateProposalPlanField = (field: keyof GoalPlanProposal, value: any) => {
+    setPendingProposal(prev => prev && prev.plan ? { ...prev, plan: { ...prev.plan, [field]: value } } : prev);
+  };
+
+  const updateProposalDaySplit = (key: 'runDays' | 'gymDays', value: number) => {
+    setPendingProposal(prev => {
+      if (!prev?.plan) return prev;
+      const current = prev.plan.daySplit ?? { runDays: 0, gymDays: 0 };
+      return { ...prev, plan: { ...prev.plan, daySplit: { ...current, [key]: value } } };
+    });
+  };
+
+  const updateProposalNutritionField = (field: string, value: number) => {
+    setPendingProposal(prev => prev ? { ...prev, nutritionUpdate: { ...(prev.nutritionUpdate ?? {}), [field]: value } } : prev);
+  };
+
+  const cancelProposal = () => {
+    setPendingProposal(null);
+    setProposalError(null);
+  };
+
+  // Bypasses saveGoals's active-goal-plan conflict check on purpose — that
+  // check exists to require confirmation before overwriting nutrition targets
+  // a plan owns, and the user just gave that confirmation by clicking Save on
+  // this exact combined card.
+  const applyConfirmedNutritionUpdate = async (uid: string, partial: Record<string, number>) => {
+    await setDoc(
+      doc(db, 'users', uid, 'goals', 'current'),
+      { ...partial, updatedAt: new Date().toISOString(), updatedBy: 'ai_coach_recommendation' },
+      { merge: true }
+    );
+  };
+
+  const confirmProposal = async () => {
+    if (!pendingProposal?.plan || !user) return;
+    setSavingProposal(true);
+    setProposalError(null);
+    try {
+      const p = pendingProposal.plan;
+
+      // Re-verify right before writing — state could be stale if minutes
+      // passed since the card was rendered.
+      const [freshRacePlan, freshGoalPlan] = await Promise.all([
+        getActiveRacePlan(user.uid),
+        getActiveGoalPlan(user.uid),
+      ]);
+
+      if (p.goalPlanKind === 'race') {
+        if (!p.raceName || !p.raceDate || !p.raceType) {
+          throw new Error('Missing race name, date, or type — tell the coach the missing details first.');
+        }
+        if (freshGoalPlan) {
+          await updateDoc(doc(db, 'users', user.uid, 'goalPlans', freshGoalPlan.id), { status: 'replaced' });
+        }
+        await generateRacePlan(user.uid, {
+          raceType: p.raceType,
+          raceName: p.raceName,
+          raceDate: p.raceDate,
+          targetFinishTime: p.targetFinishTime ?? undefined,
+          customDistanceKm: p.customDistanceKm ?? undefined,
+          gymSplitPattern: p.gymSplitPattern ?? null,
+        }, 'ai_coach');
+      } else {
+        if (freshRacePlan) {
+          await updateDoc(doc(db, 'users', user.uid, 'racePlans', freshRacePlan.id), { status: 'abandoned' });
+        }
+        await createGoalPlan(user.uid, {
+          type: p.goalPlanKind,
+          daySplit: p.daySplit ?? null,
+          bodyCompTarget: p.goalPlanKind === 'performance_target' && p.metric && p.targetValue != null
+            ? { metric: p.metric, targetValue: p.targetValue }
+            : null,
+          routineDescription: p.goalPlanKind === 'existing_routine' ? (p.routineDescription ?? null) : null,
+          trackMode: p.goalPlanKind === 'existing_routine' ? (p.trackMode ?? 'as_is') : null,
+          gymSplitPattern: p.gymSplitPattern ?? null,
+        });
+      }
+
+      if (pendingProposal.nutritionUpdate) {
+        await applyConfirmedNutritionUpdate(user.uid, pendingProposal.nutritionUpdate);
+      }
+
+      const [racePlan, activeGoalPlan] = await Promise.all([
+        getActiveRacePlan(user.uid),
+        getActiveGoalPlan(user.uid),
+      ]);
+      setContextData(prev => prev ? { ...prev, racePlan, activeGoalPlan } : prev);
+
+      setMessages(prev => [...prev, { role: 'assistant', content: '✅ Saved! Your goal is set.' }]);
+      setPendingProposal(null);
+    } catch (e: any) {
+      console.error('Error confirming goal proposal:', e);
+      setProposalError(e?.message || 'Failed to save. Please try again.');
+    } finally {
+      setSavingProposal(false);
+    }
   };
 
   const hasUserSent = messages.some(m => m.role === 'user');
@@ -645,6 +955,104 @@ ${systemContext}`,
             </div>
           </div>
         ))}
+
+        {pendingProposal?.plan && (
+          <div className="bg-slate-800 border border-emerald-500/30 rounded-2xl p-4 max-w-[95%]">
+            {pendingProposal.conflict && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mb-3 text-xs text-amber-300">
+                ⚠️ Replaces your active {pendingProposal.conflict.type === 'race' ? 'race' : 'goal'}: {pendingProposal.conflict.label}
+              </div>
+            )}
+
+            <div className="text-[10px] font-mono text-emerald-400 uppercase tracking-wider mb-2">
+              {pendingProposal.plan.goalPlanKind === 'race' ? 'Race Goal'
+                : pendingProposal.plan.goalPlanKind === 'performance_target' ? 'Performance Target'
+                : 'Existing Routine'}
+            </div>
+
+            <div className="divide-y divide-slate-700/50">
+              {pendingProposal.plan.goalPlanKind === 'race' && (
+                <>
+                  <EditableRow label="Race name" value={pendingProposal.plan.raceName ?? ''} onSave={v => updateProposalPlanField('raceName', v)} />
+                  <EditableRow label="Race date" type="date" value={pendingProposal.plan.raceDate ?? ''} onSave={v => updateProposalPlanField('raceDate', v)} />
+                  <EditableRow label="Race type" value={pendingProposal.plan.raceType ?? ''} onSave={v => updateProposalPlanField('raceType', v)} />
+                  <EditableRow label="Target finish time" value={pendingProposal.plan.targetFinishTime ?? ''} onSave={v => updateProposalPlanField('targetFinishTime', v || null)} />
+                </>
+              )}
+              {pendingProposal.plan.goalPlanKind === 'performance_target' && (
+                <>
+                  <EditableRow label="Metric" value={pendingProposal.plan.metric ?? ''} onSave={v => updateProposalPlanField('metric', v)} />
+                  <EditableRow label="Target value" type="number" value={pendingProposal.plan.targetValue != null ? String(pendingProposal.plan.targetValue) : ''} onSave={v => updateProposalPlanField('targetValue', parseFloat(v) || 0)} />
+                </>
+              )}
+              {pendingProposal.plan.goalPlanKind === 'existing_routine' && (
+                <>
+                  <EditableRow label="Routine" multiline value={pendingProposal.plan.routineDescription ?? ''} onSave={v => updateProposalPlanField('routineDescription', v)} />
+                  <div className="flex items-center justify-between py-1.5">
+                    <span className="text-[11px] text-slate-500">Track mode</span>
+                    <div className="flex gap-1.5">
+                      {(['as_is', 'ai_suggested'] as const).map(mode => (
+                        <button key={mode} onClick={() => updateProposalPlanField('trackMode', mode)}
+                          className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                            (pendingProposal.plan!.trackMode ?? 'as_is') === mode
+                              ? 'bg-emerald-500 border-emerald-500 text-white'
+                              : 'bg-slate-800 border-slate-700 text-slate-400'
+                          }`}>
+                          {mode === 'as_is' ? 'As-is' : 'AI-suggested'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+              {pendingProposal.plan.daySplit != null && (
+                <div className="flex items-center justify-between py-1.5">
+                  <span className="text-[11px] text-slate-500">Day split</span>
+                  <div className="flex items-center gap-2">
+                    <input type="number" min={0} max={7} value={pendingProposal.plan.daySplit.runDays}
+                      onChange={e => updateProposalDaySplit('runDays', parseInt(e.target.value) || 0)}
+                      className="w-12 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-xs text-white text-center" />
+                    <span className="text-[10px] text-slate-500">run ·</span>
+                    <input type="number" min={0} max={7} value={pendingProposal.plan.daySplit.gymDays}
+                      onChange={e => updateProposalDaySplit('gymDays', parseInt(e.target.value) || 0)}
+                      className="w-12 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-xs text-white text-center" />
+                    <span className="text-[10px] text-slate-500">gym</span>
+                  </div>
+                </div>
+              )}
+              {pendingProposal.plan.daySplit != null && pendingProposal.plan.daySplit.gymDays > 0 && (
+                <EditableRow
+                  label="Gym split"
+                  value={(pendingProposal.plan.gymSplitPattern ?? []).join(', ')}
+                  onSave={v => updateProposalPlanField('gymSplitPattern', v.split(',').map(s => s.trim()).filter(Boolean))}
+                />
+              )}
+              {pendingProposal.nutritionUpdate && Object.entries(pendingProposal.nutritionUpdate).map(([key, val]) => (
+                <EditableRow key={key} label={key} type="number" value={String(val)}
+                  onSave={v => updateProposalNutritionField(key, parseFloat(v) || 0)} />
+              ))}
+            </div>
+
+            {pendingProposal.plan.assumptions && pendingProposal.plan.assumptions.length > 0 && (
+              <div className="mt-2 text-[10px] text-slate-500 italic">
+                Assumed: {pendingProposal.plan.assumptions.join(' · ')}
+              </div>
+            )}
+
+            {proposalError && <div className="mt-2 text-[10px] text-red-400">{proposalError}</div>}
+
+            <div className="flex gap-2 mt-3">
+              <button onClick={cancelProposal} disabled={savingProposal}
+                className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold py-2 rounded-lg transition-colors disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={confirmProposal} disabled={savingProposal}
+                className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold py-2 rounded-lg transition-colors disabled:opacity-50">
+                {savingProposal ? 'Saving…' : pendingProposal.conflict ? 'Replace & Save' : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {loading && (
           <div className="flex justify-start">

@@ -714,8 +714,8 @@ export default function Home() {
         // AI workout recommendation — non-blocking, uses cache when available
         getDoc(doc(db, 'users', user.uid, 'profile', 'data')).then(pSnap => {
           const profile = pSnap.exists() ? pSnap.data() : {};
-          getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2)).then(rec => {
-            if (rec) setTodayRecommendation(rec);
+          getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2)).then(recs => {
+            if (recs[0]) setTodayRecommendation(recs[0]);
           });
         });
         setLabResults(labsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)));

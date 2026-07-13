@@ -4,11 +4,14 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import type { EffortType } from '@/pages/RunningSession';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type RaceType = '5k' | '10k' | 'half_marathon' | 'full_marathon' | 'custom';
-export type RunType = 'easy' | 'tempo' | 'long' | 'rest' | 'race';
+// Superset of EffortType: 'rest' and 'race' are plan-day states, not loggable
+// training efforts, so they're not part of EffortType itself.
+export type RunType = EffortType | 'rest' | 'race';
 export type RacePlanStatus = 'active' | 'completed' | 'abandoned';
 export type RacePlanSource = 'profile' | 'ai_coach' | 'runner_tab';
 
@@ -40,6 +43,9 @@ export interface RacePlan {
   raceDistanceKm: number;
   targetFinishTime: string | null;   // as entered, e.g. "1:59:00" or "22:30"
   targetPaceMinPerKm: number | null; // derived
+  // Ordered rotation for gym days, e.g. ['Push','Pull','Legs'] — null until the
+  // user has named one (via goal intake or the edit flow).
+  gymSplitPattern: string[] | null;
 }
 
 export interface AdherenceResult {
@@ -119,6 +125,7 @@ interface GenerateRacePlanInput {
   raceDate: string; // YYYY-MM-DD
   targetFinishTime?: string; // e.g. "1:59:00" or "22:30"
   customDistanceKm?: number; // required when raceType === 'custom'
+  gymSplitPattern?: string[] | null;
 }
 
 export async function generateRacePlan(
@@ -126,7 +133,7 @@ export async function generateRacePlan(
   input: GenerateRacePlanInput,
   createdBy: RacePlanSource
 ): Promise<RacePlan> {
-  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm } = input;
+  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern } = input;
   const startDate = todayStr();
 
   if (raceDate <= startDate) {
@@ -232,13 +239,13 @@ export async function generateRacePlan(
 
 Consider:
 - Build volume gradually (10% rule), taper in the final 1-2 weeks before the race
-- Mix easy runs, one tempo run/week, one long run/week, rest days, and a race day on the final date
+- Mix recovery runs, one tempo run/week, one long run/week, rest days, and a race day on the final date. Use intervals sparingly for speed work if appropriate for the runner's level
 - If a GOAL PACE is provided below, calibrate every day's targetPaceMinPerKm relative to it: race day should be at (or very close to) the goal pace, tempo runs moderately faster than easy pace and close to the goal pace, easy and long runs meaningfully slower than goal pace (roughly 45-90 sec/km slower) — let recent running history refine these paces, but the goal pace is the anchor, not history alone
 - If no GOAL PACE is provided, base target distances/paces on the runner's actual recent running history when available, otherwise use sensible beginner-safe defaults for the race distance
 - Keep notes short (max 12 words), specific, and encouraging
 
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
-{"days":[{"weekNumber":1,"dayIndex":0,"runType":"easy|tempo|long|rest|race","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
+{"days":[{"weekNumber":1,"dayIndex":0,"runType":"recovery|tempo|long_run|intervals|rest|race","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
 The "days" array must include exactly one entry for every (weekNumber, dayIndex) pair given in DAY SKELETON below — no more, no fewer.`,
       messages: [{
         role: 'user',
@@ -333,6 +340,7 @@ Build the training plan.`,
     raceDistanceKm,
     targetFinishTime: finalTargetFinishTime,
     targetPaceMinPerKm,
+    gymSplitPattern: gymSplitPattern ?? null,
   };
   const ref = await addDoc(collection(db, 'users', uid, 'racePlans'), cleanData(planData));
   console.log('[RacePlan] Generated and saved plan:', ref.id);
@@ -342,11 +350,26 @@ Build the training plan.`,
 
 // ── Adherence (pure, no Firestore) ──────────────────────────────────────────
 
-export function getCurrentWeekEntry(plan: RacePlan): WeeklyPlanEntry | null {
-  const today = todayStr();
-  return plan.weeklyPlan.find(w => w.days.some(d => d.date === today))
-    ?? plan.weeklyPlan.find(w => w.days.length > 0 && today >= w.days[0].date && today <= w.days[w.days.length - 1].date)
+function findWeekEntryForDate(plan: RacePlan, dateStr: string): WeeklyPlanEntry | null {
+  return plan.weeklyPlan.find(w => w.days.some(d => d.date === dateStr))
+    ?? plan.weeklyPlan.find(w => w.days.length > 0 && dateStr >= w.days[0].date && dateStr <= w.days[w.days.length - 1].date)
     ?? null;
+}
+
+export function getCurrentWeekEntry(plan: RacePlan): WeeklyPlanEntry | null {
+  return findWeekEntryForDate(plan, todayStr());
+}
+
+export function getWeekEntryByDate(plan: RacePlan, date: string): WeeklyPlanEntry | null {
+  return findWeekEntryForDate(plan, date);
+}
+
+export function getPlanDayForDate(plan: RacePlan, date: string): PlanDay | null {
+  return getWeekEntryByDate(plan, date)?.days.find(d => d.date === date) ?? null;
+}
+
+export function getWeekEntryByNumber(plan: RacePlan, weekNumber: number): WeeklyPlanEntry | null {
+  return plan.weeklyPlan.find(w => w.weekNumber === weekNumber) ?? null;
 }
 
 export function computeAdherence(plan: RacePlan, workoutSessions: any[]): AdherenceResult {

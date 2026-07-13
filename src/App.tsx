@@ -21,6 +21,7 @@ import Login from "@/pages/Login";
 import OnboardingWizard from "@/pages/OnboardingWizard";
 import Food from "@/pages/Food";
 import ActivityCalendar from "@/pages/ActivityCalendar";
+import TrainingPlan from "@/pages/TrainingPlan";
 
 function AppContent() {
   const { user, loading: authLoading } = useAuth();
@@ -57,6 +58,7 @@ function AppContent() {
         <Route path="profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
         <Route path="food" element={<ProtectedRoute><Food /></ProtectedRoute>} />
         <Route path="activity-calendar" element={<ProtectedRoute><ActivityCalendar /></ProtectedRoute>} />
+        <Route path="training-plan" element={<ProtectedRoute><TrainingPlan /></ProtectedRoute>} />
       </Route>
     </Routes>
   );

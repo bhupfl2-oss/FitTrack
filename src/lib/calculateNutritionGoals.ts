@@ -1,5 +1,6 @@
 import { doc, getDoc, getDocs, collection, query, orderBy, limit, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { checkActiveGoalPlanConflict, goalPlanConflictError } from '@/services/goalsService';
 
 interface NutritionGoals {
   calorieGoal: number;
@@ -264,6 +265,9 @@ export async function calculateNutritionGoals(
   };
 
   // ── Save to goals/current (merge to preserve stepsGoal, sleepGoal, etc.) ──
+  const { hasConflict } = await checkActiveGoalPlanConflict(uid, { calorieGoal, proteinGoal, carbGoal, fatGoal });
+  if (hasConflict) throw goalPlanConflictError();
+
   const aiSummary = goals.basis.length > 120
     ? goals.basis.slice(0, 117) + '...'
     : goals.basis;

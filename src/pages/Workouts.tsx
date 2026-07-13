@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp, Share2 } from 'lucide-react';
+import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Share2, Flag, Target, Repeat } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
@@ -9,9 +9,11 @@ import { cleanData } from '@/lib/cleanData';
 import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
-import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
+import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation } from '@/lib/getWorkoutRecommendation';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
-import RunnerPlanView from '@/components/RunnerPlanView';
+import { getActiveRacePlan, type RacePlan, type PlanDay } from '@/services/racePlanService';
+import { getActiveGoalPlan, type GoalPlan } from '@/services/goalPlansService';
+import type { EffortType } from '@/pages/RunningSession';
 import { useGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -63,17 +65,16 @@ const EXERCISE_LIBRARY: ExerciseItem[] = [
   { name: 'Battle Ropes', category: 'full body' },
 ];
 
-// Workout library grouped by tab
+// Workout library grouped by tab — strength + cardio merged into one list (identical
+// entry shape, no reason to tab-separate them from each other).
 const WORKOUT_LIBRARY = {
-  strength: [
+  all: [
     { type: 'push', title: 'Push Day', subtitle: 'Chest · Shoulders · Triceps', emoji: '💪' },
     { type: 'pull', title: 'Pull Day', subtitle: 'Back · Biceps', emoji: '🏋️' },
     { type: 'legs', title: 'Legs Day', subtitle: 'Quads · Hamstrings · Glutes', emoji: '🦵' },
     { type: 'upper', title: 'Upper Body', subtitle: 'Chest · Back · Shoulders', emoji: '🏋️' },
     { type: 'lower', title: 'Lower Body', subtitle: 'Quads · Hamstrings · Glutes', emoji: '⬇️' },
     { type: 'fullbody', title: 'Full Body', subtitle: 'All muscle groups', emoji: '⚡' },
-  ],
-  cardio: [
     { type: 'running', title: 'Running', subtitle: 'Distance · Pace · Time', emoji: '🏃' },
     { type: 'cycling', title: 'Cycling', subtitle: 'Distance · Cadence · Time', emoji: '🚴' },
     { type: 'hiit', title: 'HIIT', subtitle: 'High intensity intervals', emoji: '🔥' },
@@ -93,8 +94,7 @@ const WORKOUT_LIBRARY = {
 };
 
 const LIBRARY_TABS = [
-  { key: 'strength', label: 'Strength' },
-  { key: 'cardio', label: 'Cardio' },
+  { key: 'all', label: 'Workouts' },
   { key: 'mindbody', label: 'Mind-Body' },
   { key: 'other', label: 'Other' },
 ] as const;
@@ -104,6 +104,10 @@ const calculateOneRM = (weight: number, reps: number): number => weight * (1 + r
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function formatDateShort(dateStr: string): string {
+  return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
@@ -124,7 +128,15 @@ export default function Workouts() {
   const [loading, setLoading] = useState(true);
   usePageLoadTime('Workouts', loading);
   const [showPrevSessions, setShowPrevSessions] = useState(false);
-  const [persona, setPersona] = useState<'gym' | 'runner'>('gym');
+
+  // Goal status strip
+  const [activeRacePlan, setActiveRacePlan] = useState<RacePlan | null>(null);
+  const [activeGoalPlan, setActiveGoalPlan] = useState<GoalPlan | null>(null);
+
+  // Week view
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [weekSchedule, setWeekSchedule] = useState<PlanDay[] | null>(null);
+  const [nextWeekAvailable, setNextWeekAvailable] = useState(false);
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
   const [editingWorkout, setEditingWorkout] = useState<CustomWorkout | null>(null);
@@ -138,8 +150,9 @@ export default function Workouts() {
 
   // Workout library state
   const [libraryExpanded, setLibraryExpanded] = useState(false);
-  const [libraryTab, setLibraryTab] = useState<'strength' | 'cardio' | 'mindbody' | 'other'>('strength');
-  const [todayRecommendation, setTodayRecommendation] = useState<WorkoutRecommendation | null>(null);
+  const [libraryTab, setLibraryTab] = useState<'all' | 'mindbody' | 'other'>('all');
+  const [todayRecommendations, setTodayRecommendations] = useState<TaggedRecommendation[]>([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(true);
   const [workedOutToday, setWorkedOutToday] = useState(false);
 
   // AI chat state — multi-turn
@@ -179,8 +192,15 @@ export default function Workouts() {
         // AI recommendation — runs after UI is unblocked
         const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
         const profile = profileSnap.exists() ? profileSnap.data() : {};
-        getWorkoutRecommendation(user.uid, fetchedSessions, profile, []).then(rec => {
-          if (rec) setTodayRecommendation(rec);
+        getTodayRecommendations(user.uid, fetchedSessions, profile, []).then(recs => {
+          setTodayRecommendations(recs);
+          setRecommendationsLoading(false);
+        });
+
+        // Goal status strip — race plan takes precedence over goalPlans
+        Promise.all([getActiveRacePlan(user.uid), getActiveGoalPlan(user.uid)]).then(([race, goal]) => {
+          setActiveRacePlan(race);
+          setActiveGoalPlan(goal);
         });
 
         // ensureDefaultHabits is cached after first call — fast on repeat visits
@@ -207,6 +227,19 @@ export default function Workouts() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
+
+  // Week view — pure read against the active plan; peek one week ahead to know
+  // whether the Next arrow should be enabled.
+  useEffect(() => {
+    if (!user) return;
+    Promise.all([
+      getWeekSchedule(user.uid, weekOffset),
+      getWeekSchedule(user.uid, weekOffset + 1),
+    ]).then(([current, next]) => {
+      setWeekSchedule(current);
+      setNextWeekAvailable(!!next && next.length > 0);
+    });
+  }, [user, weekOffset]);
 
   // ── Save steps ─────────────────────────────────────────────────────────
   const saveSteps = async (val: number) => {
@@ -620,6 +653,16 @@ Rules:
     }
   };
 
+  // Rest days are informational only — no session to start.
+  const startFromRecommendation = (rec: TaggedRecommendation) => {
+    if (rec.source === 'gym') { startWorkoutFromLibrary(rec.type); return; }
+    if (rec.type === 'rest') return;
+    // 'race' isn't a loggable EffortType (closest real effort is tempo); a generic
+    // rhythm-based 'running' pick has no specific effort assigned, default to recovery.
+    const effortType: EffortType = rec.type === 'race' ? 'tempo' : rec.type === 'running' ? 'recovery' : rec.type as EffortType;
+    navigate('/running-session', { state: { effortType } });
+  };
+
   // ── Custom workout handlers ────────────────────────────────────────────
   const openCreateModal = () => { setEditingWorkout(null); setWorkoutName(''); setSelectedExercises([]); setShowCreateModal(true); };
   const openEditModal = (w: CustomWorkout) => { setEditingWorkout(w); setWorkoutName(w.name); setSelectedExercises(w.exercises); setShowCreateModal(true); };
@@ -727,24 +770,18 @@ Rules:
     finally { setIsSavingWorkout(false); }
   };
 
+  const weekLabel = weekOffset === 0
+    ? 'This Week'
+    : weekSchedule
+      ? `${formatDateShort(weekSchedule[0].date)} – ${formatDateShort(weekSchedule[6].date)}`
+      : 'This Week';
+
   if (loading) return <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center"><div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" /></div>;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-24">
       <div className="p-5 space-y-4">
         <h1 className="text-2xl font-bold">Workouts</h1>
-
-        {/* ── GYM / RUNNER TOGGLE ── */}
-        <div className="flex gap-2">
-          {(['gym', 'runner'] as const).map(p => (
-            <button key={p} onClick={() => setPersona(p)}
-              className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
-                persona === p ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-              }`}>
-              {p === 'gym' ? 'Gym' : 'Runner'}
-            </button>
-          ))}
-        </div>
 
         {/* ── 2-RING HEADER ── */}
         <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3.5">
@@ -802,8 +839,99 @@ Rules:
           </div>
         </div>
 
-        {persona === 'gym' && (
-        <>
+        {/* ── GOAL STATUS STRIP ── */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+          {!activeRacePlan && !activeGoalPlan ? (
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-white">No Goal or schedule set</span>
+              <button onClick={() => navigate('/ai-coach?topic=goal')}
+                className="text-[10px] font-mono text-emerald-400 hover:text-emerald-300 transition-colors">
+                Set Up →
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 bg-emerald-500/15 border border-emerald-500/20 rounded-lg flex items-center justify-center flex-shrink-0">
+                  {activeRacePlan
+                    ? <Flag className="w-4 h-4 text-emerald-400" />
+                    : activeGoalPlan?.type === 'performance_target'
+                      ? <Target className="w-4 h-4 text-emerald-400" />
+                      : <Repeat className="w-4 h-4 text-emerald-400" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-white truncate">
+                    {activeRacePlan
+                      ? activeRacePlan.raceName
+                      : activeGoalPlan?.type === 'performance_target'
+                        ? (activeGoalPlan.bodyCompTarget
+                            ? `${activeGoalPlan.bodyCompTarget.metric} → ${activeGoalPlan.bodyCompTarget.targetValue}`
+                            : 'Performance Target')
+                        : 'Your Routine'}
+                  </div>
+                  <div className="text-[10px] text-slate-500 font-mono truncate">
+                    {activeRacePlan
+                      ? `${new Date(activeRacePlan.raceDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${activeRacePlan.targetFinishTime ? ` · Goal ${activeRacePlan.targetFinishTime}` : ` · ${activeRacePlan.totalWeeks}-week plan`}`
+                      : activeGoalPlan?.daySplit
+                        ? `${activeGoalPlan.daySplit.runDays} run · ${activeGoalPlan.daySplit.gymDays} gym / week`
+                        : ''}
+                  </div>
+                </div>
+              </div>
+              <button onClick={() => navigate('/ai-coach?topic=goal', { state: { prefill: { activeRacePlan, activeGoalPlan } } })}
+                className="text-[10px] font-mono text-emerald-400 hover:text-emerald-300 transition-colors flex-shrink-0">
+                ✎ Edit
+              </button>
+            </div>
+          )}
+        </div>
+
+        {activeRacePlan && (
+          <button onClick={() => navigate('/training-plan')}
+            className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-3 flex items-center justify-between text-sm font-semibold text-white hover:border-slate-700 transition-colors">
+            View training plan
+            <ChevronRight className="w-4 h-4 text-slate-500" />
+          </button>
+        )}
+
+        {/* ── WEEK VIEW ── */}
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <button onClick={() => setWeekOffset(o => o - 1)} disabled={weekOffset === 0}
+              className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{weekLabel}</span>
+            <button onClick={() => setWeekOffset(o => o + 1)} disabled={!nextWeekAvailable}
+              className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex justify-between gap-1.5">
+            {weekSchedule ? weekSchedule.map(day => {
+              const meta = RUN_TYPE_META[day.runType];
+              const isToday = day.date === todayStr();
+              const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
+              const Tag = activeRacePlan ? 'button' : 'div';
+              return (
+                <Tag key={day.date}
+                  onClick={activeRacePlan ? () => navigate(`/training-plan?date=${day.date}`) : undefined}
+                  className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${day.runType === 'rest' ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${activeRacePlan ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}>
+                  <span className={`text-[9px] font-mono ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
+                  <span className="text-sm">{meta.emoji}</span>
+                </Tag>
+              );
+            }) : Array.from({ length: 7 }).map((_, i) => (
+              <div key={i} className="flex-1 flex flex-col items-center gap-1 rounded-lg py-2 border border-dashed border-slate-800">
+                <span className="text-[9px] font-mono text-slate-700">
+                  {['M','T','W','T','F','S','S'][i]}
+                </span>
+                <span className="text-sm text-slate-700">—</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* ── AI PLANNER — multi-turn chat ── */}
         <div className="relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-emerald-500 to-transparent" />
@@ -981,24 +1109,34 @@ Rules:
                   {libraryExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
               </div>
-              {todayRecommendation ? (
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">{todayRecommendation.emoji}</span>
-                    <div>
-                      <div className="text-sm font-semibold text-white">{todayRecommendation.title}</div>
-                      <div className="text-[10px] text-slate-500">{todayRecommendation.subtitle}</div>
-                      {todayRecommendation.reason && (
-                        <div className="text-[10px] text-slate-500 italic mt-0.5">{todayRecommendation.reason}</div>
-                      )}
-                    </div>
+              {!recommendationsLoading ? (
+                todayRecommendations.length > 0 ? (
+                  <div className="divide-y divide-slate-800">
+                    {todayRecommendations.map((rec, i) => (
+                      <div key={i} className={`flex items-center justify-between ${i > 0 ? 'pt-3 mt-3' : ''}`}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{rec.emoji}</span>
+                          <div>
+                            <div className="text-sm font-semibold text-white">{rec.title}</div>
+                            {rec.subtitle && <div className="text-[10px] text-slate-500">{rec.subtitle}</div>}
+                            {rec.reason && (
+                              <div className="text-[10px] text-slate-500 italic mt-0.5">{rec.reason}</div>
+                            )}
+                          </div>
+                        </div>
+                        {rec.type !== 'rest' && (
+                          <button
+                            onClick={() => startFromRecommendation(rec)}
+                            className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">
+                            Start
+                          </button>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  <button
-                    onClick={() => startWorkoutFromLibrary(todayRecommendation.type)}
-                    className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">
-                    Start
-                  </button>
-                </div>
+                ) : (
+                  <p className="text-xs text-slate-500">No recommendation available right now.</p>
+                )
               ) : (
                 <div className="flex items-center gap-3 animate-pulse">
                   <div className="w-8 h-8 bg-slate-800 rounded-lg flex-shrink-0" />
@@ -1174,14 +1312,10 @@ Rules:
             </div>
           )}
         </div>
-        </>
-        )}
-
-        {persona === 'runner' && <RunnerPlanView />}
       </div>
 
       {/* ── SESSION DETAIL MODAL ── */}
-      {persona === 'gym' && selectedSession && (
+      {selectedSession && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto">
             <div className="p-5">
@@ -1347,7 +1481,7 @@ Rules:
       )}
 
       {/* ── HISTORY SESSION POSTER ── */}
-      {persona === 'gym' && posterSession && (() => {
+      {posterSession && (() => {
         const isRun = posterSession.type === 'running' || !!(posterSession as any).distanceKm;
         return (
           <WorkoutPosterModal
@@ -1374,7 +1508,7 @@ Rules:
       })()}
 
       {/* ── RUNNING SESSION POSTER ── */}
-      {persona === 'gym' && showRunningPoster && selectedSession && (
+      {showRunningPoster && selectedSession && (
         <WorkoutPosterModal
           open={showRunningPoster}
           onDone={() => setShowRunningPoster(false)}
@@ -1395,7 +1529,7 @@ Rules:
       )}
 
       {/* ── CREATE/EDIT WORKOUT MODAL ── */}
-      {persona === 'gym' && showCreateModal && (
+      {showCreateModal && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50 pb-20">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">
@@ -1451,7 +1585,7 @@ Rules:
       )}
 
       {/* ── EXERCISE LIBRARY MODAL ── */}
-      {persona === 'gym' && showLibrary && (
+      {showLibrary && (
         <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-[60]">
           <div className="bg-slate-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[calc(100vh-160px)] flex flex-col">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 flex-shrink-0">
