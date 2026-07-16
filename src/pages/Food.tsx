@@ -8,7 +8,7 @@ import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
   doc, getDoc, setDoc,
 } from 'firebase/firestore';
-import { useGoals } from '@/services/goalsService';
+import { useGoals, getEffectiveCalorieGoal } from '@/services/goalsService';
 import { db } from '@/lib/firebase';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -86,6 +86,11 @@ export default function Food() {
 
 
   const { goals } = useGoals(user?.uid);
+  // getEffectiveCalorieGoal is async, so it can't be inlined into the
+  // synchronous foodGoals computation below like the other flat goal fields —
+  // resolved once per uid/stored-goal change and cached in state instead of
+  // re-querying on every render.
+  const [effectiveCalorieGoal, setEffectiveCalorieGoal] = useState<number | null>(null);
   const [date, setDate] = useState(todayStr());
   const [dayLog, setDayLog] = useState<DayLog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -153,6 +158,15 @@ export default function Food() {
   };
 
   useEffect(() => { loadDayLog(date); }, [date, user]);
+
+  useEffect(() => {
+    if (!user) { setEffectiveCalorieGoal(null); return; }
+    let cancelled = false;
+    getEffectiveCalorieGoal(user.uid, goals.calorieGoal ?? 2000).then(v => {
+      if (!cancelled) setEffectiveCalorieGoal(v);
+    });
+    return () => { cancelled = true; };
+  }, [user, goals.calorieGoal]);
 
   // Save log to Firestore
   const saveDayLog = async (updated: DayLog) => {
@@ -388,7 +402,9 @@ Replace the zeros with accurate values (fibre is grams of dietary fibre). Includ
   ) ?? { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 };
 
   const foodGoals = {
-    calories: goals.calorieGoal ?? 2000,
+    // Falls back to the stored value until getEffectiveCalorieGoal resolves —
+    // same flat-value-regardless-of-viewed-date behavior as before this change.
+    calories: effectiveCalorieGoal ?? goals.calorieGoal ?? 2000,
     protein:  goals.proteinGoal ?? 120,
     carbs:    goals.carbGoal    ?? 220,
     fat:      goals.fatGoal     ?? 65,

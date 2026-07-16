@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react';
 import {
   doc, getDoc, setDoc, onSnapshot,
-  collection, query, orderBy, limit, getDocs,
+  collection, query, where, orderBy, limit, getDocs,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+// Type-only — erased at compile time, so importing from goalPlansService.ts
+// here (which itself imports saveGoals from this file) can't create a
+// runtime circular-import problem.
+import type { GoalPlan } from '@/services/goalPlansService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +50,31 @@ export async function getGoals(uid: string): Promise<UserGoals> {
     return { ...DEFAULT_GOALS };
   } catch {
     return { ...DEFAULT_GOALS };
+  }
+}
+
+// Read-time override, per locked decision — never writes to goals/current.
+// If the active goal plan has a structured weekly plan with an entry for
+// today's local date, that day's targetCalories wins; otherwise the stored
+// value passes through unchanged. Always resolves (never throws) so a
+// display site can await it unconditionally, same as getGoals.
+export async function getEffectiveCalorieGoal(uid: string, storedCalorieGoal: number): Promise<number> {
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users', uid, 'goalPlans'), where('status', '==', 'active'), limit(1))
+    );
+    if (snap.empty) return storedCalorieGoal;
+
+    const plan = snap.docs[0].data() as GoalPlan;
+    if (!plan.hasStructuredPlan || !plan.weeklyPlan) return storedCalorieGoal;
+
+    const today = new Date();
+    const todayLocal = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const todayEntry = plan.weeklyPlan.find(d => d.date === todayLocal);
+    return todayEntry ? todayEntry.targetCalories : storedCalorieGoal;
+  } catch (e) {
+    console.warn('[Goals] Failed to resolve effective calorie goal:', e);
+    return storedCalorieGoal;
   }
 }
 

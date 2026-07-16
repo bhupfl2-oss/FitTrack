@@ -8,7 +8,7 @@ import {
   doc, where, setDoc, getDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { getGoals } from '@/services/goalsService';
+import { getGoals, getEffectiveCalorieGoal } from '@/services/goalsService';
 
 interface DayData {
   date: string;
@@ -168,7 +168,11 @@ export default function ActivityCalendar() {
 
       const stepsGoal   = userGoals.stepsGoal        ?? 8000;
       const burnedGoal  = userGoals.caloriesBurnGoal ?? 400;
-      const calInGoal   = userGoals.calorieGoal      ?? 2000;
+      // Goes through getEffectiveCalorieGoal so an active structured fat-loss
+      // plan's today's target overrides the flat stored value. Note this is
+      // still one flat number applied across the whole displayed month, same
+      // as the stored value was before — see accompanying report.
+      const calInGoal   = await getEffectiveCalorieGoal(user!.uid, userGoals.calorieGoal ?? 2000);
       const sleepGoal   = userGoals.sleepGoal        ?? 7.5;
 
       const habits = habitsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));

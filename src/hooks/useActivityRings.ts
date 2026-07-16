@@ -7,7 +7,7 @@ import {
   onSnapshot,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { calculateGoalsWithAI, DEFAULT_GOALS as SERVICE_DEFAULTS } from '@/services/goalsService';
+import { calculateGoalsWithAI, getEffectiveCalorieGoal, DEFAULT_GOALS as SERVICE_DEFAULTS } from '@/services/goalsService';
 import type { UserGoals } from '@/services/goalsService';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -100,10 +100,12 @@ export function useActivityRings(uid: string | undefined, refreshKey?: number): 
       const profile = profileDoc.exists() ? profileDoc.data() as any : {};
 
       // ── Goals from goals/current (single source of truth, live via onSnapshot below) ──
+      // caloriesIn goes through getEffectiveCalorieGoal so an active structured
+      // fat-loss plan's today's target overrides the flat stored value.
       const goals: RingGoals = {
         steps:          userGoals.stepsGoal        ?? DEFAULT_GOALS.steps,
         caloriesBurned: userGoals.caloriesBurnGoal ?? DEFAULT_GOALS.caloriesBurned,
-        caloriesIn:     userGoals.calorieGoal      ?? DEFAULT_GOALS.caloriesIn,
+        caloriesIn:     await getEffectiveCalorieGoal(uid, userGoals.calorieGoal ?? DEFAULT_GOALS.caloriesIn),
         sleep:          userGoals.sleepGoal         ?? DEFAULT_GOALS.sleep,
       };
 

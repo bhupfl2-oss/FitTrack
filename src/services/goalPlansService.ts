@@ -13,6 +13,15 @@ export type GoalPlanStatus = 'active' | 'replaced';
 
 export type GoalPlanTrackMode = 'as_is' | 'ai_suggested';
 
+export type FatLossSessionType = 'cardio' | 'strength' | 'rest';
+
+export interface FatLossPlanDay {
+  date: string; // YYYY-MM-DD, local
+  sessionType: FatLossSessionType;
+  targetCalories: number;
+  note: string;
+}
+
 export interface GoalPlan {
   id: string;
   type: GoalPlanType;
@@ -27,6 +36,12 @@ export interface GoalPlan {
   // Ordered rotation for gym days, e.g. ['Push','Pull','Legs'] — null until the
   // user has named one (via goal intake or the edit flow).
   gymSplitPattern: string[] | null;
+  // performance_target structured weekly plan only — null/false for every other
+  // goal-plan kind and for any performance_target created without one.
+  startDate: string | null;   // YYYY-MM-DD, local — set only when weeklyPlan exists
+  targetDate: string | null;  // YYYY-MM-DD, local — AI-picked, 3-6 months out
+  hasStructuredPlan: boolean; // true only when weeklyPlan below is populated
+  weeklyPlan: FatLossPlanDay[] | null;
   createdAt?: any;
   updatedAt?: any;
 }
@@ -39,6 +54,10 @@ interface CreateGoalPlanInput {
   routineDescription?: string | null;
   trackMode?: GoalPlanTrackMode | null;
   gymSplitPattern?: string[] | null;
+  startDate?: string | null;
+  targetDate?: string | null;
+  hasStructuredPlan?: boolean;
+  weeklyPlan?: FatLossPlanDay[] | null;
 }
 
 // ── CRUD ───────────────────────────────────────────────────────────────────
@@ -77,6 +96,10 @@ export async function createGoalPlan(uid: string, input: CreateGoalPlanInput): P
     routineDescription: input.routineDescription ?? null,
     trackMode: input.trackMode ?? null,
     gymSplitPattern: input.gymSplitPattern ?? null,
+    startDate: input.startDate ?? null,
+    targetDate: input.targetDate ?? null,
+    hasStructuredPlan: input.hasStructuredPlan ?? false,
+    weeklyPlan: input.weeklyPlan ?? null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };

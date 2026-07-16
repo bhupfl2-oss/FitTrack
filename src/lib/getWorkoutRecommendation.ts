@@ -4,7 +4,7 @@ import {
   getActiveRacePlan, getCurrentWeekEntry, getPlanDayForDate,
   type PlanDay, type RunType,
 } from '@/services/racePlanService';
-import { getActiveGoalPlan } from '@/services/goalPlansService';
+import { getActiveGoalPlan, type FatLossPlanDay, type FatLossSessionType } from '@/services/goalPlansService';
 
 export interface WorkoutRecommendation {
   type: string;
@@ -221,6 +221,46 @@ function planDayToRecommendation(day: PlanDay): WorkoutRecommendation {
   };
 }
 
+// ── Fat-loss structured-plan day → recommendation ───────────────────────────
+
+const FAT_LOSS_SESSION_META: Record<FatLossSessionType, { title: string; emoji: string }> = {
+  cardio: { title: 'Cardio', emoji: '🏃' },
+  strength: { title: 'Strength', emoji: '🏋️' },
+  rest: { title: 'Rest Day', emoji: '😴' },
+};
+
+function fatLossDayToRecommendation(day: FatLossPlanDay): WorkoutRecommendation {
+  const meta = FAT_LOSS_SESSION_META[day.sessionType];
+  return {
+    type: day.sessionType,
+    title: meta.title,
+    subtitle: `${day.targetCalories} kcal target`,
+    emoji: meta.emoji,
+    reason: day.note || '',
+  };
+}
+
+// Gym-side week strip (RUN_TYPE_META/Workouts.tsx) has no "strength" concept —
+// RunType is purely running-oriented. This mirrors buildRhythmWeek's existing
+// convention below (a gym/strength day already renders as runType: 'rest' in
+// that view today), so a structured strength day doesn't regress to something
+// worse than what rhythm-based goal plans already show.
+const FAT_LOSS_TO_RUN_TYPE: Record<FatLossSessionType, RunType> = {
+  cardio: 'recovery',
+  strength: 'rest',
+  rest: 'rest',
+};
+
+function fatLossDayToPlanDay(day: FatLossPlanDay): PlanDay {
+  return {
+    date: day.date,
+    runType: FAT_LOSS_TO_RUN_TYPE[day.sessionType],
+    targetDistanceKm: null,
+    targetPaceMinPerKm: null,
+    note: day.note,
+  };
+}
+
 function rhythmToRecommendation(runDays: number, today: Date): WorkoutRecommendation {
   const isRunDay = isEvenSpreadRunDay(runDays, isoWeekdayIndex(today));
   if (isRunDay) {
@@ -252,6 +292,14 @@ export async function getRunningRecommendationForDate(
   }
 
   const goalPlan = await getActiveGoalPlan(uid);
+
+  if (goalPlan?.type === 'performance_target' && goalPlan.hasStructuredPlan && goalPlan.weeklyPlan) {
+    const structuredDay = goalPlan.weeklyPlan.find(d => d.date === date);
+    if (structuredDay) return fatLossDayToRecommendation(structuredDay);
+    // No entry for this date (e.g. outside startDate–targetDate) — fall
+    // through to the rhythm-based computation below, exactly as today.
+  }
+
   if (
     goalPlan &&
     (goalPlan.type === 'performance_target' || goalPlan.type === 'existing_routine') &&
@@ -357,7 +405,20 @@ export async function getWeekSchedule(uid: string, weekOffset: number): Promise<
     (goalPlan.type === 'performance_target' || goalPlan.type === 'existing_routine') &&
     goalPlan.daySplit
   ) {
-    return buildRhythmWeek(goalPlan.daySplit.runDays, weekOffset);
+    const rhythmWeek = buildRhythmWeek(goalPlan.daySplit.runDays, weekOffset);
+
+    if (goalPlan.type === 'performance_target' && goalPlan.hasStructuredPlan && goalPlan.weeklyPlan) {
+      // Overlay per-date: any day the structured plan doesn't cover (outside
+      // startDate–targetDate) keeps its rhythm-computed fallback, exactly as
+      // today — this is never all-or-nothing across the week.
+      const structuredByDate = new Map(goalPlan.weeklyPlan.map(d => [d.date, d]));
+      return rhythmWeek.map(day => {
+        const structured = structuredByDate.get(day.date);
+        return structured ? fatLossDayToPlanDay(structured) : day;
+      });
+    }
+
+    return rhythmWeek;
   }
 
   return null;
