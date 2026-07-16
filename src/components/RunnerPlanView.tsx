@@ -300,11 +300,12 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
                 const isHighlighted = day.date === highlightDate;
                 const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
                 return (
-                  <div key={day.date}
-                    className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border}`}>
+                  <button type="button" key={day.date}
+                    onClick={() => setHighlightDate(day.date)}
+                    className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border} cursor-pointer hover:opacity-80 transition-opacity`}>
                     <span className={`text-[9px] font-mono ${isHighlighted ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
                     <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'rest' ? (getGymSplitForDate(plan, day.date) ?? '—') : RUN_TYPE_LABELS[day.runType]}</span>
-                  </div>
+                  </button>
                 );
               })}
             </div>
