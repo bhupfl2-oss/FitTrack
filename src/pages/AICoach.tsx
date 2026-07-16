@@ -17,6 +17,7 @@ import { db } from '@/lib/firebase';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
 import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlan, type RacePlan, type RaceType } from '@/services/racePlanService';
 import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode } from '@/services/goalPlansService';
+import { generateFatLossPlan, persistFatLossPlan, type GeneratedFatLossPlan } from '@/services/fatLossPlanService';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -53,6 +54,8 @@ interface GoalPlanProposal {
   // performance_target
   metric?: string;
   targetValue?: number;
+  wantsStructuredPlan?: boolean;
+  generatedFatLossPlan?: GeneratedFatLossPlan | null;
   // existing_routine
   routineDescription?: string;
   trackMode?: GoalPlanTrackMode;
@@ -114,7 +117,7 @@ RACE: they name a specific race or race distance/date they're training for.
 Required: race name (or a reasonable name if truly unnamed, e.g. "10K Race"), race date, race type (5k/10k/half_marathon/full_marathon/custom — infer from distance if given, customDistanceKm required if custom), and ideally a target finish time and weekly day-split (run days vs gym days). If the race date is incomplete (e.g. "December" with no day), never silently pick a day without saying so — either ask for the missing part, or if you default one, explicitly say what you assumed in your reply and list it in the assumptions array. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]).
 
 PERFORMANCE TARGET: they name a specific number/metric they want to hit that isn't a race (e.g. body fat %, a lift number, a pace).
-Required: the metric name, their current value (for your own context only — it is never saved, so it's fine to just ask), their target value, and ideally a weekly day-split. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]).
+Required: the metric name, their current value (for your own context only — it is never saved, so it's fine to just ask), their target value, and ideally a weekly day-split. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]). Also ask explicitly whether they want a structured day-by-day plan generated for them (daily calorie targets plus a cardio/strength/rest schedule for the next few months) or would rather just have the number tracked with no day-by-day plan. This is required before the block is emitted — never default it silently; if they don't answer, ask again. Capture the answer as a boolean wantsStructuredPlan.
 
 EXISTING ROUTINE: they describe a routine they already follow and just want tracked, not changed.
 Parse the days/schedule exactly as they describe it — never invent structure they didn't mention. If any day of the week is left unstated, say so explicitly in your reply (e.g. "Sunday wasn't mentioned — I'll assume rest") and list it in the assumptions array; never silently fill a gap. Always ask explicitly: "Should I track this exactly as you described, or would you like AI to suggest improvements?" If the user doesn't answer that question, default trackMode to "as_is". Don't ask a separate question about the gym split — if what they described implies a rotating pattern (e.g. they mention push/pull/legs or upper/lower days), derive gymSplitPattern from that directly; if no rotating pattern is evident, leave it out.
@@ -125,7 +128,7 @@ COMPOUND GOALS: if the user's message also includes a body-composition or nutrit
 
 When ready, append exactly one block at the very end of your reply, after all the text you want shown to the user. Shape depends on goalPlanKind:
 Race: <<<GOAL_UPDATE>>>{"goalPlanKind":"race","raceType":"10k","raceName":"...","raceDate":"YYYY-MM-DD","targetFinishTime":"55:00","daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":["..."]}<<<END_GOAL_UPDATE>>>
-Performance target: <<<GOAL_UPDATE>>>{"goalPlanKind":"performance_target","metric":"body fat %","targetValue":15,"daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":[]}<<<END_GOAL_UPDATE>>>
+Performance target: <<<GOAL_UPDATE>>>{"goalPlanKind":"performance_target","metric":"body fat %","targetValue":15,"wantsStructuredPlan":true,"daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":[]}<<<END_GOAL_UPDATE>>>
 Existing routine: <<<GOAL_UPDATE>>>{"goalPlanKind":"existing_routine","routineDescription":"as the user described it","trackMode":"as_is","daySplit":{"runDays":3,"gymDays":2},"gymSplitPattern":["Push","Pull","Legs"],"assumptions":["..."]}<<<END_GOAL_UPDATE>>>
 For a compound goal, add any of the flat numeric UserGoals keys (calorieGoal, proteinGoal, etc.) alongside the goalPlanKind fields in that same object — do not emit them in a second block.
 "assumptions" is always an array of short strings describing anything you inferred rather than the user stating outright; use an empty array if nothing was assumed.`;
@@ -243,6 +246,11 @@ export default function AICoach() {
   const [systemContext, setSystemContext] = useState('');
   const [messageCount, setMessageCount] = useState(0);
   const [pendingProposal, setPendingProposal] = useState<PendingGoalProposal | null>(null);
+  // Separate from pendingProposal on purpose — generateFatLossPlan runs to
+  // completion BEFORE setPendingProposal is ever called for that proposal
+  // (see sendMessage), so this is the only state available to show a loading
+  // card in the meantime.
+  const [generatingPlan, setGeneratingPlan] = useState(false);
   const [savingProposal, setSavingProposal] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -726,7 +734,7 @@ ${systemContext}`;
           // that must never be mistaken for a UserGoals field.
           const {
             goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
-            metric, targetValue, routineDescription, trackMode, daySplit, gymSplitPattern, assumptions,
+            metric, targetValue, wantsStructuredPlan, routineDescription, trackMode, daySplit, gymSplitPattern, assumptions,
           } = parsed;
           const numericFields: Record<string, number> = {};
           for (const key of ['calorieGoal', 'proteinGoal', 'carbGoal', 'fatGoal', 'stepsGoal', 'sleepGoal', 'waterGoal']) {
@@ -739,10 +747,31 @@ ${systemContext}`;
               : contextData?.activeGoalPlan
                 ? { type: 'goalPlan' as const, label: describeGoalPlan(contextData.activeGoalPlan) }
                 : null;
+
+            // Fires exactly once per proposal — awaited to completion here,
+            // before setPendingProposal is called for this proposal at all,
+            // so no re-render can ever trigger a second (billed,
+            // non-deterministic) generation call for the same proposal.
+            let generatedFatLossPlan: GeneratedFatLossPlan | null = null;
+            if (goalPlanKind === 'performance_target' && wantsStructuredPlan === true) {
+              setGeneratingPlan(true);
+              try {
+                generatedFatLossPlan = await generateFatLossPlan(user.uid, { metric, targetValue, daySplit, gymSplitPattern });
+              } catch (e) {
+                console.error('[FatLossPlan] Generation failed:', e);
+                // generatedFatLossPlan stays null — confirmProposal falls back
+                // to the plain performance_target save path (createGoalPlan),
+                // same as if the user hadn't asked for a structured plan.
+              } finally {
+                setGeneratingPlan(false);
+              }
+            }
+
             setPendingProposal({
               plan: {
                 goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
-                metric, targetValue, routineDescription, trackMode, daySplit, gymSplitPattern,
+                metric, targetValue, wantsStructuredPlan, generatedFatLossPlan,
+                routineDescription, trackMode, daySplit, gymSplitPattern,
                 assumptions: assumptions ?? [],
               },
               nutritionUpdate: Object.keys(numericFields).length > 0 ? numericFields : null,
@@ -853,16 +882,25 @@ ${systemContext}`;
         if (freshRacePlan) {
           await updateDoc(doc(db, 'users', user.uid, 'racePlans', freshRacePlan.id), { status: 'abandoned' });
         }
-        await createGoalPlan(user.uid, {
-          type: p.goalPlanKind,
-          daySplit: p.daySplit ?? null,
-          bodyCompTarget: p.goalPlanKind === 'performance_target' && p.metric && p.targetValue != null
-            ? { metric: p.metric, targetValue: p.targetValue }
-            : null,
-          routineDescription: p.goalPlanKind === 'existing_routine' ? (p.routineDescription ?? null) : null,
-          trackMode: p.goalPlanKind === 'existing_routine' ? (p.trackMode ?? 'as_is') : null,
-          gymSplitPattern: p.gymSplitPattern ?? null,
-        });
+        if (p.goalPlanKind === 'performance_target' && p.generatedFatLossPlan) {
+          await persistFatLossPlan(user.uid, p.generatedFatLossPlan, {
+            metric: p.metric,
+            targetValue: p.targetValue,
+            daySplit: p.daySplit ?? null,
+            gymSplitPattern: p.gymSplitPattern ?? null,
+          });
+        } else {
+          await createGoalPlan(user.uid, {
+            type: p.goalPlanKind,
+            daySplit: p.daySplit ?? null,
+            bodyCompTarget: p.goalPlanKind === 'performance_target' && p.metric && p.targetValue != null
+              ? { metric: p.metric, targetValue: p.targetValue }
+              : null,
+            routineDescription: p.goalPlanKind === 'existing_routine' ? (p.routineDescription ?? null) : null,
+            trackMode: p.goalPlanKind === 'existing_routine' ? (p.trackMode ?? 'as_is') : null,
+            gymSplitPattern: p.gymSplitPattern ?? null,
+          });
+        }
       }
 
       if (pendingProposal.nutritionUpdate) {
@@ -955,6 +993,12 @@ ${systemContext}`;
             </div>
           </div>
         ))}
+
+        {generatingPlan && (
+          <div className="bg-slate-800 border border-emerald-500/30 rounded-2xl p-4 max-w-[95%] text-xs text-slate-400">
+            Generating your plan…
+          </div>
+        )}
 
         {pendingProposal?.plan && (
           <div className="bg-slate-800 border border-emerald-500/30 rounded-2xl p-4 max-w-[95%]">
