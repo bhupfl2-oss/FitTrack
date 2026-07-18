@@ -169,6 +169,8 @@ Consider:
 - Use the current baseline calorie goal provided below as a sanity-check anchor — daily targets should be in a plausible range around it, not wildly different, unless the day-split or body comp trend clearly justifies otherwise
 - Keep notes short (max 12 words), specific, and encouraging
 
+Structure the plan in phases across its full duration — you decide how many phases and where the boundaries fall, based on the plan's total length below (e.g. a ~12-week plan might warrant 2-3 phases; a ~17-20 week plan more, each phase roughly 3-5 weeks). Each phase must have a genuinely different average calorie target and/or cardio/strength emphasis than the phase before it — a step down in average calorie target and/or a shift in cardio/strength balance as the plan progresses is a common pattern, but decide what's right given the target and body comp trend. The change between phases must be clearly visible in the numbers, not +/-10 kcal noise repeated identically week after week — someone comparing week 1 to the final week should see the plan actually progressed. Every "note" must reflect which phase that day is actually in — its language should cohere with that phase's real calorie/intensity shift, not generic motivational filler disconnected from the numbers.
+
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
 {"days":[{"dayIndex":0,"sessionType":"cardio|strength|rest","targetCalories":number,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
 The "days" array must include exactly one entry for every dayIndex given in DAY SKELETON below — no more, no fewer.`,
@@ -177,6 +179,7 @@ The "days" array must include exactly one entry for every dayIndex given in DAY 
         content: `TARGET: ${targetStr}
 TODAY: ${startDate}
 PLAN END DATE: ${targetDate}
+PLAN LENGTH: ${skeleton.length} days (~${Math.round(skeleton.length / 7)} weeks) — use this to decide how many phases the plan needs
 DAY-SPLIT PREFERENCE: ${splitStr}
 CURRENT BASELINE CALORIE GOAL: ${currentGoals.calorieGoal ?? 'not set'}
 
