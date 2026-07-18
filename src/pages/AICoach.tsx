@@ -15,7 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
-import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlan, type RacePlan, type RaceType } from '@/services/racePlanService';
+import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, type RacePlan, type RaceType, type GeneratedRacePlan } from '@/services/racePlanService';
 import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode } from '@/services/goalPlansService';
 import { generateFatLossPlan, persistFatLossPlan, type GeneratedFatLossPlan } from '@/services/fatLossPlanService';
 
@@ -51,6 +51,7 @@ interface GoalPlanProposal {
   raceDate?: string;
   targetFinishTime?: string | null;
   customDistanceKm?: number | null;
+  generatedRacePlan?: GeneratedRacePlan | null;
   // performance_target
   metric?: string;
   targetValue?: number;
@@ -112,6 +113,8 @@ const GOAL_UPDATE_INSTRUCTIONS = `GOAL UPDATES: If — and only if — you are r
 Only include keys for goals you are actually recommending changing (valid keys: calorieGoal, proteinGoal, carbGoal, fatGoal, stepsGoal, sleepGoal, waterGoal). Never include this block when you are simply restating today's logged intake or making general commentary — it must only appear when you are proposing a new target.`;
 
 const GOAL_PLAN_INTAKE_INSTRUCTIONS = `You are helping the user set up or edit a single active training goal — exactly one of three kinds. Figure out which kind fits from what they say, then gather the required info conversationally before proposing anything.
+
+CONFLICT CHECK: before proposing any new goal, check USER CONTEXT for an existing active race plan or active goal plan of a different kind than what you're about to propose. If one exists, explicitly state in your reply — before the summary/confirm block, in plain language — that confirming this will replace/abandon that existing plan (compound goals aren't supported yet). Do this regardless of which direction the conflict runs (a new race replacing an active goal plan, or a new goal plan replacing an active race plan) — never let your reply imply both will coexist.
 
 RACE: they name a specific race or race distance/date they're training for.
 Required: race name (or a reasonable name if truly unnamed, e.g. "10K Race"), race date, race type (5k/10k/half_marathon/full_marathon/custom — infer from distance if given, customDistanceKm required if custom), and ideally a target finish time and weekly day-split (run days vs gym days). If the race date is incomplete (e.g. "December" with no day), never silently pick a day without saying so — either ask for the missing part, or if you default one, explicitly say what you assumed in your reply and list it in the assumptions array. Once you know gymDays > 0, also ask what split they want for their gym days — offer Push/Pull/Legs, Upper/Lower, or Full body as presets, and let them name their own pattern if none fit. Capture the answer as an ordered gymSplitPattern array (e.g. ["Push","Pull","Legs"]).
@@ -767,9 +770,27 @@ ${systemContext}`;
               }
             }
 
+            // Same fire-once-before-setPendingProposal pattern as fat-loss
+            // above. Unlike performance_target, a race goal has no plain
+            // no-plan fallback — a race IS the plan — so a failure here
+            // leaves generatedRacePlan null and confirmProposal blocks Save
+            // with an error rather than silently falling back to anything.
+            let generatedRacePlan: GeneratedRacePlan | null = null;
+            if (goalPlanKind === 'race') {
+              setGeneratingPlan(true);
+              try {
+                generatedRacePlan = await generateRacePlanDraft(user.uid, { raceType, raceName, raceDate, targetFinishTime, customDistanceKm });
+              } catch (e) {
+                console.error('[RacePlan] Generation failed:', e);
+              } finally {
+                setGeneratingPlan(false);
+              }
+            }
+
             setPendingProposal({
               plan: {
                 goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
+                generatedRacePlan,
                 metric, targetValue, wantsStructuredPlan, generatedFatLossPlan,
                 routineDescription, trackMode, daySplit, gymSplitPattern,
                 assumptions: assumptions ?? [],
@@ -867,17 +888,16 @@ ${systemContext}`;
         if (!p.raceName || !p.raceDate || !p.raceType) {
           throw new Error('Missing race name, date, or type — tell the coach the missing details first.');
         }
+        if (!p.generatedRacePlan) {
+          throw new Error("Plan generation didn't finish — cancel and ask the coach to try again.");
+        }
         if (freshGoalPlan) {
           await updateDoc(doc(db, 'users', user.uid, 'goalPlans', freshGoalPlan.id), { status: 'replaced' });
         }
-        await generateRacePlan(user.uid, {
-          raceType: p.raceType,
-          raceName: p.raceName,
-          raceDate: p.raceDate,
-          targetFinishTime: p.targetFinishTime ?? undefined,
-          customDistanceKm: p.customDistanceKm ?? undefined,
+        await persistRacePlan(user.uid, p.generatedRacePlan, {
+          createdBy: 'ai_coach',
           gymSplitPattern: p.gymSplitPattern ?? null,
-        }, 'ai_coach');
+        });
       } else {
         if (freshRacePlan) {
           await updateDoc(doc(db, 'users', user.uid, 'racePlans', freshRacePlan.id), { status: 'abandoned' });
