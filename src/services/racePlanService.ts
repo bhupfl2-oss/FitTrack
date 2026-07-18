@@ -348,6 +348,286 @@ Build the training plan.`,
   return { id: ref.id, ...planData };
 }
 
+// ── AI generation — draft/persist split ─────────────────────────────────────
+// generateRacePlan above is untouched and still used by both current callers.
+// generateRacePlanDraft/persistRacePlan below are new, unused-so-far entry
+// points mirroring fatLossPlanService.ts's generateFatLossPlan/
+// persistFatLossPlan split, for a future generate → review → regenerate →
+// lock flow. Caller migration is a separate follow-up.
+
+export interface GenerateRacePlanDraftInput {
+  raceType: RaceType;
+  raceName: string;
+  raceDate: string; // YYYY-MM-DD
+  targetFinishTime?: string; // e.g. "1:59:00" or "22:30"
+  customDistanceKm?: number; // required when raceType === 'custom'
+}
+
+export interface GeneratedRacePlan {
+  raceType: RaceType;
+  raceName: string;
+  raceDate: string;
+  startDate: string;
+  totalWeeks: number;
+  raceDistanceKm: number;
+  targetFinishTime: string | null;   // as entered, e.g. "1:59:00" or "22:30"
+  targetPaceMinPerKm: number | null; // derived
+  weeklyPlan: WeeklyPlanEntry[];
+  aiSummary: string;
+}
+
+// ── Pure generation (no writes) ─────────────────────────────────────────────
+
+// Calls the AI exactly once per invocation. The AI's fill is not guaranteed
+// deterministic, so the caller must treat the returned object as the single
+// source of truth for what gets shown to the user AND what gets persisted —
+// never call this twice expecting the same plan back.
+export async function generateRacePlanDraft(
+  uid: string,
+  input: GenerateRacePlanDraftInput
+): Promise<GeneratedRacePlan> {
+  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm } = input;
+  const startDate = todayStr();
+
+  if (raceDate <= startDate) {
+    throw new Error('Race date must be in the future');
+  }
+
+  let raceDistanceKm: number;
+  if (raceType === 'custom') {
+    if (customDistanceKm == null || customDistanceKm <= 0) {
+      throw new Error('Custom race distance (km) is required for a custom race type');
+    }
+    raceDistanceKm = customDistanceKm;
+  } else {
+    raceDistanceKm = STANDARD_RACE_DISTANCES_KM[raceType];
+  }
+  const targetPaceMinPerKm = parseTargetPace(targetFinishTime, raceDistanceKm);
+  const finalTargetFinishTime = targetPaceMinPerKm != null ? targetFinishTime!.trim() : null;
+
+  // +1 because the skeleton below is 0-indexed by day offset from startDate —
+  // without it, a race exactly N*7 days out lands one day past the last
+  // generated week and never appears in weeklyPlan.
+  const totalWeeks = Math.max(1, Math.ceil((daysBetween(startDate, raceDate) + 1) / 7));
+
+  // ── Step 1: fetch context in parallel ───────────────────────────────────
+  const profileSnap = await getDoc(doc(db, 'users', uid, 'profile', 'data'));
+  const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+
+  // Last 15 running sessions — composite query (type == 'running' + orderBy date),
+  // same try/catch-then-client-sort fallback pattern as WorkoutSession.tsx:262-278
+  // since this repo has no pre-provisioned firestore.indexes.json.
+  let runSessions: any[] = [];
+  try {
+    const snap = await getDocs(query(
+      collection(db, 'users', uid, 'workoutSessions'),
+      where('type', '==', 'running'),
+      orderBy('date', 'desc'),
+      limit(15)
+    ));
+    runSessions = snap.docs.map(d => d.data());
+  } catch {
+    const snap = await getDocs(query(
+      collection(db, 'users', uid, 'workoutSessions'),
+      where('type', '==', 'running'),
+      limit(50)
+    ));
+    runSessions = snap.docs
+      .map(d => d.data())
+      .sort((a: any, b: any) => (a.date < b.date ? 1 : -1))
+      .slice(0, 15);
+  }
+
+  // ── Step 2: build context strings ───────────────────────────────────────
+  const profileParts = [
+    profile.gender && `gender ${profile.gender}`,
+    profile.heightCm && `height ${profile.heightCm}cm`,
+    profile.activityLevel && `activity level ${profile.activityLevel}`,
+    profile.primaryGoal && `primary goal ${profile.primaryGoal}`,
+    profile.fitnessFocus?.length && `focus: ${profile.fitnessFocus.join(', ')}`,
+    profile.fitnessTarget && `target: ${profile.fitnessTarget}`,
+  ].filter(Boolean);
+  const profileStr = profileParts.join(', ') || 'not provided';
+
+  const runsStr = runSessions.length > 0
+    ? runSessions.map((s: any) => {
+        const parts = [s.date];
+        if (s.distanceKm != null) parts.push(`${s.distanceKm}km`);
+        if (s.durationMins != null) parts.push(`${Math.round(s.durationMins)}min`);
+        if (s.paceMinPerKm != null) parts.push(`${s.paceMinPerKm.toFixed(2)} min/km pace`);
+        if (s.effortType) parts.push(s.effortType);
+        if (s.surface) parts.push(s.surface);
+        return parts.join(', ');
+      }).join('\n')
+    : 'no recent running sessions';
+
+  // ── Step 3: pre-compute the date skeleton ───────────────────────────────
+  // Dates are computed deterministically here (not by the AI) so a long
+  // multi-week plan can't come back with wrong/inconsistent calendar dates.
+  // The AI only fills in runType/targetDistanceKm/targetPaceMinPerKm/note
+  // per weekNumber+dayIndex, which we merge onto this skeleton below.
+  const skeleton: { weekNumber: number; dayIndex: number; date: string }[] = [];
+  for (let week = 1; week <= totalWeeks; week++) {
+    for (let day = 0; day < 7; day++) {
+      const offset = (week - 1) * 7 + day;
+      const date = addDays(startDate, offset);
+      if (date > raceDate) continue;
+      skeleton.push({ weekNumber: week, dayIndex: day, date });
+    }
+  }
+
+  // ── Step 4: call Claude API ─────────────────────────────────────────────
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 16000,
+      system: `You are an expert running coach building a periodized training plan. You will be given a runner's profile, recent running history, and a race target. Build a day-by-day plan for every day between today and race day.
+
+Consider:
+- Build volume gradually (10% rule), taper in the final 1-2 weeks before the race
+- Mix recovery runs, one tempo run/week, one long run/week, rest days, and a race day on the final date. Use intervals sparingly for speed work if appropriate for the runner's level
+- If a GOAL PACE is provided below, calibrate every day's targetPaceMinPerKm relative to it: race day should be at (or very close to) the goal pace, tempo runs moderately faster than easy pace and close to the goal pace, easy and long runs meaningfully slower than goal pace (roughly 45-90 sec/km slower) — let recent running history refine these paces, but the goal pace is the anchor, not history alone
+- If no GOAL PACE is provided, base target distances/paces on the runner's actual recent running history when available, otherwise use sensible beginner-safe defaults for the race distance
+- Keep notes short (max 12 words), specific, and encouraging
+
+Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
+{"days":[{"weekNumber":1,"dayIndex":0,"runType":"recovery|tempo|long_run|intervals|rest|race","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
+The "days" array must include exactly one entry for every (weekNumber, dayIndex) pair given in DAY SKELETON below — no more, no fewer.`,
+      messages: [{
+        role: 'user',
+        content: `RACE: ${raceName} (${raceType}, ${raceDistanceKm}km) on ${raceDate}${targetPaceMinPerKm != null ? `\nGOAL PACE: ${targetPaceMinPerKm.toFixed(2)} min/km (target finish time ${finalTargetFinishTime})` : ''}
+TODAY: ${startDate}
+TOTAL WEEKS: ${totalWeeks}
+
+RUNNER PROFILE:
+${profileStr}
+
+RECENT RUNNING HISTORY (last ${runSessions.length}, newest first):
+${runsStr}
+
+DAY SKELETON (weekNumber, dayIndex — fill in runType/targetDistanceKm/targetPaceMinPerKm/note for each):
+${skeleton.map(s => `week ${s.weekNumber}, day ${s.dayIndex}`).join('\n')}
+
+Build the training plan.`,
+      }],
+    }),
+  });
+
+  if (!response.ok) {
+    console.warn('[RacePlan] AI request failed:', response.status);
+    throw new Error(`AI request failed with status ${response.status}`);
+  }
+
+  let aiSummary = '';
+  let filledDays: Map<string, { runType: RunType; targetDistanceKm: number | null; targetPaceMinPerKm: number | null; note: string }>;
+  try {
+    const data = await response.json();
+    const raw = data.content?.[0]?.text ?? '';
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No JSON object found in AI response');
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      days: { weekNumber: number; dayIndex: number; runType: RunType; targetDistanceKm: number | null; targetPaceMinPerKm: number | null; note: string }[];
+      aiSummary: string;
+    };
+    if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('Invalid AI response shape — missing days array');
+
+    aiSummary = parsed.aiSummary || '';
+    filledDays = new Map(parsed.days.map(d => [`${d.weekNumber}-${d.dayIndex}`, {
+      runType: d.runType,
+      targetDistanceKm: d.targetDistanceKm ?? null,
+      targetPaceMinPerKm: d.targetPaceMinPerKm ?? null,
+      note: d.note || '',
+    }]));
+  } catch (e) {
+    console.warn('[RacePlan] Failed to parse AI plan response:', e);
+    throw new Error("Couldn't generate your plan right now. Please try again.");
+  }
+
+  // ── Step 5: merge AI content onto the date skeleton ─────────────────────
+  const weeksMap = new Map<number, PlanDay[]>();
+  for (const slot of skeleton) {
+    const filled = filledDays.get(`${slot.weekNumber}-${slot.dayIndex}`);
+    const day: PlanDay = {
+      date: slot.date,
+      runType: filled?.runType ?? 'rest',
+      targetDistanceKm: filled?.targetDistanceKm ?? null,
+      targetPaceMinPerKm: filled?.targetPaceMinPerKm ?? null,
+      note: filled?.note ?? '',
+    };
+    if (!weeksMap.has(slot.weekNumber)) weeksMap.set(slot.weekNumber, []);
+    weeksMap.get(slot.weekNumber)!.push(day);
+  }
+  const weeklyPlan: WeeklyPlanEntry[] = [...weeksMap.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([weekNumber, days]) => ({ weekNumber, days }));
+
+  // Deliberately no id/createdAt, and no Firestore writes above — this is the
+  // pre-review, in-memory state. A real id and a resolved createdAt only
+  // meaningfully exist after persistRacePlan writes the doc.
+  return {
+    raceType, raceName, raceDate, startDate, totalWeeks,
+    raceDistanceKm,
+    targetFinishTime: finalTargetFinishTime,
+    targetPaceMinPerKm,
+    weeklyPlan,
+    aiSummary,
+  };
+}
+
+// ── Persistence (never re-calls the AI) ─────────────────────────────────────
+
+export interface PersistRacePlanFields {
+  createdBy: RacePlanSource;
+  gymSplitPattern?: string[] | null;
+}
+
+export async function persistRacePlan(
+  uid: string,
+  generated: GeneratedRacePlan,
+  fields: PersistRacePlanFields
+): Promise<RacePlan> {
+  // Only one active plan at a time is supported today — flagging that this
+  // won't hold if the product later wants overlapping plans (e.g. a tune-up
+  // 10k block inside a marathon block), but implementing single-active as
+  // specified for now. Same abandon pattern generateRacePlan uses internally.
+  try {
+    const existingSnap = await getDocs(
+      query(collection(db, 'users', uid, 'racePlans'), where('status', '==', 'active'))
+    );
+    await Promise.all(existingSnap.docs.map(d => updateDoc(d.ref, { status: 'abandoned' })));
+  } catch (e) {
+    console.warn('[RacePlan] Failed to abandon existing active plan(s):', e);
+  }
+
+  const planData = {
+    raceType: generated.raceType,
+    raceName: generated.raceName,
+    raceDate: generated.raceDate,
+    startDate: generated.startDate,
+    totalWeeks: generated.totalWeeks,
+    status: 'active' as RacePlanStatus,
+    createdAt: serverTimestamp(),
+    createdBy: fields.createdBy,
+    weeklyPlan: generated.weeklyPlan,
+    aiSummary: generated.aiSummary,
+    raceDistanceKm: generated.raceDistanceKm,
+    targetFinishTime: generated.targetFinishTime,
+    targetPaceMinPerKm: generated.targetPaceMinPerKm,
+    gymSplitPattern: fields.gymSplitPattern ?? null,
+  };
+  const ref = await addDoc(collection(db, 'users', uid, 'racePlans'), cleanData(planData));
+  console.log('[RacePlan] Generated and persisted plan:', ref.id);
+
+  return { id: ref.id, ...planData };
+}
+
 // ── Adherence (pure, no Firestore) ──────────────────────────────────────────
 
 function findWeekEntryForDate(plan: RacePlan, dateStr: string): WeeklyPlanEntry | null {
