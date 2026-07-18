@@ -6,7 +6,6 @@ import { db } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
 import {
   getActiveRacePlan,
-  generateRacePlan,
   computeAdherence,
   getCurrentWeekEntry,
   getWeekEntryByDate,
@@ -14,7 +13,6 @@ import {
   getPlanDayForDate,
   getGymSplitForDate,
   type RacePlan,
-  type RaceType,
   type RunType,
 } from '@/services/racePlanService';
 import { paceStr } from '@/pages/RunningSession';
@@ -25,20 +23,6 @@ import { paceStr } from '@/pages/RunningSession';
 function toLocalDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-
-function tomorrowStr(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return toLocalDateStr(d);
-}
-
-const RACE_TYPES: { value: RaceType; label: string }[] = [
-  { value: '5k', label: '5K' },
-  { value: '10k', label: '10K' },
-  { value: 'half_marathon', label: 'Half Marathon' },
-  { value: 'full_marathon', label: 'Full Marathon' },
-  { value: 'custom', label: 'Custom' },
-];
 
 const RUN_TYPE_STYLES: Record<RunType, { bg: string; text: string; border: string }> = {
   recovery: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20' },
@@ -90,15 +74,6 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
   const [viewedWeekNumber, setViewedWeekNumber] = useState<number | null>(null);
   const [highlightDate, setHighlightDate] = useState<string | null>(null);
 
-  const [showForm, setShowForm] = useState(false);
-  const [raceType, setRaceType] = useState<RaceType>('10k');
-  const [raceName, setRaceName] = useState('');
-  const [raceDate, setRaceDate] = useState('');
-  const [targetFinishTime, setTargetFinishTime] = useState('');
-  const [customDistanceKm, setCustomDistanceKm] = useState('');
-  const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   useEffect(() => {
     if (!user) return;
     const load = async () => {
@@ -125,32 +100,6 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
     load();
   }, [user]);
 
-  const handleGenerate = async () => {
-    if (!user || !raceName.trim() || !raceDate) return;
-    setError(null);
-    setGenerating(true);
-    try {
-      const newPlan = await generateRacePlan(
-        user.uid,
-        {
-          raceType,
-          raceName: raceName.trim(),
-          raceDate,
-          targetFinishTime: targetFinishTime.trim() || undefined,
-          customDistanceKm: raceType === 'custom' ? parseFloat(customDistanceKm) || undefined : undefined,
-        },
-        'runner_tab'
-      );
-      setPlan(newPlan);
-      setShowForm(false);
-    } catch (e: any) {
-      console.error('Error generating race plan:', e);
-      setError(e.message || 'Failed to generate plan. Try again.');
-    } finally {
-      setGenerating(false);
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -166,73 +115,10 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
         <p className="text-sm font-semibold text-white mb-1">No active race goal yet</p>
         <p className="text-xs text-slate-500 mb-3">Set a race and get a personalized week-by-week training plan.</p>
 
-        {!showForm ? (
-          <button onClick={() => setShowForm(true)}
-            className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors">
-            Set a race goal
-          </button>
-        ) : (
-          <div className="space-y-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-2">Race distance</label>
-              <div className="flex flex-wrap gap-2">
-                {RACE_TYPES.map(rt => (
-                  <button key={rt.value} onClick={() => setRaceType(rt.value)}
-                    className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${
-                      raceType === rt.value ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    }`}>
-                    {rt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">Race name</label>
-              <input type="text" value={raceName} onChange={e => setRaceName(e.target.value)} placeholder="e.g. Mumbai Marathon"
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
-            </div>
-            {raceType === 'custom' && (
-              <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Distance (km)</label>
-                <input type="number" min="0.1" step="0.1" value={customDistanceKm} onChange={e => setCustomDistanceKm(e.target.value)} placeholder="e.g. 15"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
-              </div>
-            )}
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">Race date</label>
-              <input type="date" value={raceDate} min={tomorrowStr()} onChange={e => setRaceDate(e.target.value)}
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-emerald-500" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1">Target finish time (optional)</label>
-              <input type="text" value={targetFinishTime} onChange={e => setTargetFinishTime(e.target.value)} placeholder="e.g. 1:59:00"
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500" />
-              <p className="text-[10px] text-slate-500 mt-1">Leave blank to train off your recent runs only.</p>
-            </div>
-
-            {error && <p className="text-xs text-red-400">{error}</p>}
-
-            {generating ? (
-              <div className="flex items-center justify-center gap-1.5 bg-slate-800 rounded-xl py-3">
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                <span className="text-xs text-slate-400 ml-2">Building your training plan — this can take a minute</span>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <button onClick={() => { setShowForm(false); setError(null); }}
-                  className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium py-2.5 rounded-xl transition-colors">
-                  Cancel
-                </button>
-                <button onClick={handleGenerate} disabled={!raceName.trim() || !raceDate || (raceType === 'custom' && !customDistanceKm.trim())}
-                  className="flex-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors">
-                  Generate plan
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+        <button onClick={() => navigate('/ai-coach?topic=goal')}
+          className="w-full bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold py-2.5 rounded-xl transition-colors">
+          Set a race goal
+        </button>
       </div>
     );
   }
