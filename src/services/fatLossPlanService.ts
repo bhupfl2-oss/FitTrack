@@ -61,7 +61,8 @@ export interface GeneratedFatLossPlan {
 // never call this twice expecting the same plan back.
 export async function generateFatLossPlan(
   uid: string,
-  input: GenerateFatLossPlanInput
+  input: GenerateFatLossPlanInput,
+  feedback?: string
 ): Promise<GeneratedFatLossPlan> {
   const startDate = todayStr();
   const targetDate = addDays(startDate, TARGET_DAYS_OUT);
@@ -194,7 +195,7 @@ ${sessionsStr}
 
 DAY SKELETON (dayIndex — fill in sessionType/targetCalories/note for each):
 ${skeleton.map(s => `day ${s.dayIndex}`).join('\n')}
-
+${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing phase-progression requirements above.\n` : ''}
 Build the fat-loss plan.`,
       }],
     }),

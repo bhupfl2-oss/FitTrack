@@ -384,7 +384,8 @@ export interface GeneratedRacePlan {
 // never call this twice expecting the same plan back.
 export async function generateRacePlanDraft(
   uid: string,
-  input: GenerateRacePlanDraftInput
+  input: GenerateRacePlanDraftInput,
+  feedback?: string
 ): Promise<GeneratedRacePlan> {
   const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm } = input;
   const startDate = todayStr();
@@ -514,7 +515,7 @@ ${runsStr}
 
 DAY SKELETON (weekNumber, dayIndex — fill in runType/targetDistanceKm/targetPaceMinPerKm/note for each):
 ${skeleton.map(s => `week ${s.weekNumber}, day ${s.dayIndex}`).join('\n')}
-
+${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing requirements above.\n` : ''}
 Build the training plan.`,
       }],
     }),
