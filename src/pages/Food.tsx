@@ -6,7 +6,7 @@ import { Camera as CapacitorCamera, CameraResultType, CameraSource } from '@capa
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import {
-  doc, getDoc, setDoc,
+  doc, getDoc, setDoc, collection, addDoc, serverTimestamp,
 } from 'firebase/firestore';
 import { useGoals, getEffectiveCalorieGoal } from '@/services/goalsService';
 import { db } from '@/lib/firebase';
@@ -309,22 +309,7 @@ Rules:
     try {
       const base64 = photoPreview.split(',')[1];
       const mediaType = photoMediaType;
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 800,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-              { type: 'text', text: `Identify all food items in this image and estimate calories and macros.
+      const promptText = `Identify all food items in this image and estimate calories and macros.
 
 Respond in exactly this format:
 <items>[{"name":"Food Name","portion":"estimated portion","calories":300,"protein":12,"carbs":45,"fat":8,"fibre":4}]</items>
@@ -334,14 +319,60 @@ Rules:
 - Estimate portions visually (e.g. "1 cup", "2 rotis", "1 bowl")
 - calories/protein/carbs/fat/fibre are numbers (fibre is grams of dietary fibre)
 - If unsure about a portion, add a note in the portion field like "~1 cup (estimated)"
-- Only output the tags, no other text` }
-            ],
-          }],
-        }),
+- Only output the tags, no other text`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 800,
+      //     messages: [{
+      //       role: 'user',
+      //       content: [
+      //         { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+      //         { type: 'text', text: promptText }
+      //       ],
+      //     }],
+      //   }),
+      // });
+      // if (!response.ok) throw new Error('API failed');
+      // const data = await response.json();
+      // const text = data.content?.[0]?.text || '';
+
+      const model = 'gemini-flash-latest';
+      const { text, usage } = await callAI({
+        model,
+        contents: [
+          { inlineData: { mimeType: mediaType, data: base64 } },
+          { text: promptText },
+        ],
+        maxTokens: 800,
+        thinkingBudget: 0,
       });
-      if (!response.ok) throw new Error('API failed');
-      const data = await response.json();
-      const text = data.content?.[0]?.text || '';
+
+      if (user) {
+        // Best-effort usage log — must never block photo analysis.
+        try {
+          await addDoc(collection(db, 'users', user.uid, 'aiUsageLogs'), {
+            callType: 'food_photo_analyze',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            model,
+            planId: null,
+            createdAt: serverTimestamp(),
+          });
+        } catch (e) {
+          console.warn('[Food] Failed to write usage log:', e);
+        }
+      }
+
       const itemsMatch = text.match(/<items>([\s\S]*?)<\/items>/);
       if (itemsMatch) {
         const parsed = JSON.parse(itemsMatch[1].trim());

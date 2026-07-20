@@ -10,6 +10,7 @@ import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { callAI } from '@/lib/callAI';
 
 interface ExtractedTest {
   testName: string;
@@ -103,28 +104,7 @@ export default function LabUpload() {
       });
 
       const mediaType = file.type === 'application/pdf' ? 'application/pdf' : file.type;
-      const fileContent = file.type === 'application/pdf'
-        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
-        : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 2000,
-          messages: [{
-            role: 'user',
-            content: [
-              fileContent,
-              {
-                type: 'text',
-                text: `Extract all lab test results from this report. Return ONLY a JSON object, no markdown, no preamble. Use this exact schema:
+      const promptText = `Extract all lab test results from this report. Return ONLY a JSON object, no markdown, no preamble. Use this exact schema:
 {
   "labName": "name of the lab or hospital if visible, else null",
   "reportDate": "YYYY-MM-DD format of the sample collection date, else null",
@@ -144,15 +124,59 @@ Rules:
 - Skip header rows, reference-only rows, non-numeric results
 - If a test appears on multiple pages, include it once with the numeric value
 - reportDate should be collection/sample date, not report generation date
-- Do not include any text outside the JSON object`
-              }
-            ]
-          }]
-        })
+- Do not include any text outside the JSON object`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const fileContent = file.type === 'application/pdf'
+      //   ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+      //   : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 2000,
+      //     messages: [{
+      //       role: 'user',
+      //       content: [fileContent, { type: 'text', text: promptText }]
+      //     }]
+      //   })
+      // });
+      // const data = await response.json();
+      // const rawText = data.content[0].text;
+
+      const model = 'gemini-flash-latest';
+      const { text: rawText, usage } = await callAI({
+        model,
+        contents: [
+          { inlineData: { mimeType: mediaType, data: base64 } },
+          { text: promptText },
+        ],
+        maxTokens: 2000,
+        thinkingBudget: 0,
       });
 
-      const data = await response.json();
-      const rawText = data.content[0].text;
+      if (user) {
+        // Best-effort usage log — must never block extraction.
+        try {
+          await addDoc(collection(db, 'users', user.uid, 'aiUsageLogs'), {
+            callType: 'lab_upload_extract',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            model,
+            planId: null,
+            createdAt: serverTimestamp(),
+          });
+        } catch (e) {
+          console.warn('[LabUpload] Failed to write usage log:', e);
+        }
+      }
+
       const clean = rawText.replace(/```json|```/g, '').trim();
       const extracted = JSON.parse(clean);
 

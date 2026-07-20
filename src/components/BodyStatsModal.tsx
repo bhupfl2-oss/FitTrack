@@ -6,6 +6,7 @@ import { bumpDataVersion } from '@/lib/dataVersion';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 import { calculateGoalsWithAI } from '@/services/goalsService';
+import { callAI } from '@/lib/callAI';
 
 interface BodyStatsModalProps {
   isOpen: boolean;
@@ -280,37 +281,65 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
       });
 
       const mediaType = file.type;
-      const fileContent = file.type === 'application/pdf'
-        ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
-        : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
+      const promptText = 'Extract body composition stats from this image. Return ONLY a JSON object, no markdown, no preamble:\n{\n  \"weightKg\": number or null,\n  \"pbf\": number or null,\n  \"smm\": number or null,\n  \"legLeanMass\": number or null,\n  \"ecwRatio\": number or null,\n  \"date\": \"YYYY-MM-DD\" or null\n}\nRules:\n- Only include fields clearly visible in the image\n- weightKg = total body weight in kg\n- pbf = body fat percentage (PBF%)\n- smm = skeletal muscle mass in kg\n- legLeanMass = leg lean mass in kg\n- ecwRatio = extracellular water ratio (usually 0.3xx)\n- date = measurement date if visible\n- Return null for any field not found\n- No text outside the JSON object';
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Extract body composition stats from this image. Return ONLY a JSON object, no markdown, no preamble:\n{\n  \"weightKg\": number or null,\n  \"pbf\": number or null,\n  \"smm\": number or null,\n  \"legLeanMass\": number or null,\n  \"ecwRatio\": number or null,\n  \"date\": \"YYYY-MM-DD\" or null\n}\nRules:\n- Only include fields clearly visible in the image\n- weightKg = total body weight in kg\n- pbf = body fat percentage (PBF%)\n- smm = skeletal muscle mass in kg\n- legLeanMass = leg lean mass in kg\n- ecwRatio = extracellular water ratio (usually 0.3xx)\n- date = measurement date if visible\n- Return null for any field not found\n- No text outside the JSON object' },
-              fileContent,
-            ],
-          }],
-        }),
+      // ROLLBACK: previous Anthropic implementation
+      // const fileContent = file.type === 'application/pdf'
+      //   ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
+      //   : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 1000,
+      //     messages: [{
+      //       role: 'user',
+      //       content: [
+      //         { type: 'text', text: promptText },
+      //         fileContent,
+      //       ],
+      //     }],
+      //   }),
+      // });
+      // if (!response.ok) {
+      //   throw new Error(`API error: ${response.status}`);
+      // }
+      // const data = await response.json();
+      // const content = data.content?.[0]?.text || '';
+
+      const model = 'gemini-flash-latest';
+      const { text: content, usage } = await callAI({
+        model,
+        contents: [
+          { text: promptText },
+          { inlineData: { mimeType: mediaType, data: base64 } },
+        ],
+        maxTokens: 1000,
+        thinkingBudget: 0,
       });
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+      if (user) {
+        // Best-effort usage log — must never block extraction.
+        try {
+          await addDoc(collection(db, 'users', user.uid, 'aiUsageLogs'), {
+            callType: 'body_stats_extract',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            model,
+            planId: null,
+            createdAt: serverTimestamp(),
+          });
+        } catch (e) {
+          console.warn('[BodyStats] Failed to write usage log:', e);
+        }
       }
 
-      const data = await response.json();
-      const content = data.content?.[0]?.text || '';
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error('No JSON found in response');
 
