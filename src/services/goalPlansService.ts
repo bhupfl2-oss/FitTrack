@@ -42,6 +42,10 @@ export interface GoalPlan {
   targetDate: string | null;  // YYYY-MM-DD, local — AI-picked, 3-6 months out
   hasStructuredPlan: boolean; // true only when weeklyPlan below is populated
   weeklyPlan: FatLossPlanDay[] | null;
+  // How many times this plan was regenerated (with feedback) before being
+  // saved — meaningful only for hasStructuredPlan plans. Mirrors
+  // RacePlan.regenerationsUsed in racePlanService.ts.
+  regenerationsUsed: number;
   createdAt?: any;
   updatedAt?: any;
 }
@@ -58,6 +62,7 @@ interface CreateGoalPlanInput {
   targetDate?: string | null;
   hasStructuredPlan?: boolean;
   weeklyPlan?: FatLossPlanDay[] | null;
+  regenerationsUsed?: number;
 }
 
 // ── CRUD ───────────────────────────────────────────────────────────────────
@@ -100,6 +105,7 @@ export async function createGoalPlan(uid: string, input: CreateGoalPlanInput): P
     targetDate: input.targetDate ?? null,
     hasStructuredPlan: input.hasStructuredPlan ?? false,
     weeklyPlan: input.weeklyPlan ?? null,
+    regenerationsUsed: input.regenerationsUsed ?? 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
