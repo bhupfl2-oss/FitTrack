@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { useGoals, getEffectiveCalorieGoal } from '@/services/goalsService';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 interface MacroInfo {
@@ -224,20 +225,7 @@ export default function Food() {
     setChatError('');
     setChatIntro('');
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 800,
-          messages: [{
-            role: 'user',
-            content: `You are a nutrition assistant. Parse the food description and return calories and macros for each item.
+      const chatPrompt = `You are a nutrition assistant. Parse the food description and return calories and macros for each item.
 
 Food description: "${chatInput}"
 
@@ -250,13 +238,33 @@ Rules:
 - Estimate portions reasonably if not specified
 - Each item in the array is a separate food
 - calories/protein/carbs/fat/fibre are numbers (grams for macros, fibre is grams of dietary fibre)
-- Never include markdown or extra text outside the tags`,
-          }],
-        }),
+- Never include markdown or extra text outside the tags`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 800,
+      //     messages: [{ role: 'user', content: chatPrompt }],
+      //   }),
+      // });
+      // if (!response.ok) throw new Error('API failed');
+      // const data = await response.json();
+      // const text = data.content?.[0]?.text || '';
+
+      const { text } = await callAI({
+        model: 'gemini-flash-lite-latest',
+        contents: chatPrompt,
+        maxTokens: 800,
+        thinkingBudget: 0,
       });
-      if (!response.ok) throw new Error('API failed');
-      const data = await response.json();
-      const text = data.content?.[0]?.text || '';
       const introMatch = text.match(/<intro>([\s\S]*?)<\/intro>/);
       if (introMatch) setChatIntro(introMatch[1].trim());
       const itemsMatch = text.match(/<items>([\s\S]*?)<\/items>/);
@@ -352,31 +360,39 @@ Rules:
     setSearchLoading(true);
     setSearchResults(null);
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 400,
-          messages: [{
-            role: 'user',
-            content: `Give nutrition info for: "${searchQuery}"
+      const searchPrompt = `Give nutrition info for: "${searchQuery}"
 
 Respond with exactly this JSON array, no other text:
 [{"name":"${searchQuery}","portion":"1 serving","calories":0,"protein":0,"carbs":0,"fat":0,"fibre":0}]
 
-Replace the zeros with accurate values (fibre is grams of dietary fibre). Include 2-3 common portion variants if relevant.`,
-          }],
-        }),
+Replace the zeros with accurate values (fibre is grams of dietary fibre). Include 2-3 common portion variants if relevant.`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 400,
+      //     messages: [{ role: 'user', content: searchPrompt }],
+      //   }),
+      // });
+      // if (!response.ok) throw new Error('API failed');
+      // const data = await response.json();
+      // const text = (data.content?.[0]?.text || '').trim();
+
+      const { text: searchText } = await callAI({
+        model: 'gemini-flash-lite-latest',
+        contents: searchPrompt,
+        maxTokens: 400,
+        thinkingBudget: 0,
       });
-      if (!response.ok) throw new Error('API failed');
-      const data = await response.json();
-      const text = (data.content?.[0]?.text || '').trim();
+      const text = searchText.trim();
       const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
       setSearchResults(parsed.map((p: ParsedFoodItem) => ({ ...p, quantity: 1, fibre: p.fibre ?? 0 })));
     } catch (e) {

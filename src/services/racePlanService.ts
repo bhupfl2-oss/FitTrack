@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { callAI } from '@/lib/callAI';
 import type { EffortType } from '@/pages/RunningSession';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -46,6 +47,10 @@ export interface RacePlan {
   // Ordered rotation for gym days, e.g. ['Push','Pull','Legs'] — null until the
   // user has named one (via goal intake or the edit flow).
   gymSplitPattern: string[] | null;
+  // How many times this plan was regenerated (with feedback) before being
+  // saved — carried forward from the draft's regeneration count at persist
+  // time. First regeneration is free; further ones just increment this.
+  regenerationsUsed: number;
 }
 
 export interface AdherenceResult {
@@ -341,6 +346,7 @@ Build the training plan.`,
     targetFinishTime: finalTargetFinishTime,
     targetPaceMinPerKm,
     gymSplitPattern: gymSplitPattern ?? null,
+    regenerationsUsed: 0, // legacy path, no regenerate-with-feedback loop exists here
   };
   const ref = await addDoc(collection(db, 'users', uid, 'racePlans'), cleanData(planData));
   console.log('[RacePlan] Generated and saved plan:', ref.id);
@@ -477,19 +483,9 @@ export async function generateRacePlanDraft(
     }
   }
 
-  // ── Step 4: call Claude API ─────────────────────────────────────────────
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 16000,
-      system: `You are an expert running coach building a periodized training plan. You will be given a runner's profile, recent running history, and a race target. Build a day-by-day plan for every day between today and race day.
+  // ── Step 4: call Gemini via the callAI proxy ────────────────────────────
+  const model = 'gemini-flash-latest';
+  const systemInstruction = `You are an expert running coach building a periodized training plan. You will be given a runner's profile, recent running history, and a race target. Build a day-by-day plan for every day between today and race day.
 
 Consider:
 - Build volume gradually (10% rule), taper in the final 1-2 weeks before the race
@@ -500,10 +496,8 @@ Consider:
 
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
 {"days":[{"weekNumber":1,"dayIndex":0,"runType":"recovery|tempo|long_run|intervals|rest|race","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
-The "days" array must include exactly one entry for every (weekNumber, dayIndex) pair given in DAY SKELETON below — no more, no fewer.`,
-      messages: [{
-        role: 'user',
-        content: `RACE: ${raceName} (${raceType}, ${raceDistanceKm}km) on ${raceDate}${targetPaceMinPerKm != null ? `\nGOAL PACE: ${targetPaceMinPerKm.toFixed(2)} min/km (target finish time ${finalTargetFinishTime})` : ''}
+The "days" array must include exactly one entry for every (weekNumber, dayIndex) pair given in DAY SKELETON below — no more, no fewer.`;
+  const userContent = `RACE: ${raceName} (${raceType}, ${raceDistanceKm}km) on ${raceDate}${targetPaceMinPerKm != null ? `\nGOAL PACE: ${targetPaceMinPerKm.toFixed(2)} min/km (target finish time ${finalTargetFinishTime})` : ''}
 TODAY: ${startDate}
 TOTAL WEEKS: ${totalWeeks}
 
@@ -516,21 +510,58 @@ ${runsStr}
 DAY SKELETON (weekNumber, dayIndex — fill in runType/targetDistanceKm/targetPaceMinPerKm/note for each):
 ${skeleton.map(s => `week ${s.weekNumber}, day ${s.dayIndex}`).join('\n')}
 ${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing requirements above.\n` : ''}
-Build the training plan.`,
-      }],
-    }),
+Build the training plan.`;
+
+  // ROLLBACK: previous Anthropic implementation
+  // const response = await fetch('https://api.anthropic.com/v1/messages', {
+  //   method: 'POST',
+  //   headers: {
+  //     'Content-Type': 'application/json',
+  //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+  //     'anthropic-version': '2023-06-01',
+  //     'anthropic-dangerous-direct-browser-access': 'true',
+  //   },
+  //   body: JSON.stringify({
+  //     model: 'claude-sonnet-4-6',
+  //     max_tokens: 16000,
+  //     system: systemInstruction,
+  //     messages: [{ role: 'user', content: userContent }],
+  //   }),
+  // });
+  // if (!response.ok) {
+  //   console.warn('[RacePlan] AI request failed:', response.status);
+  //   throw new Error(`AI request failed with status ${response.status}`);
+  // }
+  // const data = await response.json();
+  // const raw = data.content?.[0]?.text ?? '';
+  // const usage = { inputTokens: data.usage?.input_tokens ?? 0, outputTokens: data.usage?.output_tokens ?? 0 };
+
+  const { text: raw, usage } = await callAI({
+    model,
+    systemInstruction,
+    contents: userContent,
+    maxTokens: 16000,
   });
 
-  if (!response.ok) {
-    console.warn('[RacePlan] AI request failed:', response.status);
-    throw new Error(`AI request failed with status ${response.status}`);
+  // Best-effort usage log — must never block plan generation. Written via a
+  // direct addDoc (not cleanData()) since cleanData() strips serverTimestamp()
+  // sentinels down to plain objects (known bug, out of scope to fix here).
+  try {
+    await addDoc(collection(db, 'users', uid, 'aiUsageLogs'), {
+      callType: feedback ? 'race_plan_regenerate' : 'race_plan_generate',
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      model,
+      planId: null, // pre-persist draft — no plan id exists yet at this point
+      createdAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn('[RacePlan] Failed to write usage log:', e);
   }
 
   let aiSummary = '';
   let filledDays: Map<string, { runType: RunType; targetDistanceKm: number | null; targetPaceMinPerKm: number | null; note: string }>;
   try {
-    const data = await response.json();
-    const raw = data.content?.[0]?.text ?? '';
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON object found in AI response');
     const parsed = JSON.parse(jsonMatch[0]) as {
@@ -587,6 +618,7 @@ Build the training plan.`,
 export interface PersistRacePlanFields {
   createdBy: RacePlanSource;
   gymSplitPattern?: string[] | null;
+  regenerationsUsed?: number;
 }
 
 export async function persistRacePlan(
@@ -622,6 +654,7 @@ export async function persistRacePlan(
     targetFinishTime: generated.targetFinishTime,
     targetPaceMinPerKm: generated.targetPaceMinPerKm,
     gymSplitPattern: fields.gymSplitPattern ?? null,
+    regenerationsUsed: fields.regenerationsUsed ?? 0,
   };
   const ref = await addDoc(collection(db, 'users', uid, 'racePlans'), cleanData(planData));
   console.log('[RacePlan] Generated and persisted plan:', ref.id);

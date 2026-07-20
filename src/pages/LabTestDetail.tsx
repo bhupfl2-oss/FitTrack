@@ -14,6 +14,7 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 import { cleanData } from '@/lib/cleanData';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, ReferenceLine } from 'recharts';
 
@@ -190,23 +191,30 @@ export default function LabTestDetail() {
       const readingsSummary = last5.map(r => `${formatDate(r.date, 'MMM yyyy')}: ${r.value}`).join(', ');
       const prompt = `Test: ${test.name} | Unit: ${test.unit} | Reference range: ${test.referenceRangeLow} – ${test.referenceRangeHigh} | Readings (newest first): ${readingsSummary} | Provide a 2-3 sentence plain-English interpretation of this trend. End with one recommended action starting with "Action:". Do not diagnose. Suggest consulting a doctor for concerning results.`;
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
-          messages: [{ role: 'user', content: prompt }]
-        })
-      });
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 300,
+      //     messages: [{ role: 'user', content: prompt }]
+      //   })
+      // });
+      // const data = await response.json();
+      // const interpretation = data.content[0].text;
 
-      const data = await response.json();
-      const interpretation = data.content[0].text;
+      const { text: interpretation } = await callAI({
+        model: 'gemini-flash-lite-latest',
+        contents: prompt,
+        maxTokens: 300,
+        thinkingBudget: 0,
+      });
 
       // Parse out the "Action:" sentence — split on "Action:" and take the second part if it exists
       const actionText = interpretation.includes('Action:') ? interpretation.split('Action:')[1].trim() : null;

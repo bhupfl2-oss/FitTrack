@@ -8,6 +8,7 @@ import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
 import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
+import { callAI, type ContentTurn } from '@/lib/callAI';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation } from '@/lib/getWorkoutRecommendation';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
@@ -387,35 +388,41 @@ export default function Workouts() {
 
       try {
         const context = await buildContext();
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 600,
-            messages: [{
-              role: 'user',
-              content: `The user just completed a ${pendingActivity.name} workout and described these exercises: "${input}"
-            
+        const pendingActivityPrompt = `The user just completed a ${pendingActivity.name} workout and described these exercises: "${input}"
+
 Parse the exercises they mentioned and return a workout plan JSON. If weights aren't mentioned, use sensible defaults based on this context:
 ${context}
 
 Return ONLY this JSON, no other text:
-{"plan":[{"exercise":"Name","sets":3,"reps":10,"suggestedWeight":60,"lastWeight":0}]}`
-            }],
-          }),
-        });
+{"plan":[{"exercise":"Name","sets":3,"reps":10,"suggestedWeight":60,"lastWeight":0}]}`;
 
-        if (!response.ok) throw new Error('API failed');
-        const data = await response.json();
+        // ROLLBACK: previous Anthropic implementation
+        // const response = await fetch('https://api.anthropic.com/v1/messages', {
+        //   method: 'POST',
+        //   headers: {
+        //     'Content-Type': 'application/json',
+        //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+        //     'anthropic-version': '2023-06-01',
+        //     'anthropic-dangerous-direct-browser-access': 'true',
+        //   },
+        //   body: JSON.stringify({
+        //     model: 'claude-sonnet-4-6',
+        //     max_tokens: 600,
+        //     messages: [{ role: 'user', content: pendingActivityPrompt }],
+        //   }),
+        // });
+        // if (!response.ok) throw new Error('API failed');
+        // const data = await response.json();
+
+        const { text: pendingActivityResult } = await callAI({
+          model: 'gemini-flash-lite-latest',
+          contents: pendingActivityPrompt,
+          maxTokens: 600,
+          thinkingBudget: 0,
+        });
         let plan: AIPlanExercise[] = [];
         try {
-          const parsed = JSON.parse(data.content?.[0]?.text || '{}');
+          const parsed = JSON.parse(pendingActivityResult || '{}');
           plan = parsed.plan || [];
         } catch {}
 
@@ -528,25 +535,46 @@ Rules:
 - lastWeight 0 means no data
 - For cardio/yoga/other non-weight: return empty plan array and put details in intro`;
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 800,
-          system: systemPrompt,
-          messages: [...history, { role: 'user', content: input }],
-        }),
-      });
+      // chatMessages never starts with an 'ai'-role turn (state starts empty,
+      // first entry pushed is always the user's), so unlike AICoach.tsx's
+      // main chat, no leading-turn stripping is needed here before mapping
+      // roles to Gemini's 'user'/'model' shape.
+      const geminiContents: ContentTurn[] = [
+        ...history.map(m => ({
+          role: m.role === 'assistant' ? 'model' as const : 'user' as const,
+          parts: [{ text: m.content }],
+        })),
+        { role: 'user' as const, parts: [{ text: input }] },
+      ];
 
-      if (!response.ok) throw new Error('API failed');
-      const data = await response.json();
-      const text = data.content?.[0]?.text || '';
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 800,
+      //     system: systemPrompt,
+      //     messages: [...history, { role: 'user', content: input }],
+      //   }),
+      // });
+      // if (!response.ok) throw new Error('API failed');
+      // const data = await response.json();
+      // const text = data.content?.[0]?.text || '';
+
+      const { text: callResult } = await callAI({
+        model: 'gemini-flash-latest',
+        systemInstruction: systemPrompt,
+        contents: geminiContents,
+        maxTokens: 800,
+        thinkingBudget: 0,
+      });
+      const text = callResult || '';
 
       if (isLogging) {
         // Parse logging response

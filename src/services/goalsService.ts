@@ -4,6 +4,7 @@ import {
   collection, query, where, orderBy, limit, getDocs,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 // Type-only — erased at compile time, so importing from goalPlansService.ts
 // here (which itself imports saveGoals from this file) can't create a
 // runtime circular-import problem.
@@ -257,19 +258,8 @@ export async function calculateGoalsWithAI(
           .join(', ')
       : 'no lab data';
 
-    // ── Step 4: call Claude API ─────────────────────────────────────────
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 600,
-        system: `You are a precision health coach with access to the user's complete health picture. Calculate ALL their optimal daily goals based on body composition trends, workout history, lab results, and profile.
+    // ── Step 4: call Gemini via the callAI proxy ─────────────────────────
+    const goalsSystemInstruction = `You are a precision health coach with access to the user's complete health picture. Calculate ALL their optimal daily goals based on body composition trends, workout history, lab results, and profile.
 Consider:
 - Protein: based on lean mass and training frequency
 - Calories: TDEE adjusted for actual workout output and body comp trend
@@ -279,10 +269,8 @@ Consider:
 - Carbs and fat: based on diet preference and energy needs
 - If lab results indicate deficiencies or risks, factor into goals
 Return ONLY valid JSON, no markdown, no explanation:
-{"calorieGoal":number,"proteinGoal":number,"carbGoal":number,"fatGoal":number,"stepsGoal":number,"caloriesBurnGoal":number,"sleepGoal":number,"waterGoal":number,"aiSummary":"max 25 words, mention key data points used"}`,
-        messages: [{
-          role: 'user',
-          content: `PROFILE:
+{"calorieGoal":number,"proteinGoal":number,"carbGoal":number,"fatGoal":number,"stepsGoal":number,"caloriesBurnGoal":number,"sleepGoal":number,"waterGoal":number,"aiSummary":"max 25 words, mention key data points used"}`;
+    const goalsUserContent = `PROFILE:
 ${profileStr}
 
 BODY COMPOSITION TREND (last 3 months, newest first):
@@ -295,14 +283,35 @@ Average: ${avgPerWeek} sessions/week, dominant type: ${dominantType}
 LAB RESULTS (latest per test):
 ${labStr}
 
-Calculate my optimal daily health goals.`,
-        }],
-      }),
-    });
+Calculate my optimal daily health goals.`;
 
-    if (!response.ok) throw new Error(`API error ${response.status}`);
-    const data = await response.json();
-    const raw = data.content?.[0]?.text ?? '';
+    // ROLLBACK: previous Anthropic implementation
+    // const response = await fetch('https://api.anthropic.com/v1/messages', {
+    //   method: 'POST',
+    //   headers: {
+    //     'Content-Type': 'application/json',
+    //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+    //     'anthropic-version': '2023-06-01',
+    //     'anthropic-dangerous-direct-browser-access': 'true',
+    //   },
+    //   body: JSON.stringify({
+    //     model: 'claude-sonnet-4-6',
+    //     max_tokens: 600,
+    //     system: goalsSystemInstruction,
+    //     messages: [{ role: 'user', content: goalsUserContent }],
+    //   }),
+    // });
+    // if (!response.ok) throw new Error(`API error ${response.status}`);
+    // const data = await response.json();
+    // const raw = data.content?.[0]?.text ?? '';
+
+    const { text: raw } = await callAI({
+      model: 'gemini-flash-lite-latest',
+      systemInstruction: goalsSystemInstruction,
+      contents: goalsUserContent,
+      maxTokens: 600,
+      thinkingBudget: 0,
+    });
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON object found in response');
     const result = JSON.parse(jsonMatch[0]) as UserGoals;

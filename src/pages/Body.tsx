@@ -7,6 +7,7 @@ import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import BodyStatsModal from '@/components/BodyStatsModal';
 import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 
 interface BodyStats {
   id: string;
@@ -176,28 +177,37 @@ export default function Body() {
         profile.primaryGoal && `Goal: ${profile.primaryGoal}`,
       ].filter(Boolean).join(', ');
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 150,
-          system: 'You are a body composition coach. Analyse the user\'s body composition trend data and give 2-3 sentences of specific, encouraging insight. Mention actual numbers. Flag if fat mass is rising while weight drops (muscle loss risk), or praise recomposition if fat is down and SMM is up. Keep it under 60 words. No bullet points.',
-          messages: [{
-            role: 'user',
-            content: `Body composition data (most recent first):\n${contextLines}\n\nProfile: ${profileCtx || 'not provided'}\nTime range viewed: ${timeRange}`,
-          }],
-        }),
-      });
+      const bodyInsightSystem = 'You are a body composition coach. Analyse the user\'s body composition trend data and give 2-3 sentences of specific, encouraging insight. Mention actual numbers. Flag if fat mass is rising while weight drops (muscle loss risk), or praise recomposition if fat is down and SMM is up. Keep it under 60 words. No bullet points.';
+      const bodyInsightContent = `Body composition data (most recent first):\n${contextLines}\n\nProfile: ${profileCtx || 'not provided'}\nTime range viewed: ${timeRange}`;
 
-      if (!response.ok) throw new Error(`API error ${response.status}`);
-      const data = await response.json();
-      const insight = data.content?.[0]?.text?.trim() || '';
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 150,
+      //     system: bodyInsightSystem,
+      //     messages: [{ role: 'user', content: bodyInsightContent }],
+      //   }),
+      // });
+      // if (!response.ok) throw new Error(`API error ${response.status}`);
+      // const data = await response.json();
+      // const insight = data.content?.[0]?.text?.trim() || '';
+
+      const { text: bodyInsightResult } = await callAI({
+        model: 'gemini-flash-lite-latest',
+        systemInstruction: bodyInsightSystem,
+        contents: bodyInsightContent,
+        maxTokens: 150,
+        thinkingBudget: 0,
+      });
+      const insight = bodyInsightResult.trim();
       if (!insight) throw new Error('Empty response');
 
       const generatedAt = new Date().toISOString();

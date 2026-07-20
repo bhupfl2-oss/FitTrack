@@ -1,5 +1,6 @@
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 
 export interface MuscleResult {
   name: string;
@@ -71,20 +72,7 @@ async function classifyExercisesWithAI(
 
   try {
     const exerciseList = exercises.map(e => `${e.name}: ${e.setCount} sets`).join('\n');
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 600,
-        messages: [{
-          role: 'user',
-          content: `Classify each exercise below into a PRIMARY muscle group, and optionally a SECONDARY muscle group if the exercise meaningfully works a second muscle. Use standard names: ${STANDARD_MUSCLES}
+    const userContent = `Classify each exercise below into a PRIMARY muscle group, and optionally a SECONDARY muscle group if the exercise meaningfully works a second muscle. Use standard names: ${STANDARD_MUSCLES}
 
 Exercises:
 ${exerciseList}
@@ -96,14 +84,33 @@ Rules:
 - Be consistent: the same exercise name should always get the same classification
 
 Return ONLY this JSON, no markdown, no other text:
-{"exercises":[{"name":"Incline Dumbbell Press","primaryMuscle":"Chest","primarySets":3,"secondaryMuscle":"Shoulders","secondarySets":3,"category":null}]}`,
-        }],
-      }),
-    });
+{"exercises":[{"name":"Incline Dumbbell Press","primaryMuscle":"Chest","primarySets":3,"secondaryMuscle":"Shoulders","secondarySets":3,"category":null}]}`;
 
-    if (!response.ok) return result;
-    const data = await response.json();
-    const text = data.content?.[0]?.text || '';
+    // ROLLBACK: previous Anthropic implementation
+    // const response = await fetch('https://api.anthropic.com/v1/messages', {
+    //   method: 'POST',
+    //   headers: {
+    //     'Content-Type': 'application/json',
+    //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+    //     'anthropic-version': '2023-06-01',
+    //     'anthropic-dangerous-direct-browser-access': 'true',
+    //   },
+    //   body: JSON.stringify({
+    //     model: 'claude-sonnet-4-6',
+    //     max_tokens: 600,
+    //     messages: [{ role: 'user', content: userContent }],
+    //   }),
+    // });
+    // if (!response.ok) return result;
+    // const data = await response.json();
+    // const text = data.content?.[0]?.text || '';
+
+    const { text } = await callAI({
+      model: 'gemini-flash-lite-latest',
+      contents: userContent,
+      maxTokens: 600,
+      thinkingBudget: 0,
+    });
     const parsed = JSON.parse(text.trim());
 
     for (const item of parsed.exercises ?? []) {
@@ -137,20 +144,7 @@ export async function estimateCaloriesBurned(
       })
       .join('\n');
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 200,
-        messages: [{
-          role: 'user',
-          content: `You are a fitness calorie estimator. Calculate the actual calories burned for this specific workout.
+    const userContent = `You are a fitness calorie estimator. Calculate the actual calories burned for this specific workout.
 
 Template: ${templateName}
 Duration: ${Math.round(durationMins)} minutes
@@ -166,14 +160,33 @@ Instructions:
 - Return a realistic, varied estimate — it will almost never be exactly 320.
 
 Respond with ONLY valid JSON (no markdown, no explanation):
-{"caloriesBurned": <your_calculated_integer>}`,
-        }],
-      }),
-    });
+{"caloriesBurned": <your_calculated_integer>}`;
 
-    if (!response.ok) return null;
-    const data = await response.json();
-    const raw = data.content?.[0]?.text || '';
+    // ROLLBACK: previous Anthropic implementation
+    // const response = await fetch('https://api.anthropic.com/v1/messages', {
+    //   method: 'POST',
+    //   headers: {
+    //     'Content-Type': 'application/json',
+    //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+    //     'anthropic-version': '2023-06-01',
+    //     'anthropic-dangerous-direct-browser-access': 'true',
+    //   },
+    //   body: JSON.stringify({
+    //     model: 'claude-sonnet-4-6',
+    //     max_tokens: 200,
+    //     messages: [{ role: 'user', content: userContent }],
+    //   }),
+    // });
+    // if (!response.ok) return null;
+    // const data = await response.json();
+    // const raw = data.content?.[0]?.text || '';
+
+    const { text: raw } = await callAI({
+      model: 'gemini-flash-lite-latest',
+      contents: userContent,
+      maxTokens: 200,
+      thinkingBudget: 0,
+    });
     console.log('[estimateCaloriesBurned] raw response:', raw);
     // Extract the number directly — avoids JSON.parse failures when Claude adds reasoning text
     const match = raw.match(/"caloriesBurned"\s*:\s*(\d+)/);

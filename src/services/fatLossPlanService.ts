@@ -4,6 +4,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { cleanData } from '@/lib/cleanData';
+import { callAI } from '@/lib/callAI';
 import { saveGoals, getGoals } from '@/services/goalsService';
 import type {
   GoalPlan, GoalPlanType, GoalPlanStatus, FatLossPlanDay, FatLossSessionType,
@@ -42,6 +43,8 @@ export interface FatLossPlanScalarFields {
   targetValue?: number;
   daySplit?: { runDays: number; gymDays: number } | null;
   gymSplitPattern?: string[] | null;
+  // Persist-only — generateFatLossPlan ignores this; persistFatLossPlan uses it.
+  regenerationsUsed?: number;
 }
 
 export type GenerateFatLossPlanInput = FatLossPlanScalarFields;
@@ -150,19 +153,9 @@ export async function generateFatLossPlan(
     }
   }
 
-  // ── Step 4: call Claude API ─────────────────────────────────────────────
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 8000,
-      system: `You are an expert fat-loss coach building a day-by-day plan alternating cardio, strength, and rest sessions, each with a daily calorie target. You will be given a user's profile, recent body composition trend, recent training history, their day-split preference, and their target metric.
+  // ── Step 4: call Gemini via the callAI proxy ────────────────────────────
+  const model = 'gemini-flash-latest';
+  const systemInstruction = `You are an expert fat-loss coach building a day-by-day plan alternating cardio, strength, and rest sessions, each with a daily calorie target. You will be given a user's profile, recent body composition trend, recent training history, their day-split preference, and their target metric.
 
 Consider:
 - Calorie targets should support gradual, sustainable fat loss (a moderate deficit, never extreme) — vary day to day around a sensible weekly average rather than a flat number every day (e.g. slightly higher on strength days, slightly lower on rest days is a reasonable pattern, but use judgment)
@@ -174,10 +167,8 @@ Structure the plan in phases across its full duration — you decide how many ph
 
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
 {"days":[{"dayIndex":0,"sessionType":"cardio|strength|rest","targetCalories":number,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
-The "days" array must include exactly one entry for every dayIndex given in DAY SKELETON below — no more, no fewer.`,
-      messages: [{
-        role: 'user',
-        content: `TARGET: ${targetStr}
+The "days" array must include exactly one entry for every dayIndex given in DAY SKELETON below — no more, no fewer.`;
+  const userContent = `TARGET: ${targetStr}
 TODAY: ${startDate}
 PLAN END DATE: ${targetDate}
 PLAN LENGTH: ${skeleton.length} days (~${Math.round(skeleton.length / 7)} weeks) — use this to decide how many phases the plan needs
@@ -196,21 +187,58 @@ ${sessionsStr}
 DAY SKELETON (dayIndex — fill in sessionType/targetCalories/note for each):
 ${skeleton.map(s => `day ${s.dayIndex}`).join('\n')}
 ${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing phase-progression requirements above.\n` : ''}
-Build the fat-loss plan.`,
-      }],
-    }),
+Build the fat-loss plan.`;
+
+  // ROLLBACK: previous Anthropic implementation
+  // const response = await fetch('https://api.anthropic.com/v1/messages', {
+  //   method: 'POST',
+  //   headers: {
+  //     'Content-Type': 'application/json',
+  //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+  //     'anthropic-version': '2023-06-01',
+  //     'anthropic-dangerous-direct-browser-access': 'true',
+  //   },
+  //   body: JSON.stringify({
+  //     model: 'claude-sonnet-4-6',
+  //     max_tokens: 8000,
+  //     system: systemInstruction,
+  //     messages: [{ role: 'user', content: userContent }],
+  //   }),
+  // });
+  // if (!response.ok) {
+  //   console.warn('[FatLossPlan] AI request failed:', response.status);
+  //   throw new Error(`AI request failed with status ${response.status}`);
+  // }
+  // const data = await response.json();
+  // const raw = data.content?.[0]?.text ?? '';
+  // const usage = { inputTokens: data.usage?.input_tokens ?? 0, outputTokens: data.usage?.output_tokens ?? 0 };
+
+  const { text: raw, usage } = await callAI({
+    model,
+    systemInstruction,
+    contents: userContent,
+    maxTokens: 8000,
   });
 
-  if (!response.ok) {
-    console.warn('[FatLossPlan] AI request failed:', response.status);
-    throw new Error(`AI request failed with status ${response.status}`);
+  // Best-effort usage log — must never block plan generation. Written via a
+  // direct addDoc (not cleanData()) since cleanData() strips serverTimestamp()
+  // sentinels down to plain objects (known bug, out of scope to fix here).
+  try {
+    await addDoc(collection(db, 'users', uid, 'aiUsageLogs'), {
+      callType: feedback ? 'fatloss_plan_regenerate' : 'fatloss_plan_generate',
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      model,
+      planId: null, // pre-persist draft — no plan id exists yet at this point
+      createdAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn('[FatLossPlan] Failed to write usage log:', e);
   }
 
   let aiSummary = '';
   let filledDays: Map<number, { sessionType: FatLossSessionType; targetCalories: number; note: string }>;
   try {
-    const data = await response.json();
-    const raw = data.content?.[0]?.text ?? '';
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON object found in AI response');
     const parsed = JSON.parse(jsonMatch[0]) as {
@@ -284,6 +312,7 @@ export async function persistFatLossPlan(
     targetDate: generated.targetDate,
     hasStructuredPlan: true,
     weeklyPlan: generated.weeklyPlan,
+    regenerationsUsed: fields.regenerationsUsed ?? 0,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };

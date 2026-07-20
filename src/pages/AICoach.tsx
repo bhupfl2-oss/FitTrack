@@ -14,9 +14,10 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI, type ContentTurn } from '@/lib/callAI';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
-import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, type RacePlan, type RaceType, type GeneratedRacePlan } from '@/services/racePlanService';
-import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode } from '@/services/goalPlansService';
+import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, type RacePlan, type RaceType, type RunType, type GeneratedRacePlan } from '@/services/racePlanService';
+import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode, type FatLossSessionType, type FatLossPlanDay } from '@/services/goalPlansService';
 import { generateFatLossPlan, persistFatLossPlan, type GeneratedFatLossPlan } from '@/services/fatLossPlanService';
 
 interface Message {
@@ -64,6 +65,12 @@ interface GoalPlanProposal {
   daySplit?: { runDays: number; gymDays: number } | null;
   gymSplitPattern?: string[] | null;
   assumptions?: string[];
+  // Regenerate-with-feedback loop (step 4) — lives only in this in-memory
+  // draft (no plan doc is ever updated in place; persist always creates a new
+  // doc). Seeded from the replaced plan's persisted regenerationsUsed (if any)
+  // at proposal creation, incremented per regenerate, and written onto the
+  // new doc's regenerationsUsed field at persist time — see confirmProposal.
+  regenerationCount: number;
 }
 
 interface PendingGoalProposal {
@@ -95,6 +102,58 @@ const describeGoalPlan = (gp: GoalPlan): string => {
   }
   return gp.routineDescription || 'Your routine';
 };
+
+// ── Plan-body preview (race + fat-loss regenerate-with-feedback loop) ──────
+
+interface PreviewDay {
+  date: string;
+  typeLabel: string;
+  typeDotClass: string;
+  note: string;
+  keyNumber: string;
+}
+
+// Same color family RunnerPlanView's RUN_TYPE_STYLES uses for race day types,
+// as a single dot rather than a full bg/border badge here.
+const RACE_TYPE_DOT: Record<RunType, string> = {
+  recovery: 'bg-emerald-400',
+  tempo: 'bg-orange-400',
+  long_run: 'bg-blue-400',
+  intervals: 'bg-purple-400',
+  race: 'bg-red-400',
+  rest: 'bg-slate-600',
+};
+const RACE_TYPE_LABEL: Record<RunType, string> = {
+  recovery: 'Recovery',
+  tempo: 'Tempo',
+  long_run: 'Long run',
+  intervals: 'Intervals',
+  race: 'Race',
+  rest: 'Rest',
+};
+const FAT_LOSS_TYPE_DOT: Record<FatLossSessionType, string> = {
+  cardio: 'bg-blue-400',
+  strength: 'bg-purple-400',
+  rest: 'bg-slate-600',
+};
+const FAT_LOSS_TYPE_LABEL: Record<FatLossSessionType, string> = {
+  cardio: 'Cardio',
+  strength: 'Strength',
+  rest: 'Rest',
+};
+
+// fatLossPlanService's weeklyPlan is a flat day array (no weekNumber field) —
+// chunked here into groups of 7 purely for pagination display, not stored.
+function chunkFatLossWeeklyPlan(days: FatLossPlanDay[]): FatLossPlanDay[][] {
+  const chunks: FatLossPlanDay[][] = [];
+  for (let i = 0; i < days.length; i += 7) chunks.push(days.slice(i, i + 7));
+  return chunks;
+}
+
+function formatPreviewDayLabel(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  return `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${d.getDate()}`;
+}
 
 const quickChips: Record<string, string[]> = {
   workout: ["Suggest today's workout", "Why is my SMM dropping?", "How many days rest?"],
@@ -256,6 +315,19 @@ export default function AICoach() {
   const [generatingPlan, setGeneratingPlan] = useState(false);
   const [savingProposal, setSavingProposal] = useState(false);
   const [proposalError, setProposalError] = useState<string | null>(null);
+  // Distinct from generatingPlan on purpose — generatingPlan today only ever
+  // gates the standalone "Generating your plan…" bubble that appears BEFORE
+  // pendingProposal exists (first generation). Reusing it for regenerate
+  // would still leave the confirm card visible (the two blocks aren't
+  // nested), but it would conflate two different UI moments and prevent
+  // localizing the in-progress state to the regenerate button/preview
+  // itself, where the user can see the previous plan is being replaced.
+  const [regeneratingPlan, setRegeneratingPlan] = useState(false);
+  const [regenerateFeedback, setRegenerateFeedback] = useState('');
+  // 1-indexed "week" page for the plan-body preview — reset to 1 whenever
+  // the currently-previewed generated plan's identity changes (see effect
+  // below), which covers both first generation and every regenerate.
+  const [previewWeekIndex, setPreviewWeekIndex] = useState(1);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const DAILY_LIMIT = 10;
@@ -479,7 +551,7 @@ export default function AICoach() {
         // Load daily usage count
         try {
           const usageSnap = await getDoc(doc(db, 'users', user.uid, 'aiUsage', 'coach'));
-          const today = new Date().toISOString().split('T')[0];
+          const today = todayLocalStr();
           if (usageSnap.exists() && usageSnap.data().date === today) {
             setMessageCount(usageSnap.data().count || 0);
           } else {
@@ -553,42 +625,58 @@ export default function AICoach() {
 
     const generateOpener = async () => {
       setLoading(true);
-      try {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
-            max_tokens: 400,
-            system: `You are a personal health coach. ${openerPrompts[topic] || openerPrompts.general}
+      const systemInstruction = `You are a personal health coach. ${openerPrompts[topic] || openerPrompts.general}
 
 USER CONTEXT:
-${systemContext}`,
-            messages: [],
-          }),
+${systemContext}`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 400,
+      //     system: systemInstruction,
+      //     messages: [],
+      //   }),
+      // });
+      // if (response.ok) {
+      //   const data = await response.json();
+      //   const text = data.content?.[0]?.text || 'How can I help you today?';
+      //   ...
+      // } else {
+      //   setMessages([{ role: 'assistant', content: `How can I help you today?` }]);
+      // }
+
+      try {
+        // Anthropic's call used an empty messages array with all context in
+        // `system` — Gemini's generateContent requires non-empty contents, so
+        // a minimal placeholder trigger stands in for the (nonexistent) user
+        // turn; the actual instructions live entirely in systemInstruction.
+        const { text } = await callAI({
+          model: 'gemini-flash-latest',
+          systemInstruction,
+          contents: 'Generate the opening message.',
+          maxTokens: 400,
+          thinkingBudget: 0,
         });
-        if (response.ok) {
-          const data = await response.json();
-          const text = data.content?.[0]?.text || 'How can I help you today?';
-          setMessages([{ role: 'assistant', content: text }]);
-          // increment opener count
-          const newCount = messageCount + 1;
-          setMessageCount(newCount);
-          if (user) {
-            try {
-              await setDoc(doc(db, 'users', user.uid, 'aiUsage', 'coach'), {
-                date: new Date().toISOString().split('T')[0],
-                count: newCount,
-              });
-            } catch (_) {}
-          }
-        } else {
-          setMessages([{ role: 'assistant', content: `How can I help you today?` }]);
+        setMessages([{ role: 'assistant', content: text || 'How can I help you today?' }]);
+        // increment opener count
+        const newCount = messageCount + 1;
+        setMessageCount(newCount);
+        if (user) {
+          try {
+            await setDoc(doc(db, 'users', user.uid, 'aiUsage', 'coach'), {
+              date: todayLocalStr(),
+              count: newCount,
+            });
+          } catch (_) {}
         }
       } catch (e) {
         setMessages([{ role: 'assistant', content: `How can I help you today?` }]);
@@ -601,6 +689,15 @@ ${systemContext}`,
       generateOpener();
     }
   }, [contextLoaded, systemContext, topic, messages.length, contextData, prefill]);
+
+  // Reset the plan-preview pagination and feedback textarea whenever the
+  // currently-previewed generated plan's identity changes — covers both the
+  // first generation (undefined → object) and every regenerate (object →
+  // new object), without needing to set these explicitly in every call site.
+  useEffect(() => {
+    setPreviewWeekIndex(1);
+    setRegenerateFeedback('');
+  }, [pendingProposal?.plan?.generatedRacePlan, pendingProposal?.plan?.generatedFatLossPlan]);
 
   const detectWorkoutSuggestion = (text: string): { name: string; sets: number; reps: number }[] | null => {
     const lines = text.split('\n');
@@ -693,25 +790,45 @@ ${GOAL_UPDATE_INSTRUCTIONS}
 USER CONTEXT:
 ${systemContext}`;
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          system: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
-          messages: conversationHistory,
-        }),
-      });
+      // Gemini requires the turn sequence to start with role 'user' (unlike
+      // Anthropic, which tolerated this app's leading assistant-role opener
+      // greeting) — strip any leading non-user turns before mapping, since
+      // the canned opener carries no information the model needs to retain.
+      const firstUserIdx = conversationHistory.findIndex(m => m.role === 'user');
+      const geminiContents: ContentTurn[] = (firstUserIdx === -1 ? [] : conversationHistory.slice(firstUserIdx))
+        .map(m => ({
+          role: m.role === 'assistant' ? 'model' as const : 'user' as const,
+          parts: [{ text: m.content }],
+        }));
 
-      if (!response.ok) throw new Error('AI request failed');
-      const data = await response.json();
-      const rawText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 500,
+      //     system: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
+      //     messages: conversationHistory,
+      //   }),
+      // });
+      // if (!response.ok) throw new Error('AI request failed');
+      // const data = await response.json();
+      // const rawText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
+
+      const { text: rawTextResult } = await callAI({
+        model: 'gemini-flash-latest',
+        systemInstruction: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
+        contents: geminiContents,
+        maxTokens: 500,
+        thinkingBudget: 0,
+      });
+      const rawText = rawTextResult || 'Sorry, I had trouble responding. Try again?';
 
       // Structured goal-update block: the model emits this only when it's
       // recommending a changed target, never when restating logged intake.
@@ -787,6 +904,16 @@ ${systemContext}`;
               }
             }
 
+            // Seed the regeneration count from the plan this draft would
+            // replace (if any, and of the same kind) — so a plan that already
+            // used its free regeneration doesn't get a fresh allowance just
+            // because the user re-opened the goal-intake flow.
+            const seededRegenerationCount = goalPlanKind === 'race'
+              ? contextData?.racePlan?.regenerationsUsed ?? 0
+              : goalPlanKind === 'performance_target' && wantsStructuredPlan === true && contextData?.activeGoalPlan?.type === 'performance_target' && contextData.activeGoalPlan.hasStructuredPlan
+                ? contextData.activeGoalPlan.regenerationsUsed ?? 0
+                : 0;
+
             setPendingProposal({
               plan: {
                 goalPlanKind, raceType, raceName, raceDate, targetFinishTime, customDistanceKm,
@@ -794,6 +921,7 @@ ${systemContext}`;
                 metric, targetValue, wantsStructuredPlan, generatedFatLossPlan,
                 routineDescription, trackMode, daySplit, gymSplitPattern,
                 assumptions: assumptions ?? [],
+                regenerationCount: seededRegenerationCount,
               },
               nutritionUpdate: Object.keys(numericFields).length > 0 ? numericFields : null,
               conflict,
@@ -819,7 +947,7 @@ ${systemContext}`;
       if (user) {
         try {
           await setDoc(doc(db, 'users', user.uid, 'aiUsage', 'coach'), {
-            date: new Date().toISOString().split('T')[0],
+            date: todayLocalStr(),
             count: newCount,
           });
         } catch (_) {}
@@ -856,6 +984,77 @@ ${systemContext}`;
   const cancelProposal = () => {
     setPendingProposal(null);
     setProposalError(null);
+  };
+
+  // Fresh regenerate, not true revision — the feedback is appended as an
+  // extra instruction on the same "build from scratch" prompt (per locked
+  // decision), not serialized against the previous plan. Reads the intake
+  // fields straight off pendingProposal.plan at call time, so any edits made
+  // via the EditableRow fields before hitting regenerate are honored too.
+  const regeneratePlanWithFeedback = async () => {
+    if (!user || !pendingProposal?.plan) return;
+    const feedback = regenerateFeedback.trim();
+    if (!feedback) return; // no empty-feedback regenerate calls — each is a billed AI call
+    const p = pendingProposal.plan;
+
+    // Fresh-read the plan this draft would replace right before the call —
+    // same "state could be stale" defensive pattern confirmProposal uses —
+    // rather than trusting local state that may be minutes old. Falls back to
+    // the in-memory count when there's no persisted plan yet (brand new draft).
+    let effectiveRegenerationsUsed = p.regenerationCount;
+    if (p.goalPlanKind === 'race') {
+      const freshRacePlan = await getActiveRacePlan(user.uid);
+      if (freshRacePlan) effectiveRegenerationsUsed = freshRacePlan.regenerationsUsed ?? 0;
+    } else if (p.goalPlanKind === 'performance_target' && p.wantsStructuredPlan) {
+      const freshGoalPlan = await getActiveGoalPlan(user.uid);
+      if (freshGoalPlan?.type === 'performance_target' && freshGoalPlan.hasStructuredPlan) {
+        effectiveRegenerationsUsed = freshGoalPlan.regenerationsUsed ?? 0;
+      }
+    }
+    // Soft cap — this only warns, it never blocks. The user always gets to
+    // proceed, so alert() (ack-only) is used rather than confirm() (which
+    // would imply a Cancel path that doesn't actually exist here).
+    if (effectiveRegenerationsUsed >= 1) {
+      window.alert("You've already used your one free regeneration for this plan. Further regenerations aren't guaranteed to stay free.");
+    }
+
+    setRegeneratingPlan(true);
+    setProposalError(null);
+    try {
+      if (p.goalPlanKind === 'race' && p.raceType && p.raceName && p.raceDate) {
+        const generatedRacePlan = await generateRacePlanDraft(
+          user.uid,
+          {
+            raceType: p.raceType,
+            raceName: p.raceName,
+            raceDate: p.raceDate,
+            targetFinishTime: p.targetFinishTime ?? undefined,
+            customDistanceKm: p.customDistanceKm ?? undefined,
+          },
+          feedback
+        );
+        setPendingProposal(prev => prev?.plan ? {
+          ...prev,
+          plan: { ...prev.plan, generatedRacePlan, regenerationCount: prev.plan.regenerationCount + 1 },
+        } : prev);
+      } else if (p.goalPlanKind === 'performance_target' && p.wantsStructuredPlan) {
+        const generatedFatLossPlan = await generateFatLossPlan(
+          user.uid,
+          { metric: p.metric, targetValue: p.targetValue, daySplit: p.daySplit, gymSplitPattern: p.gymSplitPattern },
+          feedback
+        );
+        setPendingProposal(prev => prev?.plan ? {
+          ...prev,
+          plan: { ...prev.plan, generatedFatLossPlan, regenerationCount: prev.plan.regenerationCount + 1 },
+        } : prev);
+      }
+      setRegenerateFeedback('');
+    } catch (e) {
+      console.error('[GoalPlan] Regeneration failed:', e);
+      setProposalError("Couldn't regenerate the plan. Please try again.");
+    } finally {
+      setRegeneratingPlan(false);
+    }
   };
 
   // Bypasses saveGoals's active-goal-plan conflict check on purpose — that
@@ -897,6 +1096,7 @@ ${systemContext}`;
         await persistRacePlan(user.uid, p.generatedRacePlan, {
           createdBy: 'ai_coach',
           gymSplitPattern: p.gymSplitPattern ?? null,
+          regenerationsUsed: p.regenerationCount,
         });
       } else {
         if (freshRacePlan) {
@@ -908,6 +1108,7 @@ ${systemContext}`;
             targetValue: p.targetValue,
             daySplit: p.daySplit ?? null,
             gymSplitPattern: p.gymSplitPattern ?? null,
+            regenerationsUsed: p.regenerationCount,
           });
         } else {
           await createGoalPlan(user.uid, {
@@ -945,6 +1146,37 @@ ${systemContext}`;
 
   const hasUserSent = messages.some(m => m.role === 'user');
   const chips = quickChips[topic] || quickChips.general;
+
+  // ── Plan-body preview data (shown for both race + fat-loss whenever a
+  // generated plan exists in pendingProposal) ─────────────────────────────
+  let previewKind: 'race' | 'fat_loss' | null = null;
+  let previewPages: PreviewDay[][] = [];
+  const previewRacePlan = pendingProposal?.plan?.generatedRacePlan;
+  const previewFatLossPlan = pendingProposal?.plan?.generatedFatLossPlan;
+  if (previewRacePlan) {
+    previewKind = 'race';
+    previewPages = previewRacePlan.weeklyPlan.map(week => week.days.map(d => ({
+      date: d.date,
+      typeLabel: RACE_TYPE_LABEL[d.runType],
+      typeDotClass: RACE_TYPE_DOT[d.runType],
+      note: d.note,
+      keyNumber: d.targetDistanceKm != null
+        ? `${d.targetDistanceKm}km${d.targetPaceMinPerKm != null ? ` · ${d.targetPaceMinPerKm.toFixed(2)}/km` : ''}`
+        : '',
+    })));
+  } else if (previewFatLossPlan) {
+    previewKind = 'fat_loss';
+    previewPages = chunkFatLossWeeklyPlan(previewFatLossPlan.weeklyPlan).map(week => week.map(d => ({
+      date: d.date,
+      typeLabel: FAT_LOSS_TYPE_LABEL[d.sessionType],
+      typeDotClass: FAT_LOSS_TYPE_DOT[d.sessionType],
+      note: d.note,
+      keyNumber: `${d.targetCalories} kcal`,
+    })));
+  }
+  const totalPreviewPages = previewPages.length;
+  const clampedPreviewWeekIndex = Math.min(Math.max(previewWeekIndex, 1), Math.max(totalPreviewPages, 1));
+  const currentPreviewDays = previewPages[clampedPreviewWeekIndex - 1] ?? [];
 
   const contextChips: string[] = [];
   if (contextData && contextData.profile) contextChips.push('Profile');
@@ -1100,6 +1332,76 @@ ${systemContext}`;
             {pendingProposal.plan.assumptions && pendingProposal.plan.assumptions.length > 0 && (
               <div className="mt-2 text-[10px] text-slate-500 italic">
                 Assumed: {pendingProposal.plan.assumptions.join(' · ')}
+              </div>
+            )}
+
+            {previewKind && (
+              <div className="mt-3 pt-3 border-t border-slate-700/50">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
+                    Plan preview — Week {clampedPreviewWeekIndex} of {totalPreviewPages}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewWeekIndex(n => Math.max(1, n - 1))}
+                      disabled={clampedPreviewWeekIndex === 1}
+                      className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors text-xs px-1"
+                    >
+                      ←
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewWeekIndex(n => Math.min(totalPreviewPages, n + 1))}
+                      disabled={clampedPreviewWeekIndex === totalPreviewPages}
+                      className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors text-xs px-1"
+                    >
+                      →
+                    </button>
+                  </div>
+                </div>
+
+                <div className={`space-y-1 transition-opacity ${regeneratingPlan ? 'opacity-40 pointer-events-none' : ''}`}>
+                  {currentPreviewDays.map(day => (
+                    <div key={day.date} className="flex items-center gap-2 py-1">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${day.typeDotClass}`} />
+                      <span className="text-[10px] text-slate-500 flex-shrink-0">{formatPreviewDayLabel(day.date)}</span>
+                      <span className="text-xs text-slate-300 flex-shrink-0">{day.typeLabel}</span>
+                      <span className="text-[10px] text-slate-500 truncate flex-1">{day.note}</span>
+                      <span className="text-xs text-white font-medium flex-shrink-0">{day.keyNumber}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {regeneratingPlan && (
+                  <div className="text-[10px] text-emerald-400 mt-1">Regenerating…</div>
+                )}
+
+                <div className="mt-3">
+                  <textarea
+                    value={regenerateFeedback}
+                    onChange={e => setRegenerateFeedback(e.target.value)}
+                    placeholder="e.g. make Sundays full rest, reduce long-run distance by 20%…"
+                    rows={2}
+                    disabled={regeneratingPlan}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                  />
+                  <div className="flex items-center justify-between mt-2">
+                    <span className={`text-[10px] ${pendingProposal.plan.regenerationCount >= 1 ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {pendingProposal.plan.regenerationCount >= 1
+                        ? "Free regeneration used · further regenerations aren't guaranteed to stay free"
+                        : '1 free regeneration available for this plan'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={regeneratePlanWithFeedback}
+                      disabled={!regenerateFeedback.trim() || regeneratingPlan}
+                      className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      {regeneratingPlan ? 'Regenerating…' : 'Regenerate with feedback'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 

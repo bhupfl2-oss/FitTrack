@@ -7,6 +7,7 @@ import {
   collection, query, orderBy, limit, getDocs, where, getDoc, doc, setDoc,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
@@ -684,10 +685,14 @@ export default function Home() {
       } catch (e) { console.error('Error loading nutrition for insights:', e); }
       if (labResults.length > 0) { const latest = labResults[0]; if (latest.results && Array.isArray(latest.results)) { const outOfRange = latest.results.filter((test: LabTest) => { const key = test.testName.toLowerCase().replace(/\s+/g, ''); const range = labRanges[key]; if (!range) return false; if (key === 'hdl') return test.value < range.min; return test.value < range.min || test.value > range.max; }); contextParts.push(outOfRange.length > 0 ? `LABS (${outOfRange.length} out of range):\n` + outOfRange.map((t: LabTest) => `- ${t.testName}: ${t.value} ${t.unit}`).join('\n') : 'LABS: All markers in range'); } }
       if (muscleAlert) contextParts.push(`MUSCLE ALERT: ${muscleAlert.group} neglected — ${muscleAlert.daysSince} days`);
-      const response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 600, messages: [{ role: 'user', content: `You are a personal health coach. Generate 3 short personalized insights.\n\nUSER DATA:\n${contextParts.join('\n\n')}\n\nReturn ONLY a JSON object, no markdown, no preamble:\n{\n  "workout": "1-2 sentence actionable workout insight",\n  "food": "1-2 sentence food/nutrition insight based on their diet preference and goals",\n  "labs": "1-2 sentence insight based on lab results, or general health tip if no labs"\n}\nRules: be specific, use actual numbers, under 25 words each, respect diet preference, friendly coach tone.` }] }) });
-      if (!response.ok) throw new Error('AI request failed');
-      const data = await response.json();
-      const parsed = JSON.parse(data.content?.[0]?.text || '{}');
+      const homeInsightPrompt = `You are a personal health coach. Generate 3 short personalized insights.\n\nUSER DATA:\n${contextParts.join('\n\n')}\n\nReturn ONLY a JSON object, no markdown, no preamble:\n{\n  "workout": "1-2 sentence actionable workout insight",\n  "food": "1-2 sentence food/nutrition insight based on their diet preference and goals",\n  "labs": "1-2 sentence insight based on lab results, or general health tip if no labs"\n}\nRules: be specific, use actual numbers, under 25 words each, respect diet preference, friendly coach tone.`;
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 600, messages: [{ role: 'user', content: homeInsightPrompt }] }) });
+      // if (!response.ok) throw new Error('AI request failed');
+      // const data = await response.json();
+      // const parsed = JSON.parse(data.content?.[0]?.text || '{}');
+      const { text: homeInsightText } = await callAI({ model: 'gemini-flash-lite-latest', contents: homeInsightPrompt, maxTokens: 600, thinkingBudget: 0 });
+      const parsed = JSON.parse(homeInsightText || '{}');
       const insights = { workout: parsed.workout || '', food: parsed.food || '', labs: parsed.labs || '' };
       setAiInsights(insights);
       await setDoc(cacheRef, { insights, generatedAt: new Date().toISOString(), proteinGoal: profileData?.proteinGoal ?? null });

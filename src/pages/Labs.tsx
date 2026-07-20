@@ -6,6 +6,7 @@ import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import LabsModal from '@/components/LabsModal';
 import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { callAI } from '@/lib/callAI';
 import { cleanData } from '@/lib/cleanData';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { generateHealthPlan, computeTestStatuses, getHealthPlanSummary, type TestStatus } from '@/lib/healthPlan';
@@ -230,29 +231,36 @@ export default function Labs() {
     setInsightLoading(true);
     try {
       const context = buildLabContext();
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
-          messages: [{
-            role: 'user',
-            content: `You are a health coach reviewing someone's lab results. Give a 2-3 sentence personalised insight based on their data. Be specific, reference actual values. End with one clear action.
+      const userContent = `You are a health coach reviewing someone's lab results. Give a 2-3 sentence personalised insight based on their data. Be specific, reference actual values. End with one clear action.
 
 ${context}
 
-Response: plain text only, no markdown, no headers.`,
-          }],
-        }),
+Response: plain text only, no markdown, no headers.`;
+
+      // ROLLBACK: previous Anthropic implementation
+      // const response = await fetch('https://api.anthropic.com/v1/messages', {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+      //     'anthropic-version': '2023-06-01',
+      //     'anthropic-dangerous-direct-browser-access': 'true',
+      //   },
+      //   body: JSON.stringify({
+      //     model: 'claude-sonnet-4-6',
+      //     max_tokens: 300,
+      //     messages: [{ role: 'user', content: userContent }],
+      //   }),
+      // });
+      // const data = await response.json();
+      // const text = data.content?.[0]?.text || '';
+
+      const { text } = await callAI({
+        model: 'gemini-flash-lite-latest',
+        contents: userContent,
+        maxTokens: 300,
+        thinkingBudget: 0,
       });
-      const data = await response.json();
-      const text = data.content?.[0]?.text || '';
       const now = new Date().toISOString();
       setInsightText(text);
       setInsightGeneratedAt(now);
