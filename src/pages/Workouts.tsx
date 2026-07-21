@@ -10,7 +10,7 @@ import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { callAI, type ContentTurn } from '@/lib/callAI';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
-import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation } from '@/lib/getWorkoutRecommendation';
+import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 import { getActiveRacePlan, type RacePlan, type PlanDay } from '@/services/racePlanService';
@@ -112,6 +112,17 @@ function formatDateShort(dateStr: string): string {
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+// Mirrors racePlanService.ts's getGymSplitForDate ordinal-counting logic, but
+// operates on the days array already fetched by getWeekSchedule instead of a
+// full RacePlan, since that's all the week strip has in hand.
+function restGymSplitForDay(days: PlanDay[], gymSplitPattern: string[] | null, date: string): string | null {
+  if (!gymSplitPattern || gymSplitPattern.length === 0) return null;
+  const day = days.find(d => d.date === date);
+  if (!day || day.runType !== 'rest') return null;
+  const ordinal = days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
+  return gymSplitPattern[ordinal % gymSplitPattern.length];
+}
+
 // ── Component ──────────────────────────────────────────────────────────────
 export default function Workouts() {
   const navigate = useNavigate();
@@ -137,7 +148,7 @@ export default function Workouts() {
 
   // Week view
   const [weekOffset, setWeekOffset] = useState(0);
-  const [weekSchedule, setWeekSchedule] = useState<PlanDay[] | null>(null);
+  const [weekSchedule, setWeekSchedule] = useState<WeekSchedule | null>(null);
   const [nextWeekAvailable, setNextWeekAvailable] = useState(false);
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
@@ -237,7 +248,7 @@ export default function Workouts() {
       getWeekSchedule(user.uid, weekOffset + 1),
     ]).then(([current, next]) => {
       setWeekSchedule(current);
-      setNextWeekAvailable(!!next && next.length > 0);
+      setNextWeekAvailable(!!next && next.days.length > 0);
     });
   }, [user, weekOffset]);
 
@@ -800,7 +811,7 @@ Rules:
   const weekLabel = weekOffset === 0
     ? 'This Week'
     : weekSchedule
-      ? `${formatDateShort(weekSchedule[0].date)} – ${formatDateShort(weekSchedule[6].date)}`
+      ? `${formatDateShort(weekSchedule.days[0].date)} – ${formatDateShort(weekSchedule.days[6].date)}`
       : 'This Week';
 
   if (loading) return <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center"><div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" /></div>;
@@ -935,17 +946,24 @@ Rules:
             </button>
           </div>
           <div className="flex justify-between gap-1.5">
-            {weekSchedule ? weekSchedule.map(day => {
+            {weekSchedule ? weekSchedule.days.map(day => {
               const meta = RUN_TYPE_META[day.runType];
               const isToday = day.date === todayStr();
               const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
               const Tag = activeRacePlan ? 'button' : 'div';
+              const gymSplit = day.runType === 'rest'
+                ? restGymSplitForDay(weekSchedule.days, weekSchedule.gymSplitPattern, day.date)
+                : null;
               return (
                 <Tag key={day.date}
                   onClick={activeRacePlan ? () => navigate(`/training-plan?date=${day.date}`) : undefined}
                   className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${day.runType === 'rest' ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${activeRacePlan ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}>
                   <span className={`text-[9px] font-mono ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                  <span className="text-sm">{meta.emoji}</span>
+                  {gymSplit ? (
+                    <span className="text-[8px] font-mono text-slate-500">{gymSplit}</span>
+                  ) : (
+                    <span className="text-sm">{meta.emoji}</span>
+                  )}
                 </Tag>
               );
             }) : Array.from({ length: 7 }).map((_, i) => (
