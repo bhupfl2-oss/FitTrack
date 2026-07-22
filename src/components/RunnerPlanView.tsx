@@ -202,7 +202,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
             dayEntry.runType === 'rest' ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
                 <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{dayCardLabel}</span>
-                <div className="text-sm font-semibold text-white mt-1">{restGymSplit ? `Rest day · ${restGymSplit}` : 'Rest day'}</div>
+                <div className="text-sm font-semibold text-white mt-1">{restGymSplit ? `Gym : ${restGymSplit}` : 'Rest day'}</div>
                 {dayEntry.note && <p className="text-xs text-slate-400 mt-1">{dayEntry.note}</p>}
               </div>
             ) : (

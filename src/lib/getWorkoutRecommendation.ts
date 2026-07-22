@@ -400,14 +400,19 @@ function buildRhythmWeek(runDays: number, weekOffset: number): PlanDay[] {
   return days;
 }
 
-export async function getWeekSchedule(uid: string, weekOffset: number): Promise<PlanDay[] | null> {
+export interface WeekSchedule {
+  days: PlanDay[];
+  gymSplitPattern: string[] | null;
+}
+
+export async function getWeekSchedule(uid: string, weekOffset: number): Promise<WeekSchedule | null> {
   const racePlan = await getActiveRacePlan(uid);
   if (racePlan) {
     const currentWeek = getCurrentWeekEntry(racePlan);
     const currentWeekNumber = currentWeek?.weekNumber ?? 1;
     const targetWeekNumber = currentWeekNumber + weekOffset;
     const entry = racePlan.weeklyPlan.find(w => w.weekNumber === targetWeekNumber);
-    return entry ? entry.days : null;
+    return entry ? { days: entry.days, gymSplitPattern: racePlan.gymSplitPattern } : null;
   }
 
   const goalPlan = await getActiveGoalPlan(uid);
@@ -423,13 +428,14 @@ export async function getWeekSchedule(uid: string, weekOffset: number): Promise<
       // startDate–targetDate) keeps its rhythm-computed fallback, exactly as
       // today — this is never all-or-nothing across the week.
       const structuredByDate = new Map(goalPlan.weeklyPlan.map(d => [d.date, d]));
-      return rhythmWeek.map(day => {
+      const days = rhythmWeek.map(day => {
         const structured = structuredByDate.get(day.date);
         return structured ? fatLossDayToPlanDay(structured) : day;
       });
+      return { days, gymSplitPattern: goalPlan.gymSplitPattern };
     }
 
-    return rhythmWeek;
+    return { days: rhythmWeek, gymSplitPattern: goalPlan.gymSplitPattern };
   }
 
   return null;
