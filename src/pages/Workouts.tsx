@@ -11,6 +11,7 @@ import { bumpDataVersion } from '@/lib/dataVersion';
 import { callAI, type ContentTurn } from '@/lib/callAI';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation } from '@/lib/getWorkoutRecommendation';
+import { useAsyncCall } from '@/hooks/useAsyncCall';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 import { getActiveRacePlan, type RacePlan, type PlanDay } from '@/services/racePlanService';
 import { getActiveGoalPlan, type GoalPlan } from '@/services/goalPlansService';
@@ -152,8 +153,7 @@ export default function Workouts() {
   // Workout library state
   const [libraryExpanded, setLibraryExpanded] = useState(false);
   const [libraryTab, setLibraryTab] = useState<'all' | 'mindbody' | 'other'>('all');
-  const [todayRecommendations, setTodayRecommendations] = useState<TaggedRecommendation[]>([]);
-  const [recommendationsLoading, setRecommendationsLoading] = useState(true);
+  const todayRecsCall = useAsyncCall<TaggedRecommendation[]>();
   const [workedOutToday, setWorkedOutToday] = useState(false);
 
   // AI chat state — multi-turn
@@ -191,11 +191,10 @@ export default function Workouts() {
         setWorkedOutToday(fetchedSessions.some(s => s.date === todayStr()));
 
         // AI recommendation — runs after UI is unblocked
-        const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
-        const profile = profileSnap.exists() ? profileSnap.data() : {};
-        getTodayRecommendations(user.uid, fetchedSessions, profile, []).then(recs => {
-          setTodayRecommendations(recs);
-          setRecommendationsLoading(false);
+        todayRecsCall.execute(async () => {
+          const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+          const profile = profileSnap.exists() ? profileSnap.data() : {};
+          return getTodayRecommendations(user.uid, fetchedSessions, profile, []);
         });
 
         // Goal status strip — race plan takes precedence over goalPlans
@@ -1137,10 +1136,20 @@ Rules:
                   {libraryExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
               </div>
-              {!recommendationsLoading ? (
-                todayRecommendations.length > 0 ? (
+              {todayRecsCall.error ? (
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-slate-500">Couldn't load today's workout.</p>
+                  <button
+                    onClick={() => todayRecsCall.retry()}
+                    className="text-[10px] font-mono text-emerald-400 hover:text-emerald-300"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : todayRecsCall.data ? (
+                todayRecsCall.data.length > 0 ? (
                   <div className="divide-y divide-slate-800">
-                    {todayRecommendations.map((rec, i) => (
+                    {todayRecsCall.data.map((rec, i) => (
                       <div key={i} className={`flex items-center justify-between ${i > 0 ? 'pt-3 mt-3' : ''}`}>
                         <div className="flex items-center gap-3">
                           <span className="text-2xl">{rec.emoji}</span>

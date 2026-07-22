@@ -8,6 +8,7 @@ import BodyStatsModal from '@/components/BodyStatsModal';
 import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { callAI } from '@/lib/callAI';
+import { useAsyncCall } from '@/hooks/useAsyncCall';
 
 interface BodyStats {
   id: string;
@@ -130,6 +131,7 @@ export default function Body() {
   const [aiInsight, setAiInsight] = useState<string | null>(null);
   const [aiInsightGeneratedAt, setAiInsightGeneratedAt] = useState<Date | null>(null);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
+  const insightCall = useAsyncCall<string>();
 
   const fetchAiInsight = async (forceRefresh = false) => {
     if (!user) return;
@@ -200,20 +202,25 @@ export default function Body() {
       // const data = await response.json();
       // const insight = data.content?.[0]?.text?.trim() || '';
 
-      const { text: bodyInsightResult } = await callAI({
-        model: 'gemini-flash-lite-latest',
-        systemInstruction: bodyInsightSystem,
-        contents: bodyInsightContent,
-        maxTokens: 150,
-        thinkingBudget: 0,
-      });
-      const insight = bodyInsightResult.trim();
-      if (!insight) throw new Error('Empty response');
+      const insight = await insightCall.execute(async () => {
+        const { text } = await callAI({
+          model: 'gemini-flash-lite-latest',
+          systemInstruction: bodyInsightSystem,
+          contents: bodyInsightContent,
+          maxTokens: 150,
+          thinkingBudget: 0,
+        });
+        const trimmed = text.trim();
+        if (!trimmed) throw new Error('Empty response');
+        return trimmed;
+      }, { callType: 'body_insight', model: 'gemini-flash-lite-latest' });
 
-      const generatedAt = new Date().toISOString();
-      await setDoc(cacheRef, { insight, generatedAt }, { merge: true });
-      setAiInsight(insight);
-      setAiInsightGeneratedAt(new Date(generatedAt));
+      if (insight) {
+        const generatedAt = new Date().toISOString();
+        await setDoc(cacheRef, { insight, generatedAt }, { merge: true });
+        setAiInsight(insight);
+        setAiInsightGeneratedAt(new Date(generatedAt));
+      }
     } catch (e) {
       console.error('AI body insight failed:', e);
     } finally {
@@ -452,6 +459,16 @@ export default function Body() {
                   </p>
                 )}
               </>
+            ) : insightCall.error ? (
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-500">Couldn't load insight.</p>
+                <button
+                  onClick={() => fetchAiInsight(true)}
+                  className="text-[10px] font-mono text-emerald-400 hover:text-emerald-300"
+                >
+                  Retry
+                </button>
+              </div>
             ) : null}
             <button
               onClick={() => navigate('/ai-coach?topic=body')}

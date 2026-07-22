@@ -665,6 +665,7 @@ export async function persistRacePlan(
 // ── Adherence (pure, no Firestore) ──────────────────────────────────────────
 
 function findWeekEntryForDate(plan: RacePlan, dateStr: string): WeeklyPlanEntry | null {
+  if (!plan.weeklyPlan || plan.weeklyPlan.length === 0) return null;
   return plan.weeklyPlan.find(w => w.days.some(d => d.date === dateStr))
     ?? plan.weeklyPlan.find(w => w.days.length > 0 && dateStr >= w.days[0].date && dateStr <= w.days[w.days.length - 1].date)
     ?? null;

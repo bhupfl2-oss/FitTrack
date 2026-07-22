@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { callAI } from '@/lib/callAI';
+import { useAsyncCall } from '@/hooks/useAsyncCall';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
 import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
@@ -470,7 +471,7 @@ export default function Home() {
   const [loadingQuote, setLoadingQuote] = useState<{ text: string; sub: string } | null>(null);
   const quoteCardRef = useRef<HTMLDivElement>(null);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
-  const [todayRecommendation, setTodayRecommendation] = useState<WorkoutRecommendation | null>(null);
+  const todayRecCall = useAsyncCall<WorkoutRecommendation | null>();
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
   const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
@@ -717,11 +718,11 @@ export default function Home() {
         setBodyStats(bodyStatsData); setLoadingQuote(generateLoadingQuote(sessions, bodyStatsData));
 
         // AI workout recommendation — non-blocking, uses cache when available
-        getDoc(doc(db, 'users', user.uid, 'profile', 'data')).then(pSnap => {
+        todayRecCall.execute(async () => {
+          const pSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
           const profile = pSnap.exists() ? pSnap.data() : {};
-          getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2)).then(recs => {
-            if (recs[0]) setTodayRecommendation(recs[0]);
-          });
+          const recs = await getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2));
+          return recs[0] ?? null;
         });
         setLabResults(labsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)));
         const now = new Date(); const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -1002,7 +1003,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-        ) : todayRecommendation ? (
+        ) : todayRecCall.data ? (
           <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
             <div className="flex items-center gap-2 mb-3">
               <Target className="w-3.5 h-3.5 text-emerald-400" />
@@ -1010,22 +1011,35 @@ export default function Home() {
             </div>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-3">
-                <span className="text-2xl">{todayRecommendation.emoji}</span>
+                <span className="text-2xl">{todayRecCall.data.emoji}</span>
                 <div>
-                  <div className="text-base font-semibold text-white">{todayRecommendation.title}</div>
-                  <div className="text-xs text-slate-400 mt-0.5">{todayRecommendation.subtitle}</div>
-                  {todayRecommendation.reason && (
-                    <div className="text-[10px] text-slate-500 italic mt-0.5">{todayRecommendation.reason}</div>
+                  <div className="text-base font-semibold text-white">{todayRecCall.data.title}</div>
+                  <div className="text-xs text-slate-400 mt-0.5">{todayRecCall.data.subtitle}</div>
+                  {todayRecCall.data.reason && (
+                    <div className="text-[10px] text-slate-500 italic mt-0.5">{todayRecCall.data.reason}</div>
                   )}
                 </div>
               </div>
             </div>
             <button
-              onClick={() => ['running', 'walk', 'cycling'].includes(todayRecommendation.type)
+              onClick={() => ['running', 'walk', 'cycling'].includes(todayRecCall.data!.type)
                 ? navigate('/running-session')
-                : navigate('/workout-session', { state: { template: todayRecommendation.type } })}
+                : navigate('/workout-session', { state: { template: todayRecCall.data!.type } })}
               className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium transition-colors">
-              Start {todayRecommendation.title} →
+              Start {todayRecCall.data.title} →
+            </button>
+          </div>
+        ) : todayRecCall.error ? (
+          <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+            <div className="flex items-center gap-2 mb-3">
+              <Target className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-400 text-[10px] font-bold tracking-wider uppercase">Today's Workout</span>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">Couldn't load today's workout.</p>
+            <button
+              onClick={() => todayRecCall.retry()}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white py-2 rounded-lg text-xs font-medium transition-colors">
+              Retry
             </button>
           </div>
         ) : (

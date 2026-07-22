@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { callAI, type ContentTurn } from '@/lib/callAI';
+import { useAsyncCall } from '@/hooks/useAsyncCall';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
 import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, type RacePlan, type RaceType, type RunType, type GeneratedRacePlan } from '@/services/racePlanService';
 import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode, type FatLossSessionType, type FatLossPlanDay } from '@/services/goalPlansService';
@@ -24,6 +25,7 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   showWorkoutLoad?: boolean;
+  isContextError?: boolean;
 }
 
 interface ContextData {
@@ -306,6 +308,7 @@ export default function AICoach() {
   const [contextLoaded, setContextLoaded] = useState(false);
   const [contextData, setContextData] = useState<ContextData | null>(null);
   const [systemContext, setSystemContext] = useState('');
+  const contextCall = useAsyncCall<ContextData>();
   const [messageCount, setMessageCount] = useState(0);
   const [pendingProposal, setPendingProposal] = useState<PendingGoalProposal | null>(null);
   // Separate from pendingProposal on purpose — generateFatLossPlan runs to
@@ -478,12 +481,12 @@ export default function AICoach() {
   };
 
   // Fetch all context data
-  useEffect(() => {
+  const loadContext = () => {
     if (!user) return;
+    setContextLoaded(false);
 
-    const fetchContext = async () => {
-      try {
-        const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
+    const fetchContext = async (): Promise<ContextData> => {
+      const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
         const profile = profileSnap.exists() ? profileSnap.data() : null;
 
         const bodyQuery = query(
@@ -544,11 +547,8 @@ export default function AICoach() {
         ]);
 
         const data: ContextData = { profile, bodyStats, labResults, tests, workoutSessions, nutritionLogs, racePlan, activeGoalPlan };
-        setContextData(data);
-        const ctx = buildContext(data);
-        setSystemContext(ctx);
 
-        // Load daily usage count
+        // Load daily usage count — best-effort, not context-critical
         try {
           const usageSnap = await getDoc(doc(db, 'users', user.uid, 'aiUsage', 'coach'));
           const today = todayLocalStr();
@@ -561,20 +561,35 @@ export default function AICoach() {
           setMessageCount(0);
         }
 
-        setContextLoaded(true);
-      } catch (e) {
-        console.error('Error loading context:', e);
-        setContextLoaded(true);
-      }
+        return data;
     };
 
-    fetchContext();
+    contextCall.execute(fetchContext, { callType: 'ai_coach_context' }).then(data => {
+      if (data) {
+        setContextData(data);
+        setSystemContext(buildContext(data));
+      }
+      setContextLoaded(true);
+    });
+  };
+
+  useEffect(() => {
+    loadContext();
   }, [user]);
 
   // Generate opening message after context loads
   useEffect(() => {
     if (!contextLoaded) return;
     if (messages.length > 0) return;
+
+    if (contextCall.error) {
+      setMessages([{
+        role: 'assistant',
+        content: `Couldn't load your data — check your connection and try again.`,
+        isContextError: true,
+      }]);
+      return;
+    }
 
     const name = contextData?.profile?.name?.split(' ')[0] || 'there';
 
@@ -685,10 +700,8 @@ ${systemContext}`;
       }
     };
 
-    if (systemContext) {
-      generateOpener();
-    }
-  }, [contextLoaded, systemContext, topic, messages.length, contextData, prefill]);
+    generateOpener();
+  }, [contextLoaded, contextCall.error, topic, messages.length, contextData, prefill]);
 
   // Reset the plan-preview pagination and feedback textarea whenever the
   // currently-previewed generated plan's identity changes — covers both the
@@ -1230,6 +1243,14 @@ ${systemContext}`;
                 <div>{renderMarkdown(msg.content)}</div>
               ) : (
                 <div className="whitespace-pre-wrap">{msg.content}</div>
+              )}
+              {msg.isContextError && (
+                <button
+                  onClick={() => { setMessages([]); loadContext(); }}
+                  className="bg-emerald-500 text-white text-xs px-3 py-1.5 rounded-lg mt-2 inline-block hover:bg-emerald-600 transition-colors"
+                >
+                  Retry
+                </button>
               )}
               {msg.showWorkoutLoad && (
                 <button

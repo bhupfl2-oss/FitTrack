@@ -67,7 +67,7 @@ function fallback(sessions: WorkoutSession[]): WorkoutRecommendation {
   const byDate = new Map<string, string[]>();
   for (const s of sessions) {
     const existing = byDate.get(s.date) ?? [];
-    byDate.set(s.date, [...existing, s.template.toLowerCase()]);
+    byDate.set(s.date, [...existing, (s.template ?? '').toLowerCase()]);
   }
   const lastTemplates = byDate.size > 0 ? [...byDate.values()][0] : [];
   const joined = lastTemplates.join(' ');
