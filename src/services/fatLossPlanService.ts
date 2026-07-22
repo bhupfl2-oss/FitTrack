@@ -154,7 +154,7 @@ export async function generateFatLossPlan(
   }
 
   // ── Step 4: call Gemini via the callAI proxy ────────────────────────────
-  const model = 'gemini-flash-latest';
+  const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
   const systemInstruction = `You are an expert fat-loss coach building a day-by-day plan alternating cardio, strength, and rest sessions, each with a daily calorie target. You will be given a user's profile, recent body composition trend, recent training history, their day-split preference, and their target metric.
 
 Consider:

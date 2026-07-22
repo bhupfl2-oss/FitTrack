@@ -267,14 +267,14 @@ Response: plain text only, no markdown, no headers.`;
 
       const text = await insightCall.execute(async () => {
         const { text: raw } = await callAI({
-          model: 'gemini-flash-lite-latest',
+          model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
           contents: userContent,
           maxTokens: 300,
           thinkingBudget: 0,
         });
         if (!raw.trim()) throw new Error('Empty response');
         return raw;
-      }, { callType: 'lab_insight', model: 'gemini-flash-lite-latest' });
+      }, { callType: 'lab_insight', model: 'gemini-3.1-flash-lite' });
 
       if (text) {
         const now = new Date().toISOString();

@@ -170,7 +170,7 @@ What should I do on that day?`;
     // const raw = (data.content?.[0]?.text ?? '').replace(/```json|```/g, '').trim();
 
     const { text: callResult } = await callAI({
-      model: 'gemini-flash-lite-latest',
+      model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       systemInstruction,
       contents: userMessage,
       maxTokens: 250,

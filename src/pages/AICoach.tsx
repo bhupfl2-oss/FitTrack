@@ -675,7 +675,7 @@ ${systemContext}`;
         // a minimal placeholder trigger stands in for the (nonexistent) user
         // turn; the actual instructions live entirely in systemInstruction.
         const { text } = await callAI({
-          model: 'gemini-flash-latest',
+          model: 'gemini-3.5-flash', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
           systemInstruction,
           contents: 'Generate the opening message.',
           maxTokens: 400,
@@ -835,7 +835,7 @@ ${systemContext}`;
       // const rawText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
 
       const { text: rawTextResult } = await callAI({
-        model: 'gemini-flash-latest',
+        model: 'gemini-3.5-flash', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         systemInstruction: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
         contents: geminiContents,
         maxTokens: 500,

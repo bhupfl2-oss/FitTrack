@@ -260,7 +260,7 @@ Rules:
       // const text = data.content?.[0]?.text || '';
 
       const { text } = await callAI({
-        model: 'gemini-flash-lite-latest',
+        model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         contents: chatPrompt,
         maxTokens: 800,
         thinkingBudget: 0,
@@ -346,7 +346,7 @@ Rules:
       // const data = await response.json();
       // const text = data.content?.[0]?.text || '';
 
-      const model = 'gemini-flash-latest';
+      const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       const { text, usage } = await callAI({
         model,
         contents: [
@@ -418,7 +418,7 @@ Replace the zeros with accurate values (fibre is grams of dietary fibre). Includ
       // const text = (data.content?.[0]?.text || '').trim();
 
       const { text: searchText } = await callAI({
-        model: 'gemini-flash-lite-latest',
+        model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         contents: searchPrompt,
         maxTokens: 400,
         thinkingBudget: 0,

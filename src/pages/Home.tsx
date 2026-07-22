@@ -692,7 +692,7 @@ export default function Home() {
       // if (!response.ok) throw new Error('AI request failed');
       // const data = await response.json();
       // const parsed = JSON.parse(data.content?.[0]?.text || '{}');
-      const { text: homeInsightText } = await callAI({ model: 'gemini-flash-lite-latest', contents: homeInsightPrompt, maxTokens: 600, thinkingBudget: 0 });
+      const { text: homeInsightText } = await callAI({ model: 'gemini-3.1-flash-lite', contents: homeInsightPrompt, maxTokens: 600, thinkingBudget: 0 }); // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       const parsed = JSON.parse(homeInsightText || '{}');
       const insights = { workout: parsed.workout || '', food: parsed.food || '', labs: parsed.labs || '' };
       setAiInsights(insights);

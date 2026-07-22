@@ -484,7 +484,7 @@ export async function generateRacePlanDraft(
   }
 
   // ── Step 4: call Gemini via the callAI proxy ────────────────────────────
-  const model = 'gemini-flash-latest';
+  const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
   const systemInstruction = `You are an expert running coach building a periodized training plan. You will be given a runner's profile, recent running history, and a race target. Build a day-by-day plan for every day between today and race day.
 
 Consider:

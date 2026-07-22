@@ -204,7 +204,7 @@ export default function Body() {
 
       const insight = await insightCall.execute(async () => {
         const { text } = await callAI({
-          model: 'gemini-flash-lite-latest',
+          model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
           systemInstruction: bodyInsightSystem,
           contents: bodyInsightContent,
           maxTokens: 150,
@@ -213,7 +213,7 @@ export default function Body() {
         const trimmed = text.trim();
         if (!trimmed) throw new Error('Empty response');
         return trimmed;
-      }, { callType: 'body_insight', model: 'gemini-flash-lite-latest' });
+      }, { callType: 'body_insight', model: 'gemini-3.1-flash-lite' });
 
       if (insight) {
         const generatedAt = new Date().toISOString();

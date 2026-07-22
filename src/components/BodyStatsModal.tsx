@@ -313,7 +313,7 @@ export default function BodyStatsModal({ isOpen, onClose, onSave, editData }: Bo
       // const data = await response.json();
       // const content = data.content?.[0]?.text || '';
 
-      const model = 'gemini-flash-latest';
+      const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       const { text: content, usage } = await callAI({
         model,
         contents: [

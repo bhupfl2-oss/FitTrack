@@ -414,7 +414,7 @@ Return ONLY this JSON, no other text:
         // const data = await response.json();
 
         const { text: pendingActivityResult } = await callAI({
-          model: 'gemini-flash-lite-latest',
+          model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
           contents: pendingActivityPrompt,
           maxTokens: 600,
           thinkingBudget: 0,
@@ -567,7 +567,7 @@ Rules:
       // const text = data.content?.[0]?.text || '';
 
       const { text: callResult } = await callAI({
-        model: 'gemini-flash-latest',
+        model: 'gemini-3.5-flash', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         systemInstruction: systemPrompt,
         contents: geminiContents,
         maxTokens: 800,

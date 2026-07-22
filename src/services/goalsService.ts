@@ -306,7 +306,7 @@ Calculate my optimal daily health goals.`;
     // const raw = data.content?.[0]?.text ?? '';
 
     const { text: raw } = await callAI({
-      model: 'gemini-flash-lite-latest',
+      model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       systemInstruction: goalsSystemInstruction,
       contents: goalsUserContent,
       maxTokens: 600,

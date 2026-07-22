@@ -210,7 +210,7 @@ export default function LabTestDetail() {
       // const interpretation = data.content[0].text;
 
       const { text: interpretation } = await callAI({
-        model: 'gemini-flash-lite-latest',
+        model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         contents: prompt,
         maxTokens: 300,
         thinkingBudget: 0,
