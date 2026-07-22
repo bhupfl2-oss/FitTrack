@@ -291,7 +291,7 @@ Rules:
         : `${savedCount} tests saved successfully.`;
       alert(msg);
       await bumpDataVersion(user.uid);
-      navigate('/labs');
+      navigate('/labs', { state: { justUploaded: true } });
 
     } catch (error) {
       console.error('Error saving tests:', error);

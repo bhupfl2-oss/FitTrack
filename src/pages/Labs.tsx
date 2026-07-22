@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Plus, AlertCircle, ChevronRight, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
+import { useAsyncCall } from '@/hooks/useAsyncCall';
 import LabsModal from '@/components/LabsModal';
 import { collection, query, orderBy, limit, getDocs, deleteDoc, doc, setDoc, addDoc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -47,6 +48,7 @@ const getTestCategory = (testName: string): string => {
 export default function Labs() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [isModalOpen, setIsModalOpen] = useState(false);
   // labResults kept for migration compatibility
   const [, setLabResults] = useState<LabResults[]>([]);
@@ -65,6 +67,7 @@ export default function Labs() {
   const [insightText, setInsightText] = useState('');
   const [insightGeneratedAt, setInsightGeneratedAt] = useState<string | null>(null);
   const [insightLoading, setInsightLoading] = useState(false);
+  const insightCall = useAsyncCall<string>();
 
   // ── Fetch lab results (old collection) ──────────────────────────────────
   useEffect(() => {
@@ -141,6 +144,13 @@ export default function Labs() {
             const cached = insightSnap.data() as any;
             setInsightText(cached.text || '');
             setInsightGeneratedAt(cached.generatedAt || null);
+          }
+
+          // A fresh report upload should regenerate the insight automatically
+          // rather than leaving the stale cached one until a manual refresh.
+          if ((location.state as { justUploaded?: boolean } | null)?.justUploaded) {
+            navigate(location.pathname, { replace: true, state: {} });
+            generateInsight();
           }
         } catch (e) { console.warn('Health plan error:', e); }
 
@@ -255,16 +265,23 @@ Response: plain text only, no markdown, no headers.`;
       // const data = await response.json();
       // const text = data.content?.[0]?.text || '';
 
-      const { text } = await callAI({
-        model: 'gemini-flash-lite-latest',
-        contents: userContent,
-        maxTokens: 300,
-        thinkingBudget: 0,
-      });
-      const now = new Date().toISOString();
-      setInsightText(text);
-      setInsightGeneratedAt(now);
-      await setDoc(doc(db, 'users', user.uid, 'aiInsights', 'labs'), { text, generatedAt: now });
+      const text = await insightCall.execute(async () => {
+        const { text: raw } = await callAI({
+          model: 'gemini-flash-lite-latest',
+          contents: userContent,
+          maxTokens: 300,
+          thinkingBudget: 0,
+        });
+        if (!raw.trim()) throw new Error('Empty response');
+        return raw;
+      }, { callType: 'lab_insight', model: 'gemini-flash-lite-latest' });
+
+      if (text) {
+        const now = new Date().toISOString();
+        setInsightText(text);
+        setInsightGeneratedAt(now);
+        await setDoc(doc(db, 'users', user.uid, 'aiInsights', 'labs'), { text, generatedAt: now });
+      }
     } catch (e) { console.error('Insight error:', e); }
     finally { setInsightLoading(false); }
   };
@@ -534,6 +551,14 @@ Response: plain text only, no markdown, no headers.`;
               </div>
             ) : insightText ? (
               <p className="text-xs text-slate-300 leading-relaxed mb-3">{insightText}</p>
+            ) : insightCall.error ? (
+              <div className="mb-3">
+                <p className="text-xs text-slate-500 mb-2">Couldn't load insight.</p>
+                <button onClick={generateInsight}
+                  className="text-xs bg-blue-500/10 border border-blue-500/20 text-blue-400 px-3 py-1.5 rounded-lg hover:bg-blue-500/20 transition-colors">
+                  Retry
+                </button>
+              </div>
             ) : (
               <div className="mb-3">
                 <p className="text-xs text-slate-500 mb-2">Get an AI summary of your lab results and what to focus on.</p>
