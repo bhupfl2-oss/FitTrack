@@ -13,7 +13,6 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5175,
     proxy: {
       '/api/anthropic': {
         target: 'https://api.anthropic.com',
