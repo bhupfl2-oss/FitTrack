@@ -420,9 +420,12 @@ export function getPlanCoveredPick(
       return [{
         type: normalized ?? gymSplitLabel,
         title: `${gymSplitLabel} Day`,
-        subtitle: base.subtitle,
+        // base.subtitle/reason describe the rest day this tile replaces (e.g.
+        // an AI-written rest-day note) — showing that text under a gym-split
+        // title would contradict it, so the gym tile starts blank instead.
+        subtitle: '',
         emoji: '💪',
-        reason: base.reason,
+        reason: '',
         source: 'gym',
         startable: normalized != null,
       }];
