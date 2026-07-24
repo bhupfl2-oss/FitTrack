@@ -11,7 +11,9 @@ import { callAI } from '@/lib/callAI';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import { logHabitEntry, removeHabitLog } from '@/lib/habits';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
-import { getWorkoutRecommendation, WorkoutRecommendation } from '@/lib/getWorkoutRecommendation';
+import { getWorkoutRecommendation, getPlanCoveredPick, type TaggedRecommendation } from '@/lib/getWorkoutRecommendation';
+import { getActiveRacePlan } from '@/services/racePlanService';
+import { getActiveGoalPlan } from '@/services/goalPlansService';
 import { useActivityRings } from '@/hooks/useActivityRings';
 import html2canvas from 'html2canvas';
 
@@ -471,7 +473,7 @@ export default function Home() {
   const [loadingQuote, setLoadingQuote] = useState<{ text: string; sub: string } | null>(null);
   const quoteCardRef = useRef<HTMLDivElement>(null);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
-  const todayRecCall = useAsyncCall<WorkoutRecommendation | null>();
+  const todayRecCall = useAsyncCall<TaggedRecommendation | null>();
   const [bodyStats, setBodyStats] = useState<BodyStats[]>([]);
   const [labResults, setLabResults] = useState<LabResults[]>([]);
   const [upcomingTests, setUpcomingTests] = useState<any[]>([]);
@@ -717,12 +719,21 @@ export default function Home() {
         const bodyStatsData = bodySnapshot.docs.map(d => ({ id: d.id, ...d.data() } as BodyStats));
         setBodyStats(bodyStatsData); setLoadingQuote(generateLoadingQuote(sessions, bodyStatsData));
 
-        // AI workout recommendation — non-blocking, uses cache when available
+        // Today's Workout — plan-covered dates resolve synchronously with zero
+        // AI calls (mirrors Workouts.tsx's Today's Pick fix); otherwise falls
+        // back to the existing AI-suggested flow, non-blocking, cache-backed.
         todayRecCall.execute(async () => {
+          const [racePlan, goalPlan] = await Promise.all([
+            getActiveRacePlan(user.uid),
+            getActiveGoalPlan(user.uid),
+          ]);
+          const planPick = getPlanCoveredPick(racePlan, goalPlan, todayStr);
+          if (planPick) return planPick[0] ?? null;
+
           const pSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
           const profile = pSnap.exists() ? pSnap.data() : {};
           const recs = await getWorkoutRecommendation(user.uid, sessions.slice(0, 20), profile, bodyStatsData.slice(0, 2));
-          return recs[0] ?? null;
+          return recs[0] ? { ...recs[0], source: 'gym' as const } : null;
         });
         setLabResults(labsSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as LabResults)));
         const now = new Date(); const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -1021,13 +1032,15 @@ export default function Home() {
                 </div>
               </div>
             </div>
-            <button
-              onClick={() => ['running', 'walk', 'cycling'].includes(todayRecCall.data!.type)
-                ? navigate('/running-session')
-                : navigate('/workout-session', { state: { template: todayRecCall.data!.type } })}
-              className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium transition-colors">
-              Start {todayRecCall.data.title} →
-            </button>
+            {todayRecCall.data.type !== 'rest' && todayRecCall.data.startable !== false && (
+              <button
+                onClick={() => todayRecCall.data!.source === 'gym'
+                  ? navigate('/workout-session', { state: { template: todayRecCall.data!.type } })
+                  : navigate('/running-session')}
+                className="w-full bg-emerald-500 hover:bg-emerald-600 text-white py-2.5 rounded-lg text-sm font-medium transition-colors">
+                Start {todayRecCall.data.title} →
+              </button>
+            )}
           </div>
         ) : todayRecCall.error ? (
           <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
