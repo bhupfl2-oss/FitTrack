@@ -849,7 +849,11 @@ ${systemContext}`;
       let aiText = rawText;
       if (goalUpdateMatch) aiText = aiText.replace(goalUpdateMatch[0], '').trim();
 
-      const workoutExercises = detectWorkoutSuggestion(aiText);
+      // Goal-intake replies recap race/goal-plan structure in prose (e.g.
+      // "Long run - 10km") which false-positives this exercise-line regex —
+      // "Load to Workouts" only ever makes sense for ad-hoc workout
+      // suggestions, never for a plan that goes through pendingProposal.
+      const workoutExercises = topic !== 'goal' ? detectWorkoutSuggestion(aiText) : null;
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: aiText,
