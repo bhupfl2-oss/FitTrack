@@ -9,6 +9,9 @@ import { saveGoals, getGoals } from '@/services/goalsService';
 import type {
   GoalPlan, GoalPlanType, GoalPlanStatus, FatLossPlanDay, FatLossSessionType,
 } from '@/services/goalPlansService';
+import { resolveGymSplitLabel } from '@/lib/getWorkoutRecommendation';
+import type { PlanDay, RunType } from '@/services/racePlanService';
+import { computeTDEE, MIN_CALORIE_GOAL } from '@/lib/calculateNutritionGoals';
 
 // ── Local date helpers ───────────────────────────────────────────────────
 // Never use toISOString() for calendar-day strings — it converts to UTC and
@@ -30,6 +33,23 @@ function addDays(dateStr: string, days: number): string {
   return toLocalDateStr(dt);
 }
 
+// Mon=0..Sun=6 — same convention as getWorkoutRecommendation.ts's
+// isoWeekdayIndex, duplicated here as a date-string variant since that one
+// takes a Date and is private to that module.
+function isoWeekdayIndex(dateStr: string): number {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return (new Date(y, m - 1, d).getDay() + 6) % 7;
+}
+
+// Sun=0..Sat=6 — the indexing convention for a phase's weekSessionPattern
+// (distinct from isoWeekdayIndex above, which is Monday-anchored and used
+// only for gym-split week grouping). Native Date.getDay() already returns
+// Sun=0..Sat=6, so this just gives it a name at the call site.
+function dayOfWeekSunFirst(dateStr: string): number {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d).getDay();
+}
+
 // ~4 months — the midpoint of the locked 3–6 month range. This is a
 // placeholder heuristic; real AI-driven target-date reasoning (e.g. based on
 // how much fat loss the user's target implies) belongs in the goal-intake
@@ -48,6 +68,49 @@ export interface FatLossPlanScalarFields {
 }
 
 export type GenerateFatLossPlanInput = FatLossPlanScalarFields;
+
+// Mirrors FAT_LOSS_TO_RUN_TYPE in getWorkoutRecommendation.ts (private to
+// that module) — only the "does this count as a rest/gym slot" classification
+// matters here, not that module's full recommendation pipeline.
+const FAT_LOSS_SESSION_TO_RUN_TYPE: Record<FatLossSessionType, RunType> = {
+  cardio: 'recovery',
+  strength: 'rest',
+  rest: 'rest',
+};
+
+// ── Phase-rules AI output shape ─────────────────────────────────────────────
+// The AI authors 3 of these (one per phase), not one entry per calendar day —
+// the full FatLossPlanDay[] gets expanded from these rules mathematically,
+// see Step 5 below.
+interface FatLossPhase {
+  phaseIndex: number;
+  weekSessionPattern: FatLossSessionType[]; // length 7, index 0=Sun..6=Sat
+  baseCalories: number;                     // week-1-of-phase calorie target
+  caloriesDeltaPercentPerWeek: number;      // e.g. -2 meaning -2%/week, compounding
+  noteVariants: Record<FatLossSessionType, string[]>; // 2-3 short notes each, cycled by week number
+}
+
+const PHASE_COUNT = 3;
+
+// Even-as-possible day ranges for PHASE_COUNT phases across `totalDays` —
+// e.g. 123 days -> [0, 41, 82, 123] (three 41-day phases). Any remainder
+// days go to the earlier phases so no phase is ever empty.
+function computePhaseBoundaries(totalDays: number): number[] {
+  const baseSize = Math.floor(totalDays / PHASE_COUNT);
+  const remainder = totalDays % PHASE_COUNT;
+  const boundaries = [0];
+  for (let i = 0; i < PHASE_COUNT; i++) {
+    boundaries.push(boundaries[boundaries.length - 1] + baseSize + (i < remainder ? 1 : 0));
+  }
+  return boundaries;
+}
+
+function phaseIndexForDay(dayIndex: number, boundaries: number[]): number {
+  for (let p = 0; p < PHASE_COUNT; p++) {
+    if (dayIndex < boundaries[p + 1]) return p;
+  }
+  return PHASE_COUNT - 1;
+}
 
 export interface GeneratedFatLossPlan {
   startDate: string;  // YYYY-MM-DD, local
@@ -153,25 +216,36 @@ export async function generateFatLossPlan(
     }
   }
 
+  const phaseBoundaries = computePhaseBoundaries(skeleton.length);
+  const phaseSizes = Array.from({ length: PHASE_COUNT }, (_, i) => phaseBoundaries[i + 1] - phaseBoundaries[i]);
+
   // ── Step 4: call Gemini via the callAI proxy ────────────────────────────
+  // Asks for 3 phase-level rules, not one entry per calendar day — a full
+  // ~4-month plan authored day-by-day reproducibly truncated Gemini's JSON
+  // output (thinking tokens + verbose per-day text exceeded maxTokens well
+  // before the array finished). The full per-day array is instead expanded
+  // mathematically from these rules in Step 5, below.
   const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
-  const systemInstruction = `You are an expert fat-loss coach building a day-by-day plan alternating cardio, strength, and rest sessions, each with a daily calorie target. You will be given a user's profile, recent body composition trend, recent training history, their day-split preference, and their target metric.
+  const systemInstruction = `You are an expert fat-loss coach designing a phase-based fat-loss plan. You will be given a user's profile, recent body composition trend, recent training history, their day-split preference, and their target metric.
 
-Consider:
-- Calorie targets should support gradual, sustainable fat loss (a moderate deficit, never extreme) — vary day to day around a sensible weekly average rather than a flat number every day (e.g. slightly higher on strength days, slightly lower on rest days is a reasonable pattern, but use judgment)
-- Distribute cardio and strength sessions across the week per the day-split preference given; rest days still get a calorie target (typically at or near maintenance/slight deficit, not the lowest number of the week)
-- Use the current baseline calorie goal provided below as a sanity-check anchor — daily targets should be in a plausible range around it, not wildly different, unless the day-split or body comp trend clearly justifies otherwise
-- Keep notes short (max 12 words), specific, and encouraging
+The plan spans ${skeleton.length} days, split into exactly 3 phases (early/mid/late). You do NOT enumerate individual days — you design each phase's rules, and the exact daily calorie numbers get computed mathematically from those rules afterward.
 
-Structure the plan in phases across its full duration — you decide how many phases and where the boundaries fall, based on the plan's total length below (e.g. a ~12-week plan might warrant 2-3 phases; a ~17-20 week plan more, each phase roughly 3-5 weeks). Each phase must have a genuinely different average calorie target and/or cardio/strength emphasis than the phase before it — a step down in average calorie target and/or a shift in cardio/strength balance as the plan progresses is a common pattern, but decide what's right given the target and body comp trend. The change between phases must be clearly visible in the numbers, not +/-10 kcal noise repeated identically week after week — someone comparing week 1 to the final week should see the plan actually progressed. Every "note" must reflect which phase that day is actually in — its language should cohere with that phase's real calorie/intensity shift, not generic motivational filler disconnected from the numbers.
+For each phase, decide:
+- weekSessionPattern: an array of exactly 7 values ("cardio"|"strength"|"rest"), one weekly template that repeats every week of that phase — index 0 is Sunday, index 6 is Saturday. Respect the day-split preference given below (cardio-leaning vs strength-leaning day counts); rest days are still part of the weekly rhythm.
+- baseCalories: the calorie target for week 1 of this phase. Use the current baseline calorie goal provided below as a sanity-check anchor for phase 0's baseCalories.
+- caloriesDeltaPercentPerWeek: a percentage (can be negative, e.g. -2 for a 2%/week step down), applied compounding week over week within this phase — the trajectory across the whole phase should be clearly visible by its last week, not +/-10 kcal noise, but must stay a sustainable, moderate change, never extreme.
+- noteVariants: for "cardio", "strength", and "rest" each, provide 2-3 short (max 12 words), specific, encouraging notes that fit this phase's real intensity/calorie trajectory. These get cycled week to week within the phase, so each should read naturally on its own — don't reference a specific week number.
+
+Each phase must be genuinely different from the one before it — a real step in calorie trajectory and/or cardio/strength emphasis, not a copy with a different label.
 
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
-{"days":[{"dayIndex":0,"sessionType":"cardio|strength|rest","targetCalories":number,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
-The "days" array must include exactly one entry for every dayIndex given in DAY SKELETON below — no more, no fewer.`;
+{"phases":[{"phaseIndex":0,"weekSessionPattern":["cardio","strength","rest","cardio","strength","cardio","rest"],"baseCalories":number,"caloriesDeltaPercentPerWeek":number,"noteVariants":{"cardio":["...","..."],"strength":["...","..."],"rest":["...","..."]}}],"aiSummary":"max 25 words describing the plan's overall approach"}
+The "phases" array must include exactly one entry for each of phaseIndex 0, 1, 2 — no more, no fewer.`;
   const userContent = `TARGET: ${targetStr}
 TODAY: ${startDate}
 PLAN END DATE: ${targetDate}
-PLAN LENGTH: ${skeleton.length} days (~${Math.round(skeleton.length / 7)} weeks) — use this to decide how many phases the plan needs
+PLAN LENGTH: ${skeleton.length} days (~${Math.round(skeleton.length / 7)} weeks) across 3 phases:
+${phaseSizes.map((size, i) => `  Phase ${i}: ${size} days (~${Math.round(size / 7)} weeks)`).join('\n')}
 DAY-SPLIT PREFERENCE: ${splitStr}
 CURRENT BASELINE CALORIE GOAL: ${currentGoals.calorieGoal ?? 'not set'}
 
@@ -183,11 +257,8 @@ ${bodyStr}
 
 RECENT TRAINING (last ${recentSessions.length}, newest first):
 ${sessionsStr}
-
-DAY SKELETON (dayIndex — fill in sessionType/targetCalories/note for each):
-${skeleton.map(s => `day ${s.dayIndex}`).join('\n')}
 ${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing phase-progression requirements above.\n` : ''}
-Build the fat-loss plan.`;
+Design the 3 phases for this fat-loss plan.`;
 
   // ROLLBACK: previous Anthropic implementation
   // const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -237,38 +308,83 @@ Build the fat-loss plan.`;
   }
 
   let aiSummary = '';
-  let filledDays: Map<number, { sessionType: FatLossSessionType; targetCalories: number; note: string }>;
+  let phases: Map<number, FatLossPhase>;
   try {
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON object found in AI response');
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      days: { dayIndex: number; sessionType: FatLossSessionType; targetCalories: number; note: string }[];
-      aiSummary: string;
-    };
-    if (!parsed.days || !Array.isArray(parsed.days)) throw new Error('Invalid AI response shape — missing days array');
+    const parsed = JSON.parse(jsonMatch[0]) as { phases: FatLossPhase[]; aiSummary: string };
+    if (!parsed.phases || !Array.isArray(parsed.phases)) throw new Error('Invalid AI response shape — missing phases array');
 
     aiSummary = parsed.aiSummary || '';
-    filledDays = new Map(parsed.days.map(d => [d.dayIndex, {
-      sessionType: d.sessionType,
-      targetCalories: d.targetCalories,
-      note: d.note || '',
-    }]));
+    phases = new Map(parsed.phases.map(p => [p.phaseIndex, p]));
   } catch (e) {
     console.warn('[FatLossPlan] Failed to parse AI plan response:', e);
     throw new Error("Couldn't generate your plan right now. Please try again.");
   }
 
-  // ── Step 5: merge AI content onto the date skeleton ─────────────────────
+  // ── Step 5: expand phase rules into the full per-day plan ────────────────
+  // Mathematical expansion, not AI authorship — this is what keeps the AI's
+  // JSON payload tiny regardless of plan length. Every downstream consumer
+  // (preview card, persist, getEffectiveCalorieGoal) reads the same
+  // FatLossPlanDay[] shape it always has, so nothing downstream changes.
   const fallbackCalories = currentGoals.calorieGoal ?? 2000;
+  const tdee = await computeTDEE(uid);
   const weeklyPlan: FatLossPlanDay[] = skeleton.map(slot => {
-    const filled = filledDays.get(slot.dayIndex);
-    return {
-      date: slot.date,
-      sessionType: filled?.sessionType ?? 'rest',
-      targetCalories: filled?.targetCalories ?? fallbackCalories,
-      note: filled?.note ?? '',
-    };
+    const phaseIdx = phaseIndexForDay(slot.dayIndex, phaseBoundaries);
+    const phase = phases.get(phaseIdx);
+    if (!phase) {
+      return { date: slot.date, sessionType: 'rest', targetCalories: fallbackCalories, note: '' };
+    }
+
+    const dayOfWeek = dayOfWeekSunFirst(slot.date); // 0=Sun..6=Sat
+    const sessionType = phase.weekSessionPattern?.[dayOfWeek] ?? 'rest';
+
+    // 1-indexed week number within this phase, resetting at each phase boundary.
+    const weekNum = Math.floor((slot.dayIndex - phaseBoundaries[phaseIdx]) / 7) + 1;
+
+    const rawCalories = (phase.baseCalories ?? fallbackCalories) *
+      Math.pow(1 + (phase.caloriesDeltaPercentPerWeek ?? 0) / 100, weekNum - 1);
+    const rounded = Math.round(rawCalories / 50) * 50; // matches calculateNutritionGoals.ts's rounding convention
+    const targetCalories = Math.min(tdee, Math.max(MIN_CALORIE_GOAL, rounded));
+
+    const variants = phase.noteVariants?.[sessionType];
+    const note = variants && variants.length > 0
+      ? variants[(weekNum - 1) % variants.length]
+      : '';
+
+    return { date: slot.date, sessionType, targetCalories, note };
   });
+
+  // ── Step 5b: overwrite notes on gym-split days ───────────────────────────
+  // Same rationale as racePlanService.ts's generateRacePlanDraft: the AI
+  // can't know a day's gym-split label at note-writing time, since that
+  // label depends on the AI's own rest/strength choices in this same
+  // response. Resolve it after the fact with the exact function the UI uses
+  // (resolveGymSplitLabel), grouped into the same Monday–Sunday calendar
+  // weeks buildGoalPlanWeekSchedule groups by, so generation-time notes
+  // always agree with what gets displayed later.
+  const pattern = input.gymSplitPattern ?? null;
+  if (pattern && pattern.length > 0) {
+    const weekGroups = new Map<string, FatLossPlanDay[]>();
+    for (const day of weeklyPlan) {
+      const weekStart = addDays(day.date, -isoWeekdayIndex(day.date));
+      if (!weekGroups.has(weekStart)) weekGroups.set(weekStart, []);
+      weekGroups.get(weekStart)!.push(day);
+    }
+    for (const weekDays of weekGroups.values()) {
+      const planDays: PlanDay[] = weekDays.map(d => ({
+        date: d.date,
+        runType: FAT_LOSS_SESSION_TO_RUN_TYPE[d.sessionType],
+        targetDistanceKm: null,
+        targetPaceMinPerKm: null,
+        note: d.note,
+      }));
+      for (const day of weekDays) {
+        const splitLabel = resolveGymSplitLabel(planDays, pattern, day.date);
+        if (splitLabel) day.note = `${splitLabel} day.`;
+      }
+    }
+  }
 
   // Deliberately no id/createdAt/updatedAt, and no Firestore writes above —
   // this is the pre-review, in-memory state. Per investigation, a real id

@@ -11,39 +11,33 @@ interface NutritionGoals {
   basis: string; // human-readable explanation
 }
 
-/**
- * Calculates personalised daily calorie + macro targets using:
- * - Profile: age, gender, height, activity level, primary goal, food preference
- * - Body: latest weight, body fat %, muscle mass (more accurate than profile weight)
- * - Workouts: actual session frequency + types (running vs lifting) last 4 weeks
- * - Labs: TSH (thyroid), HbA1c (insulin resistance) modifiers
- */
-export async function calculateNutritionGoals(
-  uid: string,
-  triggerSource: 'profile_change' | 'body_stats_change' = 'profile_change'
-): Promise<NutritionGoals> {
+// Floor for any computed daily calorie target across the app — the only
+// existing precedent for a calorie safety bound. Referenced here (not just
+// duplicated as a literal) so callers like fatLossPlanService.ts's phase
+// expansion share the exact same number rather than a second hardcoded copy.
+export const MIN_CALORIE_GOAL = 1200;
 
-  // ── Fetch all data in parallel ──────────────────────────────────────────
-  const [profileSnap, bodySnap, labSnap, workoutSnap] = await Promise.all([
-    getDoc(doc(db, 'users', uid, 'profile', 'data')),
-    getDocs(query(collection(db, 'users', uid, 'bodyComp'), orderBy('date', 'desc'), limit(1))),
-    getDocs(query(collection(db, 'users', uid, 'labs'), orderBy('date', 'desc'), limit(1))),
-    getDocs(query(collection(db, 'users', uid, 'workoutSessions'), orderBy('date', 'desc'), limit(50))),
-  ]);
+interface TDEEBreakdown {
+  tdee: number;
+  bmr: number;
+  activityMultiplier: number;
+  labNote: string;
+  isMarathonRunner: boolean;
+  isEnduranceAthlete: boolean;
+}
 
-  const profile = profileSnap.exists() ? profileSnap.data() as any : {};
-  const body = bodySnap.docs.length > 0 ? bodySnap.docs[0].data() as any : null;
-  const labs = labSnap.docs.length > 0 ? labSnap.docs[0].data() as any : null;
-
+// Pure — no I/O. Factored out of calculateNutritionGoals so a second caller
+// (computeTDEE below, used by fatLossPlanService.ts's phase expansion) can
+// get the same TDEE number without re-implementing BMR/activity-multiplier/
+// lab/chronic-condition logic a second time.
+function computeTDEEBreakdown(profile: any, body: any, labs: any, workoutDocs: any[]): TDEEBreakdown {
   // ── Basic profile fields ─────────────────────────────────────────────────
   const gender: string = (profile.gender || 'male').toLowerCase();
   const heightCm: number = profile.heightCm || 170;
   const dob: string = profile.dob || '';
   const activityLevel: string = profile.activityLevel || 'Moderate';
-  const primaryGoal: string = profile.primaryGoal || 'General fitness';
   const fitnessFocus: string[] = profile.fitnessFocus || [];
   const fitnessTarget: string = (profile.fitnessTarget || '').toLowerCase();
-  const foodPreference: string = (profile.foodPreference || '').toLowerCase();
   const chronicConditions: string[] = profile.chronicConditions || [];
 
   // Age from DOB
@@ -59,13 +53,7 @@ export async function calculateNutritionGoals(
   }
 
   // ── Weight: prefer body page (most recent scale reading) ─────────────────
-  let weightKg: number = body?.weightKg ? Number(body.weightKg) : (profile.weightKg || 70);
-  let bodyFatPct: number | null = body?.pbf ? Number(body.pbf) : null;
-  let muscleKg: number | null = body?.smm ? Number(body.smm) : null;
-
-  // Lean body mass (used for protein target)
-  const leanMassKg: number = muscleKg
-    ?? (bodyFatPct != null ? weightKg * (1 - bodyFatPct / 100) : weightKg * 0.75);
+  const weightKg: number = body?.weightKg ? Number(body.weightKg) : (profile.weightKg || 70);
 
   // ── BMR via Mifflin-St Jeor ───────────────────────────────────────────────
   let bmr: number;
@@ -83,8 +71,7 @@ export async function calculateNutritionGoals(
   let liftSessions = 0;
   let totalWeeklyKm = 0;
 
-  workoutSnap.docs.forEach(d => {
-    const s = d.data() as any;
+  workoutDocs.forEach(s => {
     const sessionDate = new Date(s.date || s.sessionDate || '');
     if (sessionDate >= fourWeeksAgo) {
       const template = (s.template || '').toLowerCase();
@@ -175,6 +162,70 @@ export async function calculateNutritionGoals(
     tdee = Math.round(tdee * 0.95);
   }
 
+  return { tdee, bmr, activityMultiplier, labNote, isMarathonRunner, isEnduranceAthlete };
+}
+
+// Async wrapper for callers that only need this user's TDEE number (e.g.
+// fatLossPlanService.ts's phase-calorie expansion) without running the full
+// goal-adjustment/macro-split/Firestore-write pipeline calculateNutritionGoals
+// does below. Runs its own Firestore reads — same queries calculateNutritionGoals
+// uses — since it has no fetched data of its own to reuse.
+export async function computeTDEE(uid: string): Promise<number> {
+  const [profileSnap, bodySnap, labSnap, workoutSnap] = await Promise.all([
+    getDoc(doc(db, 'users', uid, 'profile', 'data')),
+    getDocs(query(collection(db, 'users', uid, 'bodyComp'), orderBy('date', 'desc'), limit(1))),
+    getDocs(query(collection(db, 'users', uid, 'labs'), orderBy('date', 'desc'), limit(1))),
+    getDocs(query(collection(db, 'users', uid, 'workoutSessions'), orderBy('date', 'desc'), limit(50))),
+  ]);
+
+  const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+  const body = bodySnap.docs.length > 0 ? bodySnap.docs[0].data() as any : null;
+  const labs = labSnap.docs.length > 0 ? labSnap.docs[0].data() as any : null;
+  const workoutDocs = workoutSnap.docs.map(d => d.data() as any);
+
+  return computeTDEEBreakdown(profile, body, labs, workoutDocs).tdee;
+}
+
+/**
+ * Calculates personalised daily calorie + macro targets using:
+ * - Profile: age, gender, height, activity level, primary goal, food preference
+ * - Body: latest weight, body fat %, muscle mass (more accurate than profile weight)
+ * - Workouts: actual session frequency + types (running vs lifting) last 4 weeks
+ * - Labs: TSH (thyroid), HbA1c (insulin resistance) modifiers
+ */
+export async function calculateNutritionGoals(
+  uid: string,
+  triggerSource: 'profile_change' | 'body_stats_change' = 'profile_change'
+): Promise<NutritionGoals> {
+
+  // ── Fetch all data in parallel ──────────────────────────────────────────
+  const [profileSnap, bodySnap, labSnap, workoutSnap] = await Promise.all([
+    getDoc(doc(db, 'users', uid, 'profile', 'data')),
+    getDocs(query(collection(db, 'users', uid, 'bodyComp'), orderBy('date', 'desc'), limit(1))),
+    getDocs(query(collection(db, 'users', uid, 'labs'), orderBy('date', 'desc'), limit(1))),
+    getDocs(query(collection(db, 'users', uid, 'workoutSessions'), orderBy('date', 'desc'), limit(50))),
+  ]);
+
+  const profile = profileSnap.exists() ? profileSnap.data() as any : {};
+  const body = bodySnap.docs.length > 0 ? bodySnap.docs[0].data() as any : null;
+  const labs = labSnap.docs.length > 0 ? labSnap.docs[0].data() as any : null;
+  const workoutDocs = workoutSnap.docs.map(d => d.data() as any);
+
+  const primaryGoal: string = profile.primaryGoal || 'General fitness';
+  const foodPreference: string = (profile.foodPreference || '').toLowerCase();
+
+  // ── Weight: prefer body page (most recent scale reading) ─────────────────
+  const weightKg: number = body?.weightKg ? Number(body.weightKg) : (profile.weightKg || 70);
+  const bodyFatPct: number | null = body?.pbf ? Number(body.pbf) : null;
+  const muscleKg: number | null = body?.smm ? Number(body.smm) : null;
+
+  // Lean body mass (used for protein target)
+  const leanMassKg: number = muscleKg
+    ?? (bodyFatPct != null ? weightKg * (1 - bodyFatPct / 100) : weightKg * 0.75);
+
+  const { tdee, bmr, activityMultiplier, labNote, isMarathonRunner, isEnduranceAthlete } =
+    computeTDEEBreakdown(profile, body, labs, workoutDocs);
+
   // ── Goal adjustment ───────────────────────────────────────────────────────
   let calorieGoal: number;
   let goalNote: string;
@@ -185,7 +236,7 @@ export async function calculateNutritionGoals(
     // Deficit: deeper if BF% is high
     const bfPct = bodyFatPct || 25;
     const deficit = bfPct > 30 ? 500 : bfPct > 25 ? 400 : 300;
-    calorieGoal = Math.max(1200, tdee - deficit);
+    calorieGoal = Math.max(MIN_CALORIE_GOAL, tdee - deficit);
     goalNote = `Fat loss: ${deficit} kcal deficit from TDEE ${tdee}`;
   } else if (goal.includes('muscle')) {
     // Surplus for muscle gain

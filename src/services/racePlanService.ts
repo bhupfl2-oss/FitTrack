@@ -367,6 +367,7 @@ export interface GenerateRacePlanDraftInput {
   raceDate: string; // YYYY-MM-DD
   targetFinishTime?: string; // e.g. "1:59:00" or "22:30"
   customDistanceKm?: number; // required when raceType === 'custom'
+  gymSplitPattern?: string[] | null;
 }
 
 export interface GeneratedRacePlan {
@@ -393,7 +394,7 @@ export async function generateRacePlanDraft(
   input: GenerateRacePlanDraftInput,
   feedback?: string
 ): Promise<GeneratedRacePlan> {
-  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm } = input;
+  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern } = input;
   const startDate = todayStr();
 
   if (raceDate <= startDate) {
@@ -599,6 +600,27 @@ Build the training plan.`;
   const weeklyPlan: WeeklyPlanEntry[] = [...weeksMap.entries()]
     .sort(([a], [b]) => a - b)
     .map(([weekNumber, days]) => ({ weekNumber, days }));
+
+  // ── Step 5b: overwrite notes on gym-split days ───────────────────────────
+  // The AI wrote every note above with no knowledge of gymSplitPattern — it
+  // can't know which rest day becomes "Push" vs "Pull" at write time, since
+  // that label depends on the AI's own rest-day choices in this same
+  // response. Rather than asking the AI to predict that, resolve the same
+  // ordinal gym-split label the UI shows later (getGymSplitForDate, below)
+  // and overwrite just those days' notes, so the confirm-card recap and the
+  // saved plan always agree with what's displayed.
+  if (gymSplitPattern && gymSplitPattern.length > 0) {
+    // getGymSplitForDate only reads weeklyPlan + gymSplitPattern off the plan
+    // object — this minimal shape stands in for a full RacePlan since no id/
+    // status/etc. exist yet at draft time.
+    const draftPlanForSplitLookup = { weeklyPlan, gymSplitPattern } as RacePlan;
+    for (const week of weeklyPlan) {
+      for (const day of week.days) {
+        const splitLabel = getGymSplitForDate(draftPlanForSplitLookup, day.date);
+        if (splitLabel) day.note = `${splitLabel} day.`;
+      }
+    }
+  }
 
   // Deliberately no id/createdAt, and no Firestore writes above — this is the
   // pre-review, in-memory state. A real id and a resolved createdAt only

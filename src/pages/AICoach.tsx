@@ -913,7 +913,7 @@ ${systemContext}`;
             if (goalPlanKind === 'race') {
               setGeneratingPlan(true);
               try {
-                generatedRacePlan = await generateRacePlanDraft(user.uid, { raceType, raceName, raceDate, targetFinishTime, customDistanceKm });
+                generatedRacePlan = await generateRacePlanDraft(user.uid, { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern });
               } catch (e) {
                 console.error('[RacePlan] Generation failed:', e);
               } finally {
@@ -1047,6 +1047,7 @@ ${systemContext}`;
             raceDate: p.raceDate,
             targetFinishTime: p.targetFinishTime ?? undefined,
             customDistanceKm: p.customDistanceKm ?? undefined,
+            gymSplitPattern: p.gymSplitPattern,
           },
           feedback
         );
