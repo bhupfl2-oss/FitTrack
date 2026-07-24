@@ -10,10 +10,10 @@ import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { callAI, type ContentTurn } from '@/lib/callAI';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
-import { getTodayRecommendations, getWeekSchedule, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
+import { getTodayRecommendations, getWeekSchedule, getPlanCoveredPick, resolveGymSplitLabel, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
-import { getActiveRacePlan, type RacePlan, type PlanDay } from '@/services/racePlanService';
+import { getActiveRacePlan, type RacePlan } from '@/services/racePlanService';
 import { getActiveGoalPlan, type GoalPlan } from '@/services/goalPlansService';
 import type { EffortType } from '@/pages/RunningSession';
 import { useGoals } from '@/services/goalsService';
@@ -112,17 +112,6 @@ function formatDateShort(dateStr: string): string {
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-// Mirrors racePlanService.ts's getGymSplitForDate ordinal-counting logic, but
-// operates on the days array already fetched by getWeekSchedule instead of a
-// full RacePlan, since that's all the week strip has in hand.
-function restGymSplitForDay(days: PlanDay[], gymSplitPattern: string[] | null, date: string): string | null {
-  if (!gymSplitPattern || gymSplitPattern.length === 0) return null;
-  const day = days.find(d => d.date === date);
-  if (!day || day.runType !== 'rest') return null;
-  const ordinal = days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
-  return gymSplitPattern[ordinal % gymSplitPattern.length];
-}
-
 // ── Component ──────────────────────────────────────────────────────────────
 export default function Workouts() {
   const navigate = useNavigate();
@@ -201,17 +190,20 @@ export default function Workouts() {
         setCustomWorkouts(tSnap.docs.map(d => ({ id: d.id, ...d.data() } as CustomWorkout)));
         setWorkedOutToday(fetchedSessions.some(s => s.date === todayStr()));
 
-        // AI recommendation — runs after UI is unblocked
+        // Today's Pick — runs after UI is unblocked. Plans are fetched here
+        // (feeding both the goal status strip and the plan-covered check) so
+        // a day inside an active plan never fires the AI gym-suggestion call.
         todayRecsCall.execute(async () => {
+          const [racePlan, goalPlan] = await Promise.all([getActiveRacePlan(user.uid), getActiveGoalPlan(user.uid)]);
+          setActiveRacePlan(racePlan);
+          setActiveGoalPlan(goalPlan);
+
+          const planPick = getPlanCoveredPick(racePlan, goalPlan, todayStr());
+          if (planPick) return planPick;
+
           const profileSnap = await getDoc(doc(db, 'users', user.uid, 'profile', 'data'));
           const profile = profileSnap.exists() ? profileSnap.data() : {};
           return getTodayRecommendations(user.uid, fetchedSessions, profile, []);
-        });
-
-        // Goal status strip — race plan takes precedence over goalPlans
-        Promise.all([getActiveRacePlan(user.uid), getActiveGoalPlan(user.uid)]).then(([race, goal]) => {
-          setActiveRacePlan(race);
-          setActiveGoalPlan(goal);
         });
 
         // ensureDefaultHabits is cached after first call — fast on repeat visits
@@ -952,7 +944,7 @@ Rules:
               const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
               const Tag = activeRacePlan ? 'button' : 'div';
               const gymSplit = day.runType === 'rest'
-                ? restGymSplitForDay(weekSchedule.days, weekSchedule.gymSplitPattern, day.date)
+                ? resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, day.date)
                 : null;
               return (
                 <Tag key={day.date}
@@ -1179,7 +1171,7 @@ Rules:
                             )}
                           </div>
                         </div>
-                        {rec.type !== 'rest' && (
+                        {rec.type !== 'rest' && rec.startable !== false && (
                           <button
                             onClick={() => startFromRecommendation(rec)}
                             className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors">

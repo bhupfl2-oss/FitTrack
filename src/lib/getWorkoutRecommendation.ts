@@ -2,10 +2,10 @@ import { doc, getDoc, setDoc, collection, query, where, getDocs } from 'firebase
 import { db } from '@/lib/firebase';
 import { callAI } from '@/lib/callAI';
 import {
-  getActiveRacePlan, getCurrentWeekEntry, getPlanDayForDate,
-  type PlanDay, type RunType,
+  getActiveRacePlan, getCurrentWeekEntry, getPlanDayForDate, getGymSplitForDate,
+  type PlanDay, type RunType, type RacePlan,
 } from '@/services/racePlanService';
-import { getActiveGoalPlan, type FatLossPlanDay, type FatLossSessionType } from '@/services/goalPlansService';
+import { getActiveGoalPlan, type FatLossPlanDay, type FatLossSessionType, type GoalPlan } from '@/services/goalPlansService';
 
 export interface WorkoutRecommendation {
   type: string;
@@ -13,6 +13,10 @@ export interface WorkoutRecommendation {
   subtitle: string;
   emoji: string;
   reason: string;
+  // Only ever set to false by plan-derived gym-split tiles whose label didn't
+  // resolve to a real workout template — every AI-suggested tile leaves this
+  // undefined, which renders identically to true (see Workouts.tsx Start-button gate).
+  startable?: boolean;
 }
 
 export type RecommendationSource = 'gym' | 'running';
@@ -292,17 +296,18 @@ function rhythmToRecommendation(runDays: number, today: Date): WorkoutRecommenda
   };
 }
 
-export async function getRunningRecommendationForDate(
-  uid: string,
-  date: string = todayStr()
-): Promise<WorkoutRecommendation | null> {
-  const racePlan = await getActiveRacePlan(uid);
+// Pure variant — takes already-fetched plan objects instead of reading them,
+// so a caller that already has activeRacePlan/activeGoalPlan in state (e.g.
+// Workouts.tsx) can reuse this without a redundant Firestore round-trip.
+export function getRunningRecommendationForDateFromPlans(
+  racePlan: RacePlan | null,
+  goalPlan: GoalPlan | null,
+  date: string
+): WorkoutRecommendation | null {
   if (racePlan) {
     const day = getPlanDayForDate(racePlan, date);
     return day ? planDayToRecommendation(day) : null;
   }
-
-  const goalPlan = await getActiveGoalPlan(uid);
 
   if (goalPlan?.type === 'performance_target' && goalPlan.hasStructuredPlan && goalPlan.weeklyPlan) {
     const structuredDay = goalPlan.weeklyPlan.find(d => d.date === date);
@@ -322,6 +327,18 @@ export async function getRunningRecommendationForDate(
   return null;
 }
 
+export async function getRunningRecommendationForDate(
+  uid: string,
+  date: string = todayStr()
+): Promise<WorkoutRecommendation | null> {
+  // Sequential, not Promise.all — a goal plan is never read once a race plan
+  // is found, matching the original inline implementation exactly.
+  const racePlan = await getActiveRacePlan(uid);
+  if (racePlan) return getRunningRecommendationForDateFromPlans(racePlan, null, date);
+  const goalPlan = await getActiveGoalPlan(uid);
+  return getRunningRecommendationForDateFromPlans(null, goalPlan, date);
+}
+
 // ── Combined "today" resolver ───────────────────────────────────────────────
 export async function getTodayRecommendations(
   uid: string,
@@ -338,6 +355,81 @@ export async function getTodayRecommendations(
   if (runningRec) result.push({ ...runningRec, source: 'running' as const });
 
   return result.slice(0, 2);
+}
+
+// ── Plan-covered "today" resolver (no AI call) ──────────────────────────────
+// Mirrors the keyword rules Workouts.tsx's detectWorkoutTemplate uses so a
+// free-typed gymSplitPattern label (e.g. "Push", "Push Day") maps onto the
+// same fixed set of startable workout-session templates.
+export function normalizeGymSplitLabel(label: string): 'push' | 'pull' | 'legs' | 'upper' | 'lower' | 'fullbody' | null {
+  const lower = label.toLowerCase();
+  if (lower.includes('push') || lower.includes('chest') || lower.includes('tricep') || lower.includes('shoulder')) return 'push';
+  if (lower.includes('pull') || lower.includes('back') || lower.includes('bicep') || lower.includes('lat')) return 'pull';
+  if (lower.includes('leg') || lower.includes('squat') || lower.includes('quad') || lower.includes('hamstring') || lower.includes('glute')) return 'legs';
+  if (lower.includes('upper')) return 'upper';
+  if (lower.includes('lower')) return 'lower';
+  if (lower.includes('full body') || lower.includes('fullbody')) return 'fullbody';
+  return null;
+}
+
+// Ordinal rest-day-counting gym-split lookup for a generic PlanDay[] — shared
+// by the week strip (Workouts.tsx) and getPlanCoveredPick below, so the two
+// views can never disagree about which gym-split label lands on which date.
+export function resolveGymSplitLabel(days: PlanDay[], gymSplitPattern: string[] | null, date: string): string | null {
+  if (!gymSplitPattern || gymSplitPattern.length === 0) return null;
+  const day = days.find(d => d.date === date);
+  if (!day || day.runType !== 'rest') return null;
+  const ordinal = days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
+  return gymSplitPattern[ordinal % gymSplitPattern.length];
+}
+
+// Pure "is today covered by an active plan" resolver — returns null when
+// neither plan applies to `date` (caller should fall back to the AI-driven
+// getTodayRecommendations), or 1-2 tiles derived entirely from already-fetched
+// plan data otherwise. Race plan takes precedence over goal plan whenever
+// present, matching getRunningRecommendationForDateFromPlans/the status strip
+// convention elsewhere in Workouts.tsx.
+export function getPlanCoveredPick(
+  racePlan: RacePlan | null,
+  goalPlan: GoalPlan | null,
+  date: string
+): TaggedRecommendation[] | null {
+  const base = getRunningRecommendationForDateFromPlans(racePlan, goalPlan, date);
+  if (!base) return null;
+
+  // A structured fat-loss "strength" day is deliberately treated the same as
+  // a "rest" day here — fatLossDayToPlanDay already overlays gymSplitPattern
+  // onto both for the week strip (see that function's comment), so Today's
+  // Pick must resolve a gym-split label the same way to avoid disagreeing
+  // with the week strip on the same date.
+  if (base.type === 'rest' || base.type === 'strength') {
+    let gymSplitLabel: string | null = null;
+    if (racePlan) {
+      gymSplitLabel = getGymSplitForDate(racePlan, date);
+    } else if (goalPlan) {
+      const weekSchedule = buildGoalPlanWeekSchedule(goalPlan, 0);
+      if (weekSchedule) gymSplitLabel = resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, date);
+    }
+
+    // A day with an assigned gym split is a gym day, not a rest day — the
+    // gym-split tile REPLACES the rest/strength tile rather than sitting
+    // alongside it (matches the week strip, which already shows the gym-split
+    // label *instead of* the rest emoji for the same date, never both).
+    if (gymSplitLabel) {
+      const normalized = normalizeGymSplitLabel(gymSplitLabel);
+      return [{
+        type: normalized ?? gymSplitLabel,
+        title: `${gymSplitLabel} Day`,
+        subtitle: base.subtitle,
+        emoji: '💪',
+        reason: base.reason,
+        source: 'gym',
+        startable: normalized != null,
+      }];
+    }
+  }
+
+  return [{ ...base, source: 'running' }];
 }
 
 // ── Logged-session lookup ────────────────────────────────────────────────────
@@ -405,6 +497,33 @@ export interface WeekSchedule {
   gymSplitPattern: string[] | null;
 }
 
+// Pure variant of getWeekSchedule's goal-plan branch — takes an already-fetched
+// GoalPlan so a caller with plan state in hand (Workouts.tsx) can build "this
+// week" (weekOffset 0) without a redundant Firestore read.
+function buildGoalPlanWeekSchedule(goalPlan: GoalPlan, weekOffset: number): WeekSchedule | null {
+  if (
+    !((goalPlan.type === 'performance_target' || goalPlan.type === 'existing_routine') && goalPlan.daySplit)
+  ) {
+    return null;
+  }
+
+  const rhythmWeek = buildRhythmWeek(goalPlan.daySplit.runDays, weekOffset);
+
+  if (goalPlan.type === 'performance_target' && goalPlan.hasStructuredPlan && goalPlan.weeklyPlan) {
+    // Overlay per-date: any day the structured plan doesn't cover (outside
+    // startDate–targetDate) keeps its rhythm-computed fallback, exactly as
+    // today — this is never all-or-nothing across the week.
+    const structuredByDate = new Map(goalPlan.weeklyPlan.map(d => [d.date, d]));
+    const days = rhythmWeek.map(day => {
+      const structured = structuredByDate.get(day.date);
+      return structured ? fatLossDayToPlanDay(structured) : day;
+    });
+    return { days, gymSplitPattern: goalPlan.gymSplitPattern };
+  }
+
+  return { days: rhythmWeek, gymSplitPattern: goalPlan.gymSplitPattern };
+}
+
 export async function getWeekSchedule(uid: string, weekOffset: number): Promise<WeekSchedule | null> {
   const racePlan = await getActiveRacePlan(uid);
   if (racePlan) {
@@ -416,26 +535,9 @@ export async function getWeekSchedule(uid: string, weekOffset: number): Promise<
   }
 
   const goalPlan = await getActiveGoalPlan(uid);
-  if (
-    goalPlan &&
-    (goalPlan.type === 'performance_target' || goalPlan.type === 'existing_routine') &&
-    goalPlan.daySplit
-  ) {
-    const rhythmWeek = buildRhythmWeek(goalPlan.daySplit.runDays, weekOffset);
-
-    if (goalPlan.type === 'performance_target' && goalPlan.hasStructuredPlan && goalPlan.weeklyPlan) {
-      // Overlay per-date: any day the structured plan doesn't cover (outside
-      // startDate–targetDate) keeps its rhythm-computed fallback, exactly as
-      // today — this is never all-or-nothing across the week.
-      const structuredByDate = new Map(goalPlan.weeklyPlan.map(d => [d.date, d]));
-      const days = rhythmWeek.map(day => {
-        const structured = structuredByDate.get(day.date);
-        return structured ? fatLossDayToPlanDay(structured) : day;
-      });
-      return { days, gymSplitPattern: goalPlan.gymSplitPattern };
-    }
-
-    return { days: rhythmWeek, gymSplitPattern: goalPlan.gymSplitPattern };
+  if (goalPlan) {
+    const schedule = buildGoalPlanWeekSchedule(goalPlan, weekOffset);
+    if (schedule) return schedule;
   }
 
   return null;
