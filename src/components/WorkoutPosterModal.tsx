@@ -134,7 +134,7 @@ export default function WorkoutPosterModal({
     try {
       const [muscles, cals] = await Promise.all([
         classifyWorkoutMuscles(userId, cleanedExercises),
-        estimateCaloriesBurned(cleanedExercises, template, durationMins ?? 0),
+        estimateCaloriesBurned(userId, cleanedExercises, template, durationMins ?? 0),
       ]);
       if (muscles.length > 0) setLocalAiMuscles(muscles);
       if (cals != null) { setCaloriesBurned(cals); setCaloriesInput(String(cals)); }
@@ -203,7 +203,7 @@ export default function WorkoutPosterModal({
 
       const [muscles, cals] = await Promise.all([
         classifyWorkoutMuscles(userId, cleanedExercises),
-        estimateCaloriesBurned(cleanedExercises, template, durationMins ?? 0),
+        estimateCaloriesBurned(userId, cleanedExercises, template, durationMins ?? 0),
       ]);
 
       if (muscles.length === 0 && cals == null) return;
@@ -682,6 +682,20 @@ export default function WorkoutPosterModal({
                 </button>
               )}
             </div>
+          </div>
+        )}
+        {isAIAnalyzed && (!caloriesBurned || caloriesBurned <= 0) && (
+          <div style={{ width: '100%', background: 'rgba(100,116,139,0.05)', border: '1px solid rgba(100,116,139,0.15)', borderRadius: '10px', padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: '11px', color: '#64748b' }}>Calorie estimate unavailable</span>
+            {!isRunningSession && (
+              <button
+                onClick={rerunAI}
+                disabled={recalculating}
+                style={{ background: 'none', border: '1px solid rgba(100,116,139,0.3)', borderRadius: '6px', padding: '2px 8px', fontSize: '10px', color: recalculating ? '#475569' : '#94a3b8', cursor: recalculating ? 'default' : 'pointer' }}
+              >
+                {recalculating ? '…' : '↻ Retry'}
+              </button>
+            )}
           </div>
         )}
 

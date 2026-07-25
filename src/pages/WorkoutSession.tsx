@@ -470,7 +470,7 @@ export default function WorkoutSession() {
       // Fire muscle classification + calorie estimation in background — non-blocking
       Promise.all([
         classifyWorkoutMuscles(user.uid, cleanedExercises),
-        estimateCaloriesBurned(cleanedExercises, template, durationMins),
+        estimateCaloriesBurned(user.uid, cleanedExercises, template, durationMins),
       ]).then(async ([muscles, caloriesBurned]) => {
         if (muscles.length === 0 && caloriesBurned == null) return;
         // Update poster state live

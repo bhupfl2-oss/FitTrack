@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp, addDoc, collection } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { callAI } from '@/lib/callAI';
 
@@ -129,11 +129,43 @@ Return ONLY this JSON, no markdown, no other text:
 }
 
 // ── Calorie estimation (unchanged logic, decoupled from muscle classification) ─
+function extractCaloriesBurned(raw: string): number | null {
+  const stripped = raw.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+  const match = stripped.match(/"caloriesBurned"\s*:\s*"?(\d+)"?/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+async function logCalorieEstimateFailure(
+  uid: string,
+  errorMessage: string,
+  rawResponse: string,
+  model: string,
+  usage?: { inputTokens: number; outputTokens: number }
+) {
+  try {
+    await addDoc(collection(db, 'users', uid, 'aiUsageLogs'), {
+      callType: 'calorie_estimate',
+      model,
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      status: 'error',
+      errorMessage,
+      rawResponse,
+      createdAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.error('[estimateCaloriesBurned] Failed to write error log:', e);
+  }
+}
+
 export async function estimateCaloriesBurned(
+  uid: string,
   exerciseList: Array<{ name: string; sets: Array<{ reps: number; weight: number | null }> }>,
   templateName: string,
   durationMins: number
 ): Promise<number | null> {
+  const model = 'gemini-3.1-flash-lite'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
+  let raw = '';
   try {
     const exerciseSummary = exerciseList
       .filter(ex => ex.sets.some(s => s.reps > 0))
@@ -181,20 +213,21 @@ Respond with ONLY valid JSON (no markdown, no explanation):
     // const data = await response.json();
     // const raw = data.content?.[0]?.text || '';
 
-    const { text: raw } = await callAI({
-      model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
+    const { text, usage } = await callAI({
+      model,
       contents: userContent,
       maxTokens: 200,
       thinkingBudget: 0,
     });
-    console.log('[estimateCaloriesBurned] raw response:', raw);
-    // Extract the number directly — avoids JSON.parse failures when Claude adds reasoning text
-    const match = raw.match(/"caloriesBurned"\s*:\s*(\d+)/);
-    const calories = match ? parseInt(match[1], 10) : null;
-    console.log('[estimateCaloriesBurned] parsed caloriesBurned:', calories);
+    raw = text;
+    const calories = extractCaloriesBurned(raw);
+    if (calories == null) {
+      await logCalorieEstimateFailure(uid, 'Failed to parse caloriesBurned from AI response', raw, model, usage);
+      return null;
+    }
     return calories;
   } catch (e) {
-    console.error('Calorie estimation failed:', e);
+    await logCalorieEstimateFailure(uid, e instanceof Error ? e.message : String(e), raw, model);
     return null;
   }
 }
