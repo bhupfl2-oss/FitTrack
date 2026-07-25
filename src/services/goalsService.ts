@@ -285,26 +285,6 @@ ${labStr}
 
 Calculate my optimal daily health goals.`;
 
-    // ROLLBACK: previous Anthropic implementation
-    // const response = await fetch('https://api.anthropic.com/v1/messages', {
-    //   method: 'POST',
-    //   headers: {
-    //     'Content-Type': 'application/json',
-    //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-    //     'anthropic-version': '2023-06-01',
-    //     'anthropic-dangerous-direct-browser-access': 'true',
-    //   },
-    //   body: JSON.stringify({
-    //     model: 'claude-sonnet-4-6',
-    //     max_tokens: 600,
-    //     system: goalsSystemInstruction,
-    //     messages: [{ role: 'user', content: goalsUserContent }],
-    //   }),
-    // });
-    // if (!response.ok) throw new Error(`API error ${response.status}`);
-    // const data = await response.json();
-    // const raw = data.content?.[0]?.text ?? '';
-
     const { text: raw } = await callAI({
       model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       systemInstruction: goalsSystemInstruction,

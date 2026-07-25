@@ -260,30 +260,6 @@ ${sessionsStr}
 ${feedback ? `\nADDITIONAL USER INSTRUCTION: ${feedback}. Incorporate this into the plan you build from scratch, alongside the existing phase-progression requirements above.\n` : ''}
 Design the 3 phases for this fat-loss plan.`;
 
-  // ROLLBACK: previous Anthropic implementation
-  // const response = await fetch('https://api.anthropic.com/v1/messages', {
-  //   method: 'POST',
-  //   headers: {
-  //     'Content-Type': 'application/json',
-  //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-  //     'anthropic-version': '2023-06-01',
-  //     'anthropic-dangerous-direct-browser-access': 'true',
-  //   },
-  //   body: JSON.stringify({
-  //     model: 'claude-sonnet-4-6',
-  //     max_tokens: 8000,
-  //     system: systemInstruction,
-  //     messages: [{ role: 'user', content: userContent }],
-  //   }),
-  // });
-  // if (!response.ok) {
-  //   console.warn('[FatLossPlan] AI request failed:', response.status);
-  //   throw new Error(`AI request failed with status ${response.status}`);
-  // }
-  // const data = await response.json();
-  // const raw = data.content?.[0]?.text ?? '';
-  // const usage = { inputTokens: data.usage?.input_tokens ?? 0, outputTokens: data.usage?.output_tokens ?? 0 };
-
   const { text: raw, usage } = await callAI({
     model,
     systemInstruction,

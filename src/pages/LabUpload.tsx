@@ -126,30 +126,6 @@ Rules:
 - reportDate should be collection/sample date, not report generation date
 - Do not include any text outside the JSON object`;
 
-      // ROLLBACK: previous Anthropic implementation
-      // const fileContent = file.type === 'application/pdf'
-      //   ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
-      //   : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } };
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 2000,
-      //     messages: [{
-      //       role: 'user',
-      //       content: [fileContent, { type: 'text', text: promptText }]
-      //     }]
-      //   })
-      // });
-      // const data = await response.json();
-      // const rawText = data.content[0].text;
-
       const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       const { text: rawText, usage } = await callAI({
         model,

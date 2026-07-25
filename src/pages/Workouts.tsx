@@ -398,24 +398,6 @@ ${context}
 Return ONLY this JSON, no other text:
 {"plan":[{"exercise":"Name","sets":3,"reps":10,"suggestedWeight":60,"lastWeight":0}]}`;
 
-        // ROLLBACK: previous Anthropic implementation
-        // const response = await fetch('https://api.anthropic.com/v1/messages', {
-        //   method: 'POST',
-        //   headers: {
-        //     'Content-Type': 'application/json',
-        //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-        //     'anthropic-version': '2023-06-01',
-        //     'anthropic-dangerous-direct-browser-access': 'true',
-        //   },
-        //   body: JSON.stringify({
-        //     model: 'claude-sonnet-4-6',
-        //     max_tokens: 600,
-        //     messages: [{ role: 'user', content: pendingActivityPrompt }],
-        //   }),
-        // });
-        // if (!response.ok) throw new Error('API failed');
-        // const data = await response.json();
-
         const { text: pendingActivityResult } = await callAI({
           model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
           contents: pendingActivityPrompt,
@@ -548,26 +530,6 @@ Rules:
         })),
         { role: 'user' as const, parts: [{ text: input }] },
       ];
-
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 800,
-      //     system: systemPrompt,
-      //     messages: [...history, { role: 'user', content: input }],
-      //   }),
-      // });
-      // if (!response.ok) throw new Error('API failed');
-      // const data = await response.json();
-      // const text = data.content?.[0]?.text || '';
 
       const { text: callResult } = await callAI({
         model: 'gemini-3.5-flash', // Pinned 2026-07-23, see functions/src/index.ts for pin policy

@@ -153,26 +153,6 @@ What should I do on that day?`;
     const systemInstruction = `You are a personal fitness coach. Analyze the user's workout pattern over the last 10 days — including days where they logged multiple sessions (e.g. strength + cardio on the same day) — and recommend the single best workout for today. Consider muscle recovery, training frequency per muscle group, and the user's goals. Return ONLY a JSON object, no markdown, no preamble:
 { "type": "push|pull|legs|upper|lower|fullbody|running|yoga|stretching|cycling|hiit", "title": "e.g. Pull Day", "subtitle": "e.g. Back · Biceps · Forearms", "emoji": "single emoji", "reason": "one sentence, max 12 words, explaining why this is the right choice today" }`;
 
-    // ROLLBACK: previous Anthropic implementation
-    // const response = await fetch('https://api.anthropic.com/v1/messages', {
-    //   method: 'POST',
-    //   headers: {
-    //     'Content-Type': 'application/json',
-    //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-    //     'anthropic-version': '2023-06-01',
-    //     'anthropic-dangerous-direct-browser-access': 'true',
-    //   },
-    //   body: JSON.stringify({
-    //     model: 'claude-haiku-4-5',
-    //     max_tokens: 250,
-    //     system: systemInstruction,
-    //     messages: [{ role: 'user', content: userMessage }],
-    //   }),
-    // });
-    // if (!response.ok) throw new Error(`API error ${response.status}`);
-    // const data = await response.json();
-    // const raw = (data.content?.[0]?.text ?? '').replace(/```json|```/g, '').trim();
-
     const { text: callResult } = await callAI({
       model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       systemInstruction,

@@ -240,25 +240,6 @@ Rules:
 - calories/protein/carbs/fat/fibre are numbers (grams for macros, fibre is grams of dietary fibre)
 - Never include markdown or extra text outside the tags`;
 
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 800,
-      //     messages: [{ role: 'user', content: chatPrompt }],
-      //   }),
-      // });
-      // if (!response.ok) throw new Error('API failed');
-      // const data = await response.json();
-      // const text = data.content?.[0]?.text || '';
-
       const { text } = await callAI({
         model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
         contents: chatPrompt,
@@ -321,31 +302,6 @@ Rules:
 - If unsure about a portion, add a note in the portion field like "~1 cup (estimated)"
 - Only output the tags, no other text`;
 
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 800,
-      //     messages: [{
-      //       role: 'user',
-      //       content: [
-      //         { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-      //         { type: 'text', text: promptText }
-      //       ],
-      //     }],
-      //   }),
-      // });
-      // if (!response.ok) throw new Error('API failed');
-      // const data = await response.json();
-      // const text = data.content?.[0]?.text || '';
-
       const model = 'gemini-3.5-flash'; // Pinned 2026-07-23, see functions/src/index.ts for pin policy
       const { text, usage } = await callAI({
         model,
@@ -397,25 +353,6 @@ Respond with exactly this JSON array, no other text:
 [{"name":"${searchQuery}","portion":"1 serving","calories":0,"protein":0,"carbs":0,"fat":0,"fibre":0}]
 
 Replace the zeros with accurate values (fibre is grams of dietary fibre). Include 2-3 common portion variants if relevant.`;
-
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 400,
-      //     messages: [{ role: 'user', content: searchPrompt }],
-      //   }),
-      // });
-      // if (!response.ok) throw new Error('API failed');
-      // const data = await response.json();
-      // const text = (data.content?.[0]?.text || '').trim();
 
       const { text: searchText } = await callAI({
         model: 'gemini-3.1-flash-lite', // Pinned 2026-07-23, see functions/src/index.ts for pin policy

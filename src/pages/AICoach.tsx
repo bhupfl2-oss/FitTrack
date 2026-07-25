@@ -645,30 +645,6 @@ export default function AICoach() {
 USER CONTEXT:
 ${systemContext}`;
 
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 400,
-      //     system: systemInstruction,
-      //     messages: [],
-      //   }),
-      // });
-      // if (response.ok) {
-      //   const data = await response.json();
-      //   const text = data.content?.[0]?.text || 'How can I help you today?';
-      //   ...
-      // } else {
-      //   setMessages([{ role: 'assistant', content: `How can I help you today?` }]);
-      // }
-
       try {
         // Anthropic's call used an empty messages array with all context in
         // `system` — Gemini's generateContent requires non-empty contents, so
@@ -813,26 +789,6 @@ ${systemContext}`;
           role: m.role === 'assistant' ? 'model' as const : 'user' as const,
           parts: [{ text: m.content }],
         }));
-
-      // ROLLBACK: previous Anthropic implementation
-      // const response = await fetch('https://api.anthropic.com/v1/messages', {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
-      //     'anthropic-version': '2023-06-01',
-      //     'anthropic-dangerous-direct-browser-access': 'true',
-      //   },
-      //   body: JSON.stringify({
-      //     model: 'claude-sonnet-4-6',
-      //     max_tokens: 500,
-      //     system: topic === 'goal' ? goalSystemPrompt : defaultSystemPrompt,
-      //     messages: conversationHistory,
-      //   }),
-      // });
-      // if (!response.ok) throw new Error('AI request failed');
-      // const data = await response.json();
-      // const rawText = data.content?.[0]?.text || 'Sorry, I had trouble responding. Try again?';
 
       const { text: rawTextResult } = await callAI({
         model: 'gemini-3.5-flash', // Pinned 2026-07-23, see functions/src/index.ts for pin policy
