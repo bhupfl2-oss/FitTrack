@@ -138,11 +138,16 @@ export default function WorkoutPosterModal({
       ]);
       if (muscles.length > 0) setLocalAiMuscles(muscles);
       if (cals != null) { setCaloriesBurned(cals); setCaloriesInput(String(cals)); }
-      const sanitizedMuscles = JSON.parse(JSON.stringify(muscles));
-      await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), {
-        aiMuscles: sanitizedMuscles,
-        caloriesBurned: cals ?? null,
-      });
+
+      // Only overwrite fields that got a real new value — a failed/empty half of the
+      // Promise.all must not blank out a previously-saved good value for the other half.
+      const updatePayload: { aiMuscles?: unknown; caloriesBurned?: number } = {};
+      if (muscles.length > 0) updatePayload.aiMuscles = JSON.parse(JSON.stringify(muscles));
+      if (cals != null) updatePayload.caloriesBurned = cals;
+
+      if (Object.keys(updatePayload).length > 0) {
+        await updateDoc(doc(db, 'users', userId, 'workoutSessions', sessionDocId), updatePayload);
+      }
     } catch (e) {
       console.error('[WorkoutPosterModal] rerunAI failed:', e);
     } finally {

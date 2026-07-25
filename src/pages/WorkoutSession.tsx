@@ -21,7 +21,6 @@ import {
 import { db } from '@/lib/firebase';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { cleanData } from '@/lib/cleanData';
-import { classifyWorkoutMuscles, estimateCaloriesBurned } from '@/lib/exerciseMuscleMap';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
 
 interface Exercise {
@@ -463,29 +462,10 @@ export default function WorkoutSession() {
         try { await deleteDoc(doc(db, 'users', user.uid, 'draftSessions', draftKey)); } catch (_) {}
       }
 
-      // Show poster immediately with fallback data
+      // Show poster immediately — WorkoutPosterModal's own backfill effect
+      // runs the one-time automatic AI analysis and saves it, see WorkoutPosterModal.tsx
       setSavedSessionData({ template, date: sessionDate, exercises, durationMins, sessionDocId });
       setShowPoster(true);
-
-      // Fire muscle classification + calorie estimation in background — non-blocking
-      Promise.all([
-        classifyWorkoutMuscles(user.uid, cleanedExercises),
-        estimateCaloriesBurned(user.uid, cleanedExercises, template, durationMins),
-      ]).then(async ([muscles, caloriesBurned]) => {
-        if (muscles.length === 0 && caloriesBurned == null) return;
-        // Update poster state live
-        setSavedSessionData(prev => prev ? { ...prev, aiMuscles: muscles, caloriesBurned: caloriesBurned ?? undefined } : prev);
-        // Persist to Firestore
-        try {
-          // JSON round-trip strips undefined fields (e.g. category) that Firestore rejects
-          const sanitizedMuscles = JSON.parse(JSON.stringify(muscles));
-          console.log('[WorkoutSession] saving AI analysis:', { aiMuscles: sanitizedMuscles, caloriesBurned });
-          await updateDoc(doc(db, 'users', user.uid, 'workoutSessions', sessionDocId), {
-            aiMuscles: sanitizedMuscles,
-            caloriesBurned: caloriesBurned ?? null,
-          });
-        } catch (e) { console.error('Failed to save AI analysis:', e); }
-      });
 
     } catch (error) {
       console.error('Error saving workout:', error);
