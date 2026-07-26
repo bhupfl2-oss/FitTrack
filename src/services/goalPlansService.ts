@@ -1,5 +1,5 @@
 import {
-  getDocs, addDoc, updateDoc,
+  doc, getDocs, addDoc, updateDoc,
   collection, query, where, limit, serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -131,6 +131,10 @@ function isoWeekdayIndex(d: Date): number {
   return (d.getDay() + 6) % 7;
 }
 
+function todayStr(): string {
+  return toLocalDateStr(new Date());
+}
+
 export function getGymSplitForDate(plan: GoalPlan, date: string): string | null {
   const pattern = plan.gymSplitPattern;
   const gymDays = plan.daySplit?.gymDays ?? 0;
@@ -155,4 +159,39 @@ export function getGymSplitForDate(plan: GoalPlan, date: string): string | null 
     cursor.setDate(cursor.getDate() + 1);
   }
   return pattern[ordinal % pattern.length];
+}
+
+// ── Reorder (in-place swap within the structured plan) ──────────────────────
+
+// Mirrors racePlanService.ts's swapCurrentWeekDayTypes, but weeklyPlan here is
+// a flat array spanning the whole plan (not grouped by week), so both days
+// are found directly by date rather than via a week-entry lookup.
+export async function swapGoalPlanDayTypes(
+  uid: string,
+  plan: GoalPlan,
+  dateA: string,
+  dateB: string
+): Promise<GoalPlan> {
+  if (!plan.hasStructuredPlan || !plan.weeklyPlan) throw new Error('This plan has no structured schedule to reorder');
+
+  const today = todayStr();
+  if (dateA === dateB) throw new Error('Cannot swap a day with itself');
+  if (dateA < today || dateB < today) throw new Error('Cannot reorder a day that has already passed');
+
+  const dayA = plan.weeklyPlan.find(d => d.date === dateA);
+  const dayB = plan.weeklyPlan.find(d => d.date === dateB);
+  if (!dayA || !dayB) throw new Error('Both days must be part of the structured plan');
+
+  const swappedA: FatLossPlanDay = { ...dayB, date: dayA.date };
+  const swappedB: FatLossPlanDay = { ...dayA, date: dayB.date };
+
+  const newWeeklyPlan = plan.weeklyPlan.map(d => {
+    if (d.date === dateA) return swappedA;
+    if (d.date === dateB) return swappedB;
+    return d;
+  });
+
+  await updateDoc(doc(db, 'users', uid, 'goalPlans', plan.id), { weeklyPlan: cleanData(newWeeklyPlan) });
+
+  return { ...plan, weeklyPlan: newWeeklyPlan };
 }

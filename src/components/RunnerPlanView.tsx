@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ArrowLeftRight, Lock } from 'lucide-react';
 import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { useAuth } from '@/hooks/useAuth';
@@ -12,6 +12,7 @@ import {
   getWeekEntryByNumber,
   getPlanDayForDate,
   getGymSplitForDate,
+  swapCurrentWeekDayTypes,
   type RacePlan,
   type RunType,
 } from '@/services/racePlanService';
@@ -75,6 +76,16 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
   const [recentRunningSessions, setRecentRunningSessions] = useState<any[]>([]);
   const [viewedWeekNumber, setViewedWeekNumber] = useState<number | null>(null);
   const [highlightDate, setHighlightDate] = useState<string | null>(null);
+  const [reorderMode, setReorderMode] = useState(false);
+  const [selectedSwapDate, setSelectedSwapDate] = useState<string | null>(null);
+
+  // Reorder mode/selection only ever makes sense for the current week's
+  // toggle, which disappears the moment the user pages to another week —
+  // reset here so stale state can't linger once that happens.
+  useEffect(() => {
+    setReorderMode(false);
+    setSelectedSwapDate(null);
+  }, [viewedWeekNumber]);
 
   useEffect(() => {
     if (!user) return;
@@ -140,6 +151,31 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
   const goToPrevWeek = () => setViewedWeekNumber(n => (n != null ? Math.max(1, n - 1) : n));
   const goToNextWeek = () => setViewedWeekNumber(n => (n != null ? Math.min(plan.totalWeeks, n + 1) : n));
 
+  const handleSwapDays = async (dateA: string, dateB: string) => {
+    if (!user) return;
+    try {
+      const newPlan = await swapCurrentWeekDayTypes(user.uid, plan, dateA, dateB);
+      setPlan(newPlan);
+    } catch (e) {
+      console.error('Error swapping days:', e);
+      alert(e instanceof Error ? e.message : 'Failed to swap days');
+    } finally {
+      setSelectedSwapDate(null);
+    }
+  };
+
+  const handleDayTap = (day: { date: string; runType: RunType }) => {
+    if (!reorderMode) {
+      setHighlightDate(day.date);
+      return;
+    }
+    const isLocked = day.date < todayLocal;
+    if (isLocked || day.runType === 'race') return;
+    if (selectedSwapDate === day.date) { setSelectedSwapDate(null); return; }
+    if (selectedSwapDate) { handleSwapDays(selectedSwapDate, day.date); return; }
+    setSelectedSwapDate(day.date);
+  };
+
   return (
     <div className="space-y-4">
       {/* Goal banner */}
@@ -181,18 +217,33 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
         <>
           {/* This week's calendar */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-            <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider mb-3 block">This Week</span>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">This Week</span>
+              {isCurrentWeek && (
+                <button onClick={() => { setReorderMode(m => !m); setSelectedSwapDate(null); }}
+                  className={`flex items-center gap-1 text-[9px] font-mono px-2 py-1 rounded-full border transition-colors ${reorderMode ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400' : 'border-slate-700 text-slate-500 hover:text-white'}`}>
+                  <ArrowLeftRight className="w-3 h-3" />
+                  {reorderMode ? 'Done' : 'Reorder'}
+                </button>
+              )}
+            </div>
             <div className="flex justify-between gap-1.5">
               {week.days.map(day => {
                 const style = RUN_TYPE_STYLES[day.runType];
                 const isHighlighted = day.date === highlightDate;
+                const isLocked = reorderMode && day.date < todayLocal;
+                const isSwapSelected = reorderMode && day.date === selectedSwapDate;
                 const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
                 return (
                   <button type="button" key={day.date}
-                    onClick={() => setHighlightDate(day.date)}
-                    className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border} cursor-pointer hover:opacity-80 transition-opacity`}>
+                    onClick={() => handleDayTap(day)}
+                    className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border} ${isSwapSelected ? 'ring-2 ring-emerald-400' : ''} cursor-pointer hover:opacity-80 transition-opacity ${isLocked ? 'opacity-40' : ''}`}>
                     <span className={`text-[9px] font-mono ${isHighlighted ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'gym' ? (getGymSplitForDate(plan, day.date) ?? RUN_TYPE_LABELS.gym) : RUN_TYPE_LABELS[day.runType]}</span>
+                    {isLocked ? (
+                      <Lock className="w-3 h-3 text-slate-600" />
+                    ) : (
+                      <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'gym' ? (getGymSplitForDate(plan, day.date) ?? RUN_TYPE_LABELS.gym) : RUN_TYPE_LABELS[day.runType]}</span>
+                    )}
                   </button>
                 );
               })}

@@ -236,14 +236,17 @@ function fatLossDayToRecommendation(day: FatLossPlanDay): WorkoutRecommendation 
   };
 }
 
-// Gym-side week strip (RUN_TYPE_META/Workouts.tsx) has no "strength" concept —
-// RunType is purely running-oriented. This mirrors buildRhythmWeek's existing
-// convention below (a gym/strength day already renders as runType: 'rest' in
-// that view today), so a structured strength day doesn't regress to something
-// worse than what rhythm-based goal plans already show.
+// 'strength' maps to the same 'gym' RunType race plans use for gym days —
+// NOT 'rest'. Both resolveGymSplitLabel and the week strip key off runType to
+// decide which days get a gym-split label; collapsing strength into 'rest'
+// made every true rest day eligible for a label too (a rest day would count
+// as a gym-split slot and get labeled Push/Pull/Legs, so 😴 Rest Day never
+// actually showed). Mapping it to 'gym' instead mirrors racePlanService.ts's
+// getGymSplitForDate exactly, so only genuine gym/strength days compete for
+// split labels and true rest days render as rest.
 const FAT_LOSS_TO_RUN_TYPE: Record<FatLossSessionType, RunType> = {
   cardio: 'recovery',
-  strength: 'rest',
+  strength: 'gym',
   rest: 'rest',
 };
 
@@ -353,14 +356,16 @@ export function normalizeGymSplitLabel(label: string): 'push' | 'pull' | 'legs' 
   return null;
 }
 
-// Ordinal rest-day-counting gym-split lookup for a generic PlanDay[] — shared
+// Ordinal gym-day-counting gym-split lookup for a generic PlanDay[] — shared
 // by the week strip (Workouts.tsx) and getPlanCoveredPick below, so the two
 // views can never disagree about which gym-split label lands on which date.
+// Mirrors racePlanService.ts's getGymSplitForDate exactly (same runType==='gym'
+// gate) — true 'rest' days are never touched here, so they render as rest.
 export function resolveGymSplitLabel(days: PlanDay[], gymSplitPattern: string[] | null, date: string): string | null {
   if (!gymSplitPattern || gymSplitPattern.length === 0) return null;
   const day = days.find(d => d.date === date);
-  if (!day || day.runType !== 'rest') return null;
-  const ordinal = days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
+  if (!day || day.runType !== 'gym') return null;
+  const ordinal = days.filter(d => d.runType === 'gym').findIndex(d => d.date === date);
   return gymSplitPattern[ordinal % gymSplitPattern.length];
 }
 
@@ -485,7 +490,7 @@ export interface WeekSchedule {
 // Pure variant of getWeekSchedule's goal-plan branch — takes an already-fetched
 // GoalPlan so a caller with plan state in hand (Workouts.tsx) can build "this
 // week" (weekOffset 0) without a redundant Firestore read.
-function buildGoalPlanWeekSchedule(goalPlan: GoalPlan, weekOffset: number): WeekSchedule | null {
+export function buildGoalPlanWeekSchedule(goalPlan: GoalPlan, weekOffset: number): WeekSchedule | null {
   if (
     !((goalPlan.type === 'performance_target' || goalPlan.type === 'existing_routine') && goalPlan.daySplit)
   ) {

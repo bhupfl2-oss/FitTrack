@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Share2, Flag, Target, Repeat } from 'lucide-react';
+import { ArrowUp, ArrowDown, Plus, Clock, Calendar, X, Activity, Dumbbell, Search, Trash2, Pencil, Send, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Share2, Flag, Target, Repeat, ArrowLeftRight, Lock } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { usePageLoadTime } from '@/hooks/usePageLoadTime';
 import { collection, query, orderBy, limit, getDocs, addDoc, serverTimestamp, deleteDoc, updateDoc, doc, getDoc } from 'firebase/firestore';
@@ -10,11 +10,11 @@ import { useActivityRings } from '@/hooks/useActivityRings';
 import { bumpDataVersion } from '@/lib/dataVersion';
 import { callAI, type ContentTurn } from '@/lib/callAI';
 import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/defaultHabits';
-import { getTodayRecommendations, getWeekSchedule, getPlanCoveredPick, resolveGymSplitLabel, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
+import { getTodayRecommendations, getWeekSchedule, getPlanCoveredPick, resolveGymSplitLabel, buildGoalPlanWeekSchedule, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
-import { getActiveRacePlan, getGymSplitForDate, type RacePlan } from '@/services/racePlanService';
-import { getActiveGoalPlan, type GoalPlan } from '@/services/goalPlansService';
+import { getActiveRacePlan, getGymSplitForDate, getWeekEntryByDate, swapCurrentWeekDayTypes, type RacePlan, type RunType } from '@/services/racePlanService';
+import { getActiveGoalPlan, swapGoalPlanDayTypes, type GoalPlan } from '@/services/goalPlansService';
 import type { EffortType } from '@/pages/RunningSession';
 import { useGoals } from '@/services/goalsService';
 
@@ -139,6 +139,8 @@ export default function Workouts() {
   const [weekOffset, setWeekOffset] = useState(0);
   const [weekSchedule, setWeekSchedule] = useState<WeekSchedule | null>(null);
   const [nextWeekAvailable, setNextWeekAvailable] = useState(false);
+  const [reorderMode, setReorderMode] = useState(false);
+  const [selectedSwapDate, setSelectedSwapDate] = useState<string | null>(null);
 
   const [customWorkouts, setCustomWorkouts] = useState<CustomWorkout[]>([]);
   const [editingWorkout, setEditingWorkout] = useState<CustomWorkout | null>(null);
@@ -242,6 +244,10 @@ export default function Workouts() {
       setWeekSchedule(current);
       setNextWeekAvailable(!!next && next.days.length > 0);
     });
+    // Reorder only ever applies to weekOffset 0 (the toggle itself is hidden
+    // otherwise) — reset on any week change so stale state can't linger.
+    setReorderMode(false);
+    setSelectedSwapDate(null);
   }, [user, weekOffset]);
 
   // ── Save steps ─────────────────────────────────────────────────────────
@@ -762,6 +768,47 @@ Rules:
     finally { setIsSavingWorkout(false); }
   };
 
+  // Race plan takes precedence whenever both exist — matches the precedence
+  // convention already used everywhere else (getPlanCoveredPick, getWeekSchedule).
+  const canReorderGoalPlan = !activeRacePlan
+    && activeGoalPlan?.type === 'performance_target'
+    && activeGoalPlan.hasStructuredPlan
+    && !!activeGoalPlan.weeklyPlan;
+
+  const handleSwapDays = async (dateA: string, dateB: string) => {
+    if (!user) return;
+    try {
+      if (activeRacePlan) {
+        const newPlan = await swapCurrentWeekDayTypes(user.uid, activeRacePlan, dateA, dateB);
+        setActiveRacePlan(newPlan);
+        const updatedWeek = getWeekEntryByDate(newPlan, dateA);
+        if (updatedWeek) setWeekSchedule({ days: updatedWeek.days, gymSplitPattern: newPlan.gymSplitPattern });
+      } else if (activeGoalPlan) {
+        const newPlan = await swapGoalPlanDayTypes(user.uid, activeGoalPlan, dateA, dateB);
+        setActiveGoalPlan(newPlan);
+        const updatedSchedule = buildGoalPlanWeekSchedule(newPlan, 0);
+        if (updatedSchedule) setWeekSchedule(updatedSchedule);
+      }
+    } catch (e) {
+      console.error('Error swapping days:', e);
+      alert(e instanceof Error ? e.message : 'Failed to swap days');
+    } finally {
+      setSelectedSwapDate(null);
+    }
+  };
+
+  const handleDayTap = (day: { date: string; runType: RunType }) => {
+    if (!reorderMode) {
+      if (activeRacePlan) navigate(`/training-plan?date=${day.date}`);
+      return;
+    }
+    const isLocked = day.date < todayStr();
+    if (isLocked || day.runType === 'race') return;
+    if (selectedSwapDate === day.date) { setSelectedSwapDate(null); return; }
+    if (selectedSwapDate) { handleSwapDays(selectedSwapDate, day.date); return; }
+    setSelectedSwapDate(day.date);
+  };
+
   const weekLabel = weekOffset === 0
     ? 'This Week'
     : weekSchedule
@@ -894,26 +941,41 @@ Rules:
               <ChevronLeft className="w-4 h-4" />
             </button>
             <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{weekLabel}</span>
-            <button onClick={() => setWeekOffset(o => o + 1)} disabled={!nextWeekAvailable}
-              className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
-              <ChevronRight className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              {(activeRacePlan || canReorderGoalPlan) && weekOffset === 0 && (
+                <button onClick={() => { setReorderMode(m => !m); setSelectedSwapDate(null); }}
+                  className={`flex items-center gap-1 text-[9px] font-mono px-2 py-1 rounded-full border transition-colors ${reorderMode ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400' : 'border-slate-700 text-slate-500 hover:text-white'}`}>
+                  <ArrowLeftRight className="w-3 h-3" />
+                  {reorderMode ? 'Done' : 'Reorder'}
+                </button>
+              )}
+              <button onClick={() => setWeekOffset(o => o + 1)} disabled={!nextWeekAvailable}
+                className="text-slate-500 hover:text-white disabled:opacity-20 disabled:hover:text-slate-500 transition-colors">
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           <div className="flex justify-between gap-1.5">
             {weekSchedule ? weekSchedule.days.map(day => {
               const meta = RUN_TYPE_META[day.runType];
               const isToday = day.date === todayStr();
+              const isLocked = reorderMode && day.date < todayStr();
+              const isSwapSelected = reorderMode && day.date === selectedSwapDate;
               const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
-              const Tag = activeRacePlan ? 'button' : 'div';
-              const gymSplit = activeRacePlan
-                ? (day.runType === 'gym' ? getGymSplitForDate(activeRacePlan, day.date) : null)
-                : (day.runType === 'rest' ? resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, day.date) : null);
+              const dayTileInteractive = activeRacePlan || canReorderGoalPlan;
+              const Tag = dayTileInteractive ? 'button' : 'div';
+              const gymSplit = day.runType !== 'gym' ? null
+                : activeRacePlan
+                  ? getGymSplitForDate(activeRacePlan, day.date)
+                  : resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, day.date);
               return (
                 <Tag key={day.date}
-                  onClick={activeRacePlan ? () => navigate(`/training-plan?date=${day.date}`) : undefined}
-                  className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${(day.runType === 'rest' || day.runType === 'gym') ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${activeRacePlan ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}>
+                  onClick={dayTileInteractive ? () => handleDayTap(day) : undefined}
+                  className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${(day.runType === 'rest' || day.runType === 'gym') ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${isSwapSelected ? 'ring-2 ring-emerald-400' : ''} ${dayTileInteractive ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''} ${isLocked ? 'opacity-40' : ''}`}>
                   <span className={`text-[9px] font-mono ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                  {gymSplit ? (
+                  {isLocked ? (
+                    <Lock className="w-3 h-3 text-slate-600" />
+                  ) : gymSplit ? (
                     <span className="text-[8px] font-mono text-slate-500">{gymSplit}</span>
                   ) : (
                     <span className="text-sm">{meta.emoji}</span>

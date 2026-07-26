@@ -494,3 +494,43 @@ export function computeAdherence(plan: RacePlan, workoutSessions: any[]): Adhere
 
   return { completed, total: planned.length, weekNumber: week.weekNumber };
 }
+
+// ── Reorder (in-place swap within the current week) ─────────────────────────
+
+// Swaps every field except `date` between two of the current week's days —
+// a race day is a fixed calendar event, not a movable planning slot, and a
+// day before today is locked, so both are rejected here rather than left to
+// the caller's UI gating alone.
+export async function swapCurrentWeekDayTypes(
+  uid: string,
+  plan: RacePlan,
+  dateA: string,
+  dateB: string
+): Promise<RacePlan> {
+  const today = todayStr();
+  if (dateA === dateB) throw new Error('Cannot swap a day with itself');
+  if (dateA < today || dateB < today) throw new Error('Cannot reorder a day that has already passed');
+
+  const week = getCurrentWeekEntry(plan);
+  if (!week) throw new Error('No current week found in this plan');
+
+  const dayA = week.days.find(d => d.date === dateA);
+  const dayB = week.days.find(d => d.date === dateB);
+  if (!dayA || !dayB) throw new Error('Both days must belong to the current week');
+  if (dayA.runType === 'race' || dayB.runType === 'race') throw new Error('Race day cannot be reordered');
+
+  const swappedA: PlanDay = { ...dayB, date: dayA.date };
+  const swappedB: PlanDay = { ...dayA, date: dayB.date };
+
+  const newDays = week.days.map(d => {
+    if (d.date === dateA) return swappedA;
+    if (d.date === dateB) return swappedB;
+    return d;
+  });
+
+  const newWeeklyPlan = plan.weeklyPlan.map(w => w.weekNumber === week.weekNumber ? { ...w, days: newDays } : w);
+
+  await updateDoc(doc(db, 'users', uid, 'racePlans', plan.id), { weeklyPlan: cleanData(newWeeklyPlan) });
+
+  return { ...plan, weeklyPlan: newWeeklyPlan };
+}
