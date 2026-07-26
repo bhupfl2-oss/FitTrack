@@ -13,7 +13,7 @@ import { ensureDefaultHabits, getHabitLogToday, setHabitLogToday } from '@/lib/d
 import { getTodayRecommendations, getWeekSchedule, getPlanCoveredPick, resolveGymSplitLabel, RUN_TYPE_META, type TaggedRecommendation, type WeekSchedule } from '@/lib/getWorkoutRecommendation';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import WorkoutPosterModal from '@/components/WorkoutPosterModal';
-import { getActiveRacePlan, type RacePlan } from '@/services/racePlanService';
+import { getActiveRacePlan, getGymSplitForDate, type RacePlan } from '@/services/racePlanService';
 import { getActiveGoalPlan, type GoalPlan } from '@/services/goalPlansService';
 import type { EffortType } from '@/pages/RunningSession';
 import { useGoals } from '@/services/goalsService';
@@ -905,13 +905,13 @@ Rules:
               const isToday = day.date === todayStr();
               const dayLetter = new Date(day.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' }).charAt(0);
               const Tag = activeRacePlan ? 'button' : 'div';
-              const gymSplit = day.runType === 'rest'
-                ? resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, day.date)
-                : null;
+              const gymSplit = activeRacePlan
+                ? (day.runType === 'gym' ? getGymSplitForDate(activeRacePlan, day.date) : null)
+                : (day.runType === 'rest' ? resolveGymSplitLabel(weekSchedule.days, weekSchedule.gymSplitPattern, day.date) : null);
               return (
                 <Tag key={day.date}
                   onClick={activeRacePlan ? () => navigate(`/training-plan?date=${day.date}`) : undefined}
-                  className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${day.runType === 'rest' ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${activeRacePlan ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}>
+                  className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${(day.runType === 'rest' || day.runType === 'gym') ? 'bg-slate-800/50' : 'bg-emerald-500/10 border border-emerald-500/20'} ${activeRacePlan ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}>
                   <span className={`text-[9px] font-mono ${isToday ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
                   {gymSplit ? (
                     <span className="text-[8px] font-mono text-slate-500">{gymSplit}</span>

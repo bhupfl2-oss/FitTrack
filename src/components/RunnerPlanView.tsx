@@ -31,6 +31,7 @@ const RUN_TYPE_STYLES: Record<RunType, { bg: string; text: string; border: strin
   intervals: { bg: 'bg-purple-500/10', text: 'text-purple-400', border: 'border-purple-500/20' },
   race: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/20' },
   rest: { bg: 'bg-slate-800/50', text: 'text-slate-500', border: 'border-slate-700' },
+  gym: { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20' },
 };
 
 const RUN_TYPE_LABELS: Record<RunType, string> = {
@@ -40,6 +41,7 @@ const RUN_TYPE_LABELS: Record<RunType, string> = {
   intervals: 'Intervals',
   race: 'Race',
   rest: 'Rest',
+  gym: 'Gym',
 };
 
 async function fetchRecentRunningSessions(uid: string): Promise<any[]> {
@@ -133,7 +135,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
   const dayCardLabel = highlightDate && highlightDate !== todayLocal
     ? new Date(highlightDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
     : 'Today';
-  const restGymSplit = dayEntry?.runType === 'rest' ? getGymSplitForDate(plan, dayEntry.date) : null;
+  const restGymSplit = dayEntry?.runType === 'gym' ? getGymSplitForDate(plan, dayEntry.date) : null;
 
   const goToPrevWeek = () => setViewedWeekNumber(n => (n != null ? Math.max(1, n - 1) : n));
   const goToNextWeek = () => setViewedWeekNumber(n => (n != null ? Math.min(plan.totalWeeks, n + 1) : n));
@@ -190,7 +192,7 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
                     onClick={() => setHighlightDate(day.date)}
                     className={`flex-1 flex flex-col items-center gap-1 rounded-lg py-2 ${style.bg} border ${style.border} cursor-pointer hover:opacity-80 transition-opacity`}>
                     <span className={`text-[9px] font-mono ${isHighlighted ? 'text-white font-bold' : 'text-slate-500'}`}>{dayLetter}</span>
-                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'rest' ? (getGymSplitForDate(plan, day.date) ?? '—') : RUN_TYPE_LABELS[day.runType]}</span>
+                    <span className={`text-[8px] font-mono ${style.text}`}>{day.runType === 'gym' ? (getGymSplitForDate(plan, day.date) ?? RUN_TYPE_LABELS.gym) : RUN_TYPE_LABELS[day.runType]}</span>
                   </button>
                 );
               })}
@@ -199,11 +201,11 @@ export default function RunnerPlanView({ initialDate }: { initialDate?: string }
 
           {/* Day detail card */}
           {dayEntry && (
-            dayEntry.runType === 'rest' ? (
+            (dayEntry.runType === 'rest' || dayEntry.runType === 'gym') ? (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
                 <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">{dayCardLabel}</span>
-                <div className="text-sm font-semibold text-white mt-1">{restGymSplit ? `Gym : ${restGymSplit}` : 'Rest day'}</div>
-                {!restGymSplit && dayEntry.note && <p className="text-xs text-slate-400 mt-1">{dayEntry.note}</p>}
+                <div className="text-sm font-semibold text-white mt-1">{dayEntry.runType === 'gym' ? (restGymSplit ? `Gym : ${restGymSplit}` : 'Gym day') : 'Rest day'}</div>
+                {dayEntry.runType === 'rest' && dayEntry.note && <p className="text-xs text-slate-400 mt-1">{dayEntry.note}</p>}
               </div>
             ) : (
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">

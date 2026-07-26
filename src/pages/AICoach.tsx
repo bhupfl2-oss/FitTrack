@@ -17,7 +17,7 @@ import { db } from '@/lib/firebase';
 import { callAI, type ContentTurn } from '@/lib/callAI';
 import { useAsyncCall } from '@/hooks/useAsyncCall';
 import { saveGoals, calculateGoalsWithAI } from '@/services/goalsService';
-import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, type RacePlan, type RaceType, type RunType, type GeneratedRacePlan } from '@/services/racePlanService';
+import { getActiveRacePlan, getCurrentWeekEntry, generateRacePlanDraft, persistRacePlan, getGymSplitForDate, type RacePlan, type RaceType, type RunType, type GeneratedRacePlan } from '@/services/racePlanService';
 import { getActiveGoalPlan, createGoalPlan, type GoalPlan, type GoalPlanType, type GoalPlanTrackMode, type FatLossSessionType, type FatLossPlanDay } from '@/services/goalPlansService';
 import { generateFatLossPlan, persistFatLossPlan, type GeneratedFatLossPlan } from '@/services/fatLossPlanService';
 
@@ -124,6 +124,7 @@ const RACE_TYPE_DOT: Record<RunType, string> = {
   intervals: 'bg-purple-400',
   race: 'bg-red-400',
   rest: 'bg-slate-600',
+  gym: 'bg-amber-400',
 };
 const RACE_TYPE_LABEL: Record<RunType, string> = {
   recovery: 'Recovery',
@@ -132,6 +133,7 @@ const RACE_TYPE_LABEL: Record<RunType, string> = {
   intervals: 'Intervals',
   race: 'Race',
   rest: 'Rest',
+  gym: 'Gym',
 };
 const FAT_LOSS_TYPE_DOT: Record<FatLossSessionType, string> = {
   cardio: 'bg-blue-400',
@@ -150,6 +152,14 @@ function chunkFatLossWeeklyPlan(days: FatLossPlanDay[]): FatLossPlanDay[][] {
   const chunks: FatLossPlanDay[][] = [];
   for (let i = 0; i < days.length; i += 7) chunks.push(days.slice(i, i + 7));
   return chunks;
+}
+
+// generateRacePlanDraft's daySplit is {run, gym, rest} (race-generation-specific),
+// while the app-wide GOAL_UPDATE daySplit convention is {runDays, gymDays} with
+// rest implied — this converts the latter into the former at each call site.
+function toRaceDaySplit(daySplit: { runDays: number; gymDays: number } | null | undefined): { run: number; gym: number; rest: number } | null {
+  if (!daySplit) return null;
+  return { run: daySplit.runDays, gym: daySplit.gymDays, rest: Math.max(0, 7 - daySplit.runDays - daySplit.gymDays) };
 }
 
 function formatPreviewDayLabel(dateStr: string): string {
@@ -869,7 +879,7 @@ ${systemContext}`;
             if (goalPlanKind === 'race') {
               setGeneratingPlan(true);
               try {
-                generatedRacePlan = await generateRacePlanDraft(user.uid, { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern });
+                generatedRacePlan = await generateRacePlanDraft(user.uid, { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern, daySplit: toRaceDaySplit(daySplit) });
               } catch (e) {
                 console.error('[RacePlan] Generation failed:', e);
               } finally {
@@ -1004,6 +1014,7 @@ ${systemContext}`;
             targetFinishTime: p.targetFinishTime ?? undefined,
             customDistanceKm: p.customDistanceKm ?? undefined,
             gymSplitPattern: p.gymSplitPattern,
+            daySplit: toRaceDaySplit(p.daySplit),
           },
           feedback
         );
@@ -1129,15 +1140,25 @@ ${systemContext}`;
   const previewFatLossPlan = pendingProposal?.plan?.generatedFatLossPlan;
   if (previewRacePlan) {
     previewKind = 'race';
-    previewPages = previewRacePlan.weeklyPlan.map(week => week.days.map(d => ({
-      date: d.date,
-      typeLabel: RACE_TYPE_LABEL[d.runType],
-      typeDotClass: RACE_TYPE_DOT[d.runType],
-      note: d.note,
-      keyNumber: d.targetDistanceKm != null
-        ? `${d.targetDistanceKm}km${d.targetPaceMinPerKm != null ? ` · ${d.targetPaceMinPerKm.toFixed(2)}/km` : ''}`
-        : '',
-    })));
+    const splitLookupPlan = { weeklyPlan: previewRacePlan.weeklyPlan, gymSplitPattern: pendingProposal?.plan?.gymSplitPattern ?? null } as RacePlan;
+    previewPages = previewRacePlan.weeklyPlan.map(week => week.days.map(d => {
+      if (d.runType === 'gym') {
+        const split = getGymSplitForDate(splitLookupPlan, d.date);
+        return { date: d.date, typeLabel: split ? `Gym : ${split}` : RACE_TYPE_LABEL.gym, typeDotClass: RACE_TYPE_DOT.gym, note: '', keyNumber: '' };
+      }
+      if (d.runType === 'rest') {
+        return { date: d.date, typeLabel: RACE_TYPE_LABEL.rest, typeDotClass: RACE_TYPE_DOT.rest, note: '', keyNumber: '' };
+      }
+      return {
+        date: d.date,
+        typeLabel: RACE_TYPE_LABEL[d.runType],
+        typeDotClass: RACE_TYPE_DOT[d.runType],
+        note: d.note,
+        keyNumber: d.targetDistanceKm != null
+          ? `${d.targetDistanceKm}km${d.targetPaceMinPerKm != null ? ` · ${d.targetPaceMinPerKm.toFixed(2)}/km` : ''}`
+          : '',
+      };
+    }));
   } else if (previewFatLossPlan) {
     previewKind = 'fat_loss';
     previewPages = chunkFatLossWeeklyPlan(previewFatLossPlan.weeklyPlan).map(week => week.map(d => ({

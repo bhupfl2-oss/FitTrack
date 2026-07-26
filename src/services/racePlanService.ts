@@ -10,9 +10,9 @@ import type { EffortType } from '@/pages/RunningSession';
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type RaceType = '5k' | '10k' | 'half_marathon' | 'full_marathon' | 'custom';
-// Superset of EffortType: 'rest' and 'race' are plan-day states, not loggable
-// training efforts, so they're not part of EffortType itself.
-export type RunType = EffortType | 'rest' | 'race';
+// Superset of EffortType: 'rest', 'race', and 'gym' are plan-day states, not
+// loggable training efforts, so they're not part of EffortType itself.
+export type RunType = EffortType | 'rest' | 'race' | 'gym';
 export type RacePlanStatus = 'active' | 'completed' | 'abandoned';
 export type RacePlanSource = 'profile' | 'ai_coach' | 'runner_tab';
 
@@ -134,6 +134,7 @@ export interface GenerateRacePlanDraftInput {
   targetFinishTime?: string; // e.g. "1:59:00" or "22:30"
   customDistanceKm?: number; // required when raceType === 'custom'
   gymSplitPattern?: string[] | null;
+  daySplit?: { run: number; gym: number; rest: number } | null;
 }
 
 export interface GeneratedRacePlan {
@@ -160,7 +161,7 @@ export async function generateRacePlanDraft(
   input: GenerateRacePlanDraftInput,
   feedback?: string
 ): Promise<GeneratedRacePlan> {
-  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern } = input;
+  const { raceType, raceName, raceDate, targetFinishTime, customDistanceKm, gymSplitPattern, daySplit } = input;
   const startDate = todayStr();
 
   if (raceDate <= startDate) {
@@ -257,16 +258,23 @@ export async function generateRacePlanDraft(
 Consider:
 - Build volume gradually (10% rule), taper in the final 1-2 weeks before the race
 - Mix recovery runs, one tempo run/week, one long run/week, rest days, and a race day on the final date. Use intervals sparingly for speed work if appropriate for the runner's level
+- "gym" is a valid runType for days reserved for strength training — it is not a run day and not a rest day
+- If a DAY SPLIT is given below, it overrides the general run/rest mix guidance above: hit the exact counts specified
 - If a GOAL PACE is provided below, calibrate every day's targetPaceMinPerKm relative to it: race day should be at (or very close to) the goal pace, tempo runs moderately faster than easy pace and close to the goal pace, easy and long runs meaningfully slower than goal pace (roughly 45-90 sec/km slower) — let recent running history refine these paces, but the goal pace is the anchor, not history alone
 - If no GOAL PACE is provided, base target distances/paces on the runner's actual recent running history when available, otherwise use sensible beginner-safe defaults for the race distance
 - Keep notes short (max 12 words), specific, and encouraging
 
 Return ONLY valid JSON, no markdown, no explanation, matching this exact shape:
-{"days":[{"weekNumber":1,"dayIndex":0,"runType":"recovery|tempo|long_run|intervals|rest|race","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
+{"days":[{"weekNumber":1,"dayIndex":0,"runType":"recovery|tempo|long_run|intervals|rest|race|gym","targetDistanceKm":number|null,"targetPaceMinPerKm":number|null,"note":"short note"}],"aiSummary":"max 25 words describing the plan's overall approach"}
 The "days" array must include exactly one entry for every (weekNumber, dayIndex) pair given in DAY SKELETON below — no more, no fewer.`;
+  const splitStr = daySplit
+    ? `This week must contain exactly ${daySplit.run} run-type day(s) (recovery/tempo/long_run/intervals/race), exactly ${daySplit.gym} day(s) with runType "gym", and exactly ${daySplit.rest} day(s) with runType "rest" — every 7-day week except the final partial week before the race, which should keep the same ratio proportionally and always mark the actual race date as "race" regardless of the ratio.`
+    : 'No day-split specified — use sensible defaults (mostly rest/recovery mix, no gym days).';
   const userContent = `RACE: ${raceName} (${raceType}, ${raceDistanceKm}km) on ${raceDate}${targetPaceMinPerKm != null ? `\nGOAL PACE: ${targetPaceMinPerKm.toFixed(2)} min/km (target finish time ${finalTargetFinishTime})` : ''}
 TODAY: ${startDate}
 TOTAL WEEKS: ${totalWeeks}
+
+DAY SPLIT: ${splitStr}
 
 RUNNER PROFILE:
 ${profileStr}
@@ -345,12 +353,13 @@ Build the training plan.`;
 
   // ── Step 5b: overwrite notes on gym-split days ───────────────────────────
   // The AI wrote every note above with no knowledge of gymSplitPattern — it
-  // can't know which rest day becomes "Push" vs "Pull" at write time, since
-  // that label depends on the AI's own rest-day choices in this same
+  // can't know which "gym" day becomes "Push" vs "Pull" at write time, since
+  // that label depends on the AI's own gym-day placement in this same
   // response. Rather than asking the AI to predict that, resolve the same
   // ordinal gym-split label the UI shows later (getGymSplitForDate, below)
   // and overwrite just those days' notes, so the confirm-card recap and the
-  // saved plan always agree with what's displayed.
+  // saved plan always agree with what's displayed. getGymSplitForDate only
+  // matches runType === 'gym', so true 'rest' days are never touched here.
   if (gymSplitPattern && gymSplitPattern.length > 0) {
     // getGymSplitForDate only reads weeklyPlan + gymSplitPattern off the plan
     // object — this minimal shape stands in for a full RacePlan since no id/
@@ -452,8 +461,8 @@ export function getWeekEntryByNumber(plan: RacePlan, weekNumber: number): Weekly
 }
 
 // Unlike GoalPlan's gym split (evenly-spaced weekday slots — see goalPlansService.ts),
-// a race week's rest days aren't evenly spaced; they're wherever the AI-generated
-// schedule put runType === 'rest' that week. So this counts rest days fresh from
+// a race week's gym days aren't evenly spaced; they're wherever the AI-generated
+// schedule put runType === 'gym' that week. So this counts gym days fresh from
 // that week's actual days each call, rather than deriving slots.
 export function getGymSplitForDate(plan: RacePlan, date: string): string | null {
   const pattern = plan.gymSplitPattern;
@@ -463,9 +472,9 @@ export function getGymSplitForDate(plan: RacePlan, date: string): string | null 
   if (!week) return null;
 
   const day = week.days.find(d => d.date === date);
-  if (!day || day.runType !== 'rest') return null;
+  if (!day || day.runType !== 'gym') return null;
 
-  const ordinal = week.days.filter(d => d.runType === 'rest').findIndex(d => d.date === date);
+  const ordinal = week.days.filter(d => d.runType === 'gym').findIndex(d => d.date === date);
   return pattern[ordinal % pattern.length];
 }
 
@@ -480,7 +489,7 @@ export function computeAdherence(plan: RacePlan, workoutSessions: any[]): Adhere
     workoutSessions.filter(s => s.type === 'running' && s.date).map(s => s.date)
   );
 
-  const planned = week.days.filter(d => d.runType !== 'rest');
+  const planned = week.days.filter(d => d.runType !== 'rest' && d.runType !== 'gym');
   const completed = planned.filter(d => ranOnDate.has(d.date)).length;
 
   return { completed, total: planned.length, weekNumber: week.weekNumber };

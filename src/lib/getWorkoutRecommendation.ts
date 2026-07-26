@@ -198,6 +198,7 @@ export const RUN_TYPE_META: Record<RunType, { title: string; emoji: string }> = 
   intervals: { title: 'Intervals', emoji: '🔁' },
   race: { title: 'Race Day', emoji: '🏁' },
   rest: { title: 'Rest Day', emoji: '😴' },
+  gym: { title: 'Gym Day', emoji: '🏋️' },
 };
 
 function planDayToRecommendation(day: PlanDay): WorkoutRecommendation {
@@ -381,8 +382,9 @@ export function getPlanCoveredPick(
   // a "rest" day here — fatLossDayToPlanDay already overlays gymSplitPattern
   // onto both for the week strip (see that function's comment), so Today's
   // Pick must resolve a gym-split label the same way to avoid disagreeing
-  // with the week strip on the same date.
-  if (base.type === 'rest' || base.type === 'strength') {
+  // with the week strip on the same date. A race-plan "gym" day is the same
+  // case for race plans specifically — see getGymSplitForDate's runType==='gym' gate.
+  if (base.type === 'rest' || base.type === 'strength' || base.type === 'gym') {
     let gymSplitLabel: string | null = null;
     if (racePlan) {
       gymSplitLabel = getGymSplitForDate(racePlan, date);
